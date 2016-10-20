@@ -9,6 +9,7 @@
   - Git 1.8+
   - Bash
 
+
 2.  Get the CockroachDB code:
 
 	```bash
