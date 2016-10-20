@@ -5,6 +5,7 @@
 
 ## A Scalable, Survivable, Strongly-Consistent SQL Database
 
+
 - [What is CockroachDB?](#what-is-cockroachdb)
 - [Docs](#docs)
 - [Quickstart](#quickstart)
