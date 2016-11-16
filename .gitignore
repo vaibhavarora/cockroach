@@ -21,4 +21,4 @@
 # Various `sed -i~` invocations in our scripts.
 *~
 
-.benchmark/benchmark
+benchmark/benchmark
