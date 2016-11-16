@@ -50,6 +50,7 @@ var initialSystemBalance int
 type measurement struct {
 	read, write, total int64
 	retries            int32
+	//aborts             int32
 }
 
 func transfersComplete() bool {
@@ -82,12 +83,16 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 
 		if err := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
 			attempts++
+
 			if attempts > 1 {
+				//log.Printf("retry attempt %d for tnx %v", attempts, tx)
 				atomic.AddInt32(&aggr.retries, 1)
 			}
 			startRead := time.Now()
 			rows, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1, $2)`, from, to)
 			if err != nil {
+				//log.Printf("read error %v , tnx %v", err, tx)
+				//atomic.AddInt32(&aggr.aborts, 1)
 				return err
 			}
 			readDuration = time.Since(startRead)
@@ -109,30 +114,37 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 			if fromBalance < amount {
 				return nil
 			}
-			insert := `INSERT INTO transaction (id, txn_ref) VALUES ($1, $2);`
-			txnID := atomic.AddInt32(&txnCount, 1)
-			_, err = tx.Exec(insert, txnID, fmt.Sprintf("txn %d", txnID))
-			if err != nil {
-				return err
-			}
-			insert = `INSERT INTO transaction_leg (account_id, amount, running_balance, txn_id) VALUES ($1, $2, $3, $4);`
-			if _, err = tx.Exec(insert, from, -amount, fromBalance-amount, txnID); err != nil {
-				return err
-			}
-			if _, err = tx.Exec(insert, to, amount, toBalance+amount, txnID); err != nil {
-				return err
-			}
+			/*
+				insert := `INSERT INTO transaction (id, txn_ref) VALUES ($1, $2);`
+				txnID := atomic.AddInt32(&txnCount, 1)
+				_, err = tx.Exec(insert, txnID, fmt.Sprintf("txn %d", txnID))
+				if err != nil {
+					return err
+				}
+				insert = `INSERT INTO transaction_leg (account_id, amount, running_balance, txn_id) VALUES ($1, $2, $3, $4);`
+				if _, err = tx.Exec(insert, from, -amount, fromBalance-amount, txnID); err != nil {
+					return err
+				}
+				if _, err = tx.Exec(insert, to, amount, toBalance+amount, txnID); err != nil {
+					return err
+				}
+			*/
 			update := `UPDATE account SET balance = $1 WHERE id = $2;`
 			if _, err = tx.Exec(update, toBalance+amount, to); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
 				return err
 			}
 			if _, err = tx.Exec(update, fromBalance-amount, from); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
 				return err
 			}
 			writeDuration = time.Since(startWrite)
 			return nil
 		}); err != nil {
 			log.Printf("failed transaction: %v", err)
+
 			continue
 		}
 		atomic.AddInt32(&successCount, 1)
@@ -252,6 +264,7 @@ TRUNCATE TABLE transaction_leg;
 
 	start := time.Now()
 	lastTime := start
+	lastretries := time.Duration(0)
 	for range time.NewTicker(*balanceCheckInterval).C {
 		now := time.Now()
 		elapsed := now.Sub(lastTime)
@@ -265,9 +278,16 @@ TRUNCATE TABLE transaction_leg;
 		read := time.Duration(atomic.LoadInt64(&aggr.read))
 		write := time.Duration(atomic.LoadInt64(&aggr.write))
 		total := time.Duration(atomic.LoadInt64(&aggr.total))
+		//aborts := time.Duration(atomic.LoadInt32(&aggr.aborts))
 		retries := time.Duration(atomic.LoadInt32(&aggr.retries))
-		log.Printf("averages: read: %v, write: %v, txn: %v, retries: %d",
-			read/d, write/d, total/d, retries/d)
+		log.Printf("Average time taken for read: %v", read/d)
+		log.Printf("Average time taken for write: %v", write/d)
+		log.Printf("Average time taken for a transaction: %v", total/d)
+		log.Printf("Retries / succesful Transactions in last %v = %d / %d", elapsed.Seconds(), (retries - lastretries), newSuccesses)
+		log.Printf("Total Retries / Total Succesful Transactions = %d / %d ", retries, successes)
+
+		lastretries = retries
+
 		verifyTotalBalance(db)
 		if transfersComplete() {
 			break
