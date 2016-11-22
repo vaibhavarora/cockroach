@@ -21,10 +21,14 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"github.com/cockroachdb/cockroach/benchmark/dynamicConcurrencyServer/shared"
 	"log"
 	"math/rand"
+	"net/rpc"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -42,10 +46,15 @@ var numAccounts = flag.Int("num-accounts", 100, "Number of accounts.")
 var concurrency = flag.Int("concurrency", 16, "Number of concurrent actors moving money.")
 var contention = flag.String("contention", "low", "Contention model {low | high}.")
 var balanceCheckInterval = flag.Duration("balance-check-interval", time.Second, "Interval of balance check.")
+var contentionratio = flag.String("contention-ratio", "50:50", "AccountPercentage:Contention percentage")
+var reportConcurrency = flag.Bool("report-concurrency", false, "{ true | false }")
 
 var txnCount int32
 var successCount int32
 var initialSystemBalance int
+
+var contentionAccounts int
+var contentionPercentage int
 
 type measurement struct {
 	read, write, total int64
@@ -57,13 +66,32 @@ func transfersComplete() bool {
 	return *numTransfers > 0 && atomic.LoadInt32(&successCount) >= int32(*numTransfers)
 }
 
+func random(min, max int) int {
+	return rand.Intn(max-min) + min
+}
+
+func getAccount(count *int) int {
+	if *count == 10 {
+		*count = 0
+	}
+	(*count)++
+	if *count <= contentionPercentage {
+		return random(0, contentionAccounts)
+	} else {
+		return random(contentionAccounts, *numAccounts)
+	}
+}
+
 func moveMoney(db *sql.DB, aggr *measurement) {
 	useSystemAccount := *contention == "high"
-
+	count := 0
 	for !transfersComplete() {
 		var readDuration, writeDuration time.Duration
 		var fromBalance, toBalance int
-		from, to := rand.Intn(*numAccounts)+1, rand.Intn(*numAccounts)+1
+		from := getAccount(&count)
+		to := getAccount(&count)
+		//from, to := rand.Intn(*numAccounts)+1, rand.Intn(*numAccounts)+1
+		//log.Printf("from %v to %v", from, to)
 		if from == to {
 			continue
 		}
@@ -256,6 +284,20 @@ TRUNCATE TABLE transaction_leg;
 
 	verifyTotalBalance(db)
 
+	contentioninfo := strings.Split(*contentionratio, ":")
+	accountpercent, err := strconv.Atoi(contentioninfo[0])
+
+	if err != nil {
+		log.Fatal(err)
+	}
+	contentionAccounts = int((float64(accountpercent) / 100) * float64(*numAccounts))
+
+	contentionPer, err := strconv.Atoi(contentioninfo[1])
+	if err != nil {
+		log.Fatal(err)
+	}
+	contentionPercentage = contentionPer / 10
+
 	var aggr measurement
 	var lastSuccesses int32
 	for i := 0; i < *concurrency; i++ {
@@ -265,13 +307,16 @@ TRUNCATE TABLE transaction_leg;
 	start := time.Now()
 	lastTime := start
 	lastretries := time.Duration(0)
+	totaltime := time.Duration(0)
 	for range time.NewTicker(*balanceCheckInterval).C {
 		now := time.Now()
 		elapsed := now.Sub(lastTime)
 		lastTime = now
+		totaltime += elapsed
 		successes := atomic.LoadInt32(&successCount)
 		newSuccesses := (successes - lastSuccesses)
-		log.Printf("%d transfers were executed at %.1f/s", newSuccesses, float64(newSuccesses)/elapsed.Seconds())
+		log.Printf("%d transfers were executed in last 1 s", newSuccesses)
+		log.Printf("Average rate of transactions %.1f/s", float64(successes)/totaltime.Seconds())
 		lastSuccesses = successes
 
 		d := time.Duration(successes)
@@ -295,4 +340,18 @@ TRUNCATE TABLE transaction_leg;
 	}
 	log.Printf("completed %d transfers in %s with %d retries", atomic.LoadInt32(&successCount),
 		time.Since(start), atomic.LoadInt32(&aggr.retries))
+
+	if *reportConcurrency {
+		client, err := rpc.Dial("tcp", "localhost:42586")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		stat := &shared.Data{*concurrency, int(atomic.LoadInt32(&successCount)), int(atomic.LoadInt32(&aggr.retries)), float64(atomic.LoadInt32(&successCount)) / totaltime.Seconds()}
+		var reply bool
+		err = client.Call("Listener.CollectStats", stat, &reply)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 }
