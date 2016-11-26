@@ -199,6 +199,7 @@ func main() {
 	flag.Parse()
 
 	dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
+	//dbURL := "postgresql://root@pacific:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
 		dbURL = flag.Arg(0)
@@ -243,7 +244,7 @@ CREATE TABLE IF NOT EXISTS account (
 	balance := -1
 	err = db.QueryRow("select balance from account where id = $1", 1).Scan(&balance)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Emtpy table")
 	}
 	if balance != -1 {
 		log.Printf("There are entries in table")
