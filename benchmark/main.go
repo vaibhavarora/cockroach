@@ -48,6 +48,7 @@ var contention = flag.String("contention", "low", "Contention model {low | high}
 var balanceCheckInterval = flag.Duration("balance-check-interval", time.Second, "Interval of balance check.")
 var contentionratio = flag.String("contention-ratio", "50:50", "AccountPercentage:Contention percentage")
 var reportConcurrency = flag.Bool("report-concurrency", false, "{ true | false }")
+var clearentries = flag.Bool("new-entries", false, "{ true | false }")
 
 var txnCount int32
 var successCount int32
@@ -57,8 +58,8 @@ var contentionAccounts int
 var contentionPercentage int
 
 type measurement struct {
-	read, write, total int64
-	retries            int32
+	read, write, total, totalWithRetries, commit int64
+	retries                                      int32
 	//aborts             int32
 }
 
@@ -70,12 +71,10 @@ func random(min, max int) int {
 	return rand.Intn(max-min) + min
 }
 
-func getAccount(count *int) int {
-	if *count == 10 {
-		*count = 0
-	}
-	(*count)++
-	if *count <= contentionPercentage {
+func getAccount() int {
+
+	dice := random(1, 100)
+	if dice <= contentionPercentage {
 		return random(0, contentionAccounts)
 	} else {
 		return random(contentionAccounts, *numAccounts)
@@ -84,12 +83,11 @@ func getAccount(count *int) int {
 
 func moveMoney(db *sql.DB, aggr *measurement) {
 	useSystemAccount := *contention == "high"
-	count := 0
 	for !transfersComplete() {
 		var readDuration, writeDuration time.Duration
 		var fromBalance, toBalance int
-		from := getAccount(&count)
-		to := getAccount(&count)
+		from := getAccount()
+		to := getAccount()
 		//from, to := rand.Intn(*numAccounts)+1, rand.Intn(*numAccounts)+1
 		//log.Printf("from %v to %v", from, to)
 		if from == to {
@@ -107,15 +105,19 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 		}
 		amount := rand.Intn(*maxTransfer)
 		start := time.Now()
+		startTransaction := time.Now()
 		attempts := 0
+		var commitDuration int64
 
-		if err := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
+		if err, committimetaken := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
 			attempts++
 
 			if attempts > 1 {
 				//log.Printf("retry attempt %d for tnx %v", attempts, tx)
 				atomic.AddInt32(&aggr.retries, 1)
+				startTransaction = time.Now()
 			}
+
 			startRead := time.Now()
 			rows, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1, $2)`, from, to)
 			if err != nil {
@@ -127,6 +129,7 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 			for rows.Next() {
 				var id, balance int
 				if err = rows.Scan(&id, &balance); err != nil {
+					log.Printf("here is th error")
 					log.Fatal(err)
 				}
 				switch id {
@@ -142,21 +145,7 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 			if fromBalance < amount {
 				return nil
 			}
-			/*
-				insert := `INSERT INTO transaction (id, txn_ref) VALUES ($1, $2);`
-				txnID := atomic.AddInt32(&txnCount, 1)
-				_, err = tx.Exec(insert, txnID, fmt.Sprintf("txn %d", txnID))
-				if err != nil {
-					return err
-				}
-				insert = `INSERT INTO transaction_leg (account_id, amount, running_balance, txn_id) VALUES ($1, $2, $3, $4);`
-				if _, err = tx.Exec(insert, from, -amount, fromBalance-amount, txnID); err != nil {
-					return err
-				}
-				if _, err = tx.Exec(insert, to, amount, toBalance+amount, txnID); err != nil {
-					return err
-				}
-			*/
+
 			update := `UPDATE account SET balance = $1 WHERE id = $2;`
 			if _, err = tx.Exec(update, toBalance+amount, to); err != nil {
 				//atomic.AddInt32(&aggr.aborts, 1)
@@ -174,12 +163,16 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 			log.Printf("failed transaction: %v", err)
 
 			continue
+		} else {
+			atomic.AddInt64(&commitDuration, committimetaken)
 		}
 		atomic.AddInt32(&successCount, 1)
 		if fromBalance >= amount {
 			atomic.AddInt64(&aggr.read, readDuration.Nanoseconds())
 			atomic.AddInt64(&aggr.write, writeDuration.Nanoseconds())
-			atomic.AddInt64(&aggr.total, time.Since(start).Nanoseconds())
+			atomic.AddInt64(&aggr.commit, commitDuration)
+			atomic.AddInt64(&aggr.totalWithRetries, time.Since(start).Nanoseconds())
+			atomic.AddInt64(&aggr.total, time.Since(startTransaction).Nanoseconds())
 		}
 	}
 }
@@ -206,6 +199,7 @@ func main() {
 	flag.Parse()
 
 	dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
+	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
 		dbURL = flag.Arg(0)
 	}
@@ -220,12 +214,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("connected to db")
 	defer func() { _ = db.Close() }()
 
 	if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS bank2"); err != nil {
 		log.Fatal(err)
 	}
-
+	log.Printf("database created")
 	// concurrency + 1, for this thread and the "concurrency" number of
 	// goroutines that move money
 	db.SetMaxOpenConns(*concurrency + 1)
@@ -235,55 +230,53 @@ func main() {
 CREATE TABLE IF NOT EXISTS account (
   id INT,
   balance INT NOT NULL,
-  name STRING,
-
-  PRIMARY KEY (id),
-  UNIQUE INDEX byName (name)
-);
-
-CREATE TABLE IF NOT EXISTS transaction (
-  id INT,
-  booking_date TIMESTAMP DEFAULT NOW(),
-  txn_date TIMESTAMP DEFAULT NOW(),
-  txn_ref STRING,
-
-  PRIMARY KEY (id),
-  UNIQUE INDEX byTxnRef (txn_ref)
-);
-
-CREATE TABLE IF NOT EXISTS transaction_leg (
-  id BYTES DEFAULT uuid_v4(),
-  account_id INT,
-  amount INT NOT NULL,
-  running_balance INT NOT NULL,
-  txn_id INT,
-
+  
   PRIMARY KEY (id)
-);
+); 
 
-TRUNCATE TABLE account;
-TRUNCATE TABLE transaction;
-TRUNCATE TABLE transaction_leg;
 `); err != nil {
 		log.Fatal(err)
 	}
-
-	insertSQL := "INSERT INTO account (id, balance, name) VALUES ($1, $2, $3)"
-
-	// Insert initialSystemBalance into the system account.
-	initialSystemBalance = *numAccounts * initialBalance
-	if _, err = db.Exec(insertSQL, systemAccountID, initialSystemBalance, "system account"); err != nil {
+	log.Printf("table created")
+	EntriesExists := false
+	// Check if the entries in table exists
+	balance := -1
+	err = db.QueryRow("select balance from account where id = $1", 1).Scan(&balance)
+	if err != nil {
 		log.Fatal(err)
 	}
-	// Insert initialBalance into all user accounts.
-	for i := 1; i <= *numAccounts; i++ {
-		if _, err = db.Exec(insertSQL, i, initialBalance, fmt.Sprintf("account %d", i)); err != nil {
+	if balance != -1 {
+		log.Printf("There are entries in table")
+		EntriesExists = true
+	}
+	log.Printf("check for table entries done")
+	if *clearentries {
+		log.Printf("clearing db")
+		if _, err = db.Exec("TRUNCATE TABLE account"); err != nil {
 			log.Fatal(err)
 		}
+		EntriesExists = false
+	}
+
+	if EntriesExists == false {
+		log.Printf("Inserting entries")
+		insertSQL := "INSERT INTO account (id, balance) VALUES ($1, $2)"
+
+		// Insert initialSystemBalance into the system account.
+		initialSystemBalance = *numAccounts * initialBalance
+		if _, err = db.Exec(insertSQL, systemAccountID, initialSystemBalance); err != nil {
+			log.Fatal(err)
+		}
+		// Insert initialBalance into all user accounts.
+		for i := 1; i <= *numAccounts; i++ {
+			if _, err = db.Exec(insertSQL, i, initialBalance); err != nil {
+				log.Fatal(err)
+			}
+		}
+
 	}
 
 	verifyTotalBalance(db)
-
 	contentioninfo := strings.Split(*contentionratio, ":")
 	accountpercent, err := strconv.Atoi(contentioninfo[0])
 
@@ -296,7 +289,7 @@ TRUNCATE TABLE transaction_leg;
 	if err != nil {
 		log.Fatal(err)
 	}
-	contentionPercentage = contentionPer / 10
+	contentionPercentage = contentionPer
 
 	var aggr measurement
 	var lastSuccesses int32
@@ -322,12 +315,16 @@ TRUNCATE TABLE transaction_leg;
 		d := time.Duration(successes)
 		read := time.Duration(atomic.LoadInt64(&aggr.read))
 		write := time.Duration(atomic.LoadInt64(&aggr.write))
+		totalWithRetries := time.Duration(atomic.LoadInt64(&aggr.totalWithRetries))
 		total := time.Duration(atomic.LoadInt64(&aggr.total))
 		//aborts := time.Duration(atomic.LoadInt32(&aggr.aborts))
 		retries := time.Duration(atomic.LoadInt32(&aggr.retries))
+		commit := time.Duration(atomic.LoadInt64(&aggr.commit))
 		log.Printf("Average time taken for read: %v", read/d)
 		log.Printf("Average time taken for write: %v", write/d)
-		log.Printf("Average time taken for a transaction: %v", total/d)
+		log.Printf("Average time taken for commit: %v", commit/d)
+		log.Printf("Average time taken for a transaction(Including retries): %v", totalWithRetries/d)
+		log.Printf("Average time taken for a transaction(Excluding retries): %v", total/d)
 		log.Printf("Retries / succesful Transactions in last %v = %d / %d", elapsed.Seconds(), (retries - lastretries), newSuccesses)
 		log.Printf("Total Retries / Total Succesful Transactions = %d / %d ", retries, successes)
 

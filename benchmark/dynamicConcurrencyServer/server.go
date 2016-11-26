@@ -10,28 +10,30 @@ import (
 	"net/rpc"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 type data struct {
-	success, retries int
-	transactionrate  float64
+	Success, Retries int
+	Transactionrate  float64
 }
 
 type Listener int
 
-var maxconcurrency = flag.Int("max", 10, "Maximum concurrency level to test.")
+var maxconcurrency = flag.Int("max", 200, "Maximum concurrency level to test.")
 var concurrencystep = flag.Int("step", 2, "Incremental for concurrency")
 
-var stats = make(map[int][]data)
+var stats = make(map[int]data)
 var optimalConcurrency = 1
 var optimaltransactionrate float64
 
 func (l *Listener) CollectStats(info *shared.Data, ack *bool) error {
 	stat := data{info.Success, info.Retries, info.Transactionrate}
-	stats[info.Concurrency] = append(stats[info.Concurrency], stat)
+	stats[info.Concurrency] = stat
 
 	if info.Transactionrate > optimaltransactionrate {
 		optimaltransactionrate = info.Transactionrate
@@ -46,8 +48,8 @@ func callbenchmark() {
 	concurrency := 1
 	// everything is set to its default values as in main program
 	maxTransfer := 100
-	numTransfers := 1000
-	numAccounts := 500
+	numTransfers := 50000
+	numAccounts := 50000
 	contention := "low"
 	contentionratio := "50:50"
 	err := os.Chdir("../")
@@ -99,6 +101,15 @@ var usage = func() {
 func main() {
 	flag.Usage = usage
 	flag.Parse()
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigs
+		log.Printf("Optimal Cncurrency is %d where Transaction rate was %v, suucessful transactions were %d and retires were %d", optimalConcurrency, optimaltransactionrate, stats[optimalConcurrency].Success, stats[optimalConcurrency].Retries)
+		os.Exit(0)
+	}()
 
 	addy, err := net.ResolveTCPAddr("tcp", "0.0.0.0:42586")
 	if err != nil {
