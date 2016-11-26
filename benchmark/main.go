@@ -258,12 +258,13 @@ CREATE TABLE IF NOT EXISTS account (
 		EntriesExists = false
 	}
 
+	// Insert initialSystemBalance into the system account.
+	initialSystemBalance = *numAccounts * initialBalance
+
 	if EntriesExists == false {
 		log.Printf("Inserting entries")
 		insertSQL := "INSERT INTO account (id, balance) VALUES ($1, $2)"
 
-		// Insert initialSystemBalance into the system account.
-		initialSystemBalance = *numAccounts * initialBalance
 		if _, err = db.Exec(insertSQL, systemAccountID, initialSystemBalance); err != nil {
 			log.Fatal(err)
 		}
