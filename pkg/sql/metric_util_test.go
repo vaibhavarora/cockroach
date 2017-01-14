@@ -19,21 +19,31 @@
 package sql_test
 
 import (
-	"testing"
-
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/pkg/errors"
 )
 
-func checkCounterEQ(t *testing.T, s serverutils.TestServerInterface, meta metric.Metadata, e int64) {
-	if a := s.MustGetSQLCounter(meta.Name); a != e {
-		t.Error(errors.Errorf("stat %s: actual %d != expected %d", meta.Name, a, e))
+func checkCounterDelta(
+	s serverutils.TestServerInterface, meta metric.Metadata, init, delta int64,
+) (int64, error) {
+	actual := s.MustGetSQLCounter(meta.Name)
+	if actual != (init + delta) {
+		return actual, errors.Errorf("query %s: actual %d != (init %d + delta %d)",
+			meta.Name, actual, init, delta)
 	}
+	return actual, nil
 }
 
-func checkCounterGE(t *testing.T, s serverutils.TestServerInterface, meta metric.Metadata, e int64) {
+func checkCounterEQ(s serverutils.TestServerInterface, meta metric.Metadata, e int64) error {
+	_, err := checkCounterDelta(s, meta, 0, e)
+	return err
+}
+
+func checkCounterGE(s serverutils.TestServerInterface, meta metric.Metadata, e int64) error {
 	if a := s.MustGetSQLCounter(meta.Name); a < e {
-		t.Error(errors.Errorf("stat %s: expected: actual %d >= %d", meta.Name, a, e))
+		return errors.Errorf("stat %s: expected: actual %d >= %d",
+			meta.Name, a, e)
 	}
+	return nil
 }

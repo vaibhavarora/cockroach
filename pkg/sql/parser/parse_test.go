@@ -49,10 +49,25 @@ func TestParse(t *testing.T) {
 		{"SAVEPOINT foo"},
 
 		{`CREATE DATABASE a`},
-		{`CREATE DATABASE a ENCODING='UTF8'`},
+		{`CREATE DATABASE a TEMPLATE = template0`},
+		{`CREATE DATABASE a TEMPLATE = invalid`},
+		{`CREATE DATABASE a ENCODING = 'UTF8'`},
+		{`CREATE DATABASE a ENCODING = 'INVALID'`},
+		{`CREATE DATABASE a LC_COLLATE = 'C.UTF-8'`},
+		{`CREATE DATABASE a LC_COLLATE = 'INVALID'`},
+		{`CREATE DATABASE a LC_CTYPE = 'C.UTF-8'`},
+		{`CREATE DATABASE a LC_CTYPE = 'INVALID'`},
+		{`CREATE DATABASE a TEMPLATE = template0 ENCODING = 'UTF8' LC_COLLATE = 'C.UTF-8' LC_CTYPE = 'INVALID'`},
 		{`CREATE DATABASE IF NOT EXISTS a`},
-		{`CREATE DATABASE IF NOT EXISTS a ENCODING='UTF8'`},
-		{`CREATE DATABASE IF NOT EXISTS a ENCODING='INVALID'`},
+		{`CREATE DATABASE IF NOT EXISTS a TEMPLATE = template0`},
+		{`CREATE DATABASE IF NOT EXISTS a TEMPLATE = invalid`},
+		{`CREATE DATABASE IF NOT EXISTS a ENCODING = 'UTF8'`},
+		{`CREATE DATABASE IF NOT EXISTS a ENCODING = 'INVALID'`},
+		{`CREATE DATABASE IF NOT EXISTS a LC_COLLATE = 'C.UTF-8'`},
+		{`CREATE DATABASE IF NOT EXISTS a LC_COLLATE = 'INVALID'`},
+		{`CREATE DATABASE IF NOT EXISTS a LC_CTYPE = 'C.UTF-8'`},
+		{`CREATE DATABASE IF NOT EXISTS a LC_CTYPE = 'INVALID'`},
+		{`CREATE DATABASE IF NOT EXISTS a TEMPLATE = template0 ENCODING = 'UTF8' LC_COLLATE = 'C.UTF-8' LC_CTYPE = 'INVALID'`},
 
 		{`CREATE INDEX a ON b (c)`},
 		{`CREATE INDEX a ON b.c (d)`},
@@ -166,6 +181,8 @@ func TestParse(t *testing.T) {
 		{`DROP TABLE a, b CASCADE`},
 		{`DROP TABLE IF EXISTS a CASCADE`},
 		{`DROP INDEX a.b@c`},
+		{`DROP INDEX a`},
+		{`DROP INDEX a.b`},
 		{`DROP INDEX IF EXISTS a.b@c`},
 		{`DROP INDEX a.b@c, d@f`},
 		{`DROP INDEX IF EXISTS a.b@c, d@f`},
@@ -184,6 +201,7 @@ func TestParse(t *testing.T) {
 		{`EXPLAIN EXPLAIN SELECT 1`},
 		{`EXPLAIN (DEBUG) SELECT 1`},
 		{`EXPLAIN (A, B, C) SELECT 1`},
+		{`SELECT * FROM [EXPLAIN SELECT 1]`},
 
 		{`HELP count`},
 		{`HELP VARCHAR`},
@@ -202,6 +220,7 @@ func TestParse(t *testing.T) {
 		{`SHOW CONSTRAINTS FROM a`},
 		{`SHOW CONSTRAINTS FROM a.b.c`},
 		{`SHOW TABLES FROM a; SHOW COLUMNS FROM b`},
+		{`SHOW USERS`},
 
 		// Tables are the default, but can also be specified with
 		// GRANT x ON TABLE y. However, the stringer does not output TABLE.
@@ -295,8 +314,12 @@ func TestParse(t *testing.T) {
 		{`SELECT true AND NULL`},
 		{`SELECT true = false`},
 		{`SELECT (true = false)`},
+		{`SELECT (ARRAY['a', 'b'])[2]`},
+		{`SELECT (ARRAY(VALUES (1), (2)))[1]`},
 		{`SELECT (SELECT 1)`},
 		{`SELECT ((SELECT 1))`},
+		{`SELECT (SELECT ARRAY['a', 'b'])[2]`},
+		{`SELECT ((SELECT ARRAY['a', 'b']))[2]`},
 		{`SELECT ((((VALUES (1)))))`},
 		{`SELECT EXISTS (SELECT 1)`},
 		{`SELECT (VALUES (1))`},
@@ -323,6 +346,9 @@ func TestParse(t *testing.T) {
 		{`SELECT a.b.* FROM t`},
 		{`SELECT a.b[1] FROM t`},
 		{`SELECT a.b[1 + 1:4][3] FROM t`},
+		{`SELECT a.b[:4][3] FROM t`},
+		{`SELECT a.b[1 + 1:][3] FROM t`},
+		{`SELECT a.b[:][3] FROM t`},
 		{`SELECT 'a' FROM t`},
 		{`SELECT 'a' FROM t@bar`},
 		{`SELECT 'a' FROM t@{NO_INDEX_JOIN}`},
@@ -364,10 +390,17 @@ func TestParse(t *testing.T) {
 		{`SELECT a FROM t AS bar`},
 		{`SELECT a FROM t AS bar (bar1)`},
 		{`SELECT a FROM t AS bar (bar1, bar2, bar3)`},
+		{`SELECT a FROM t WITH ORDINALITY`},
+		{`SELECT a FROM t WITH ORDINALITY AS bar`},
 		{`SELECT a FROM (SELECT 1 FROM t)`},
 		{`SELECT a FROM (SELECT 1 FROM t) AS bar`},
 		{`SELECT a FROM (SELECT 1 FROM t) AS bar (bar1)`},
 		{`SELECT a FROM (SELECT 1 FROM t) AS bar (bar1, bar2, bar3)`},
+		{`SELECT a FROM (SELECT 1 FROM t) WITH ORDINALITY`},
+		{`SELECT a FROM (SELECT 1 FROM t) WITH ORDINALITY AS bar`},
+		{`SELECT a FROM generate_series(1, 32)`},
+		{`SELECT a FROM generate_series(1, 32) AS s (x)`},
+		{`SELECT a FROM generate_series(1, 32) WITH ORDINALITY AS s (x)`},
 		{`SELECT a FROM t1, t2`},
 		{`SELECT a FROM t AS t1`},
 		{`SELECT a FROM t AS t1 (c1)`},
@@ -386,6 +419,9 @@ func TestParse(t *testing.T) {
 		{`SELECT a FROM t WHERE a IN (b, c)`},
 		{`SELECT a FROM t WHERE a IN (SELECT a FROM t)`},
 		{`SELECT a FROM t WHERE a NOT IN (b, c)`},
+		{`SELECT a FROM t WHERE a = ANY ARRAY[b, c]`},
+		{`SELECT a FROM t WHERE a != SOME ARRAY[b, c]`},
+		{`SELECT a FROM t WHERE a LIKE ALL ARRAY[b, c]`},
 		{`SELECT a FROM t WHERE a LIKE b`},
 		{`SELECT a FROM t WHERE a NOT LIKE b`},
 		{`SELECT a FROM t WHERE a ILIKE b`},
@@ -528,6 +564,7 @@ func TestParse(t *testing.T) {
 		{`ALTER TABLE a RENAME TO b`},
 		{`ALTER TABLE IF EXISTS a RENAME TO b`},
 		{`ALTER INDEX a@b RENAME TO b`},
+		{`ALTER INDEX b RENAME TO b`},
 		{`ALTER INDEX IF EXISTS a@b RENAME TO b`},
 		{`ALTER TABLE a RENAME COLUMN c1 TO c2`},
 		{`ALTER TABLE IF EXISTS a RENAME COLUMN c1 TO c2`},
@@ -572,6 +609,12 @@ func TestParse(t *testing.T) {
 		{`ALTER TABLE d.a SPLIT AT ('b', 2)`},
 		{`ALTER INDEX a@i SPLIT AT (1)`},
 		{`ALTER INDEX d.a@i SPLIT AT (2)`},
+		{`ALTER INDEX i SPLIT AT (1)`},
+		{`ALTER INDEX d.i SPLIT AT (2)`},
+
+		{`BACKUP DATABASE foo TO 'bar'`},
+		{`BACKUP DATABASE foo TO 'bar' INCREMENTAL FROM 'baz'`},
+		{`RESTORE DATABASE foo FROM 'bar'`},
 	}
 	for _, d := range testData {
 		stmts, err := parseTraditional(d.sql)
@@ -593,6 +636,8 @@ func TestParse2(t *testing.T) {
 		sql      string
 		expected string
 	}{
+		{`CREATE DATABASE a WITH ENCODING = 'foo'`,
+			`CREATE DATABASE a ENCODING = 'foo'`},
 		{`CREATE TABLE a (b INT, UNIQUE INDEX foo (b))`,
 			`CREATE TABLE a (b INT, CONSTRAINT foo UNIQUE (b))`},
 		{`CREATE TABLE a (b INT, UNIQUE INDEX foo (b) INTERLEAVE IN PARENT c (d))`,
@@ -668,19 +713,19 @@ func TestParse2(t *testing.T) {
 			`SELECT a FROM t1 RIGHT JOIN t2 ON a = b`},
 		// Some functions are nearly keywords.
 		{`SELECT CURRENT_TIMESTAMP`,
-			`SELECT "CURRENT_TIMESTAMP"()`},
+			`SELECT current_timestamp()`},
 		{`SELECT CURRENT_DATE`,
-			`SELECT "CURRENT_DATE"()`},
+			`SELECT current_date()`},
 		{`SELECT POSITION(a IN b)`,
-			`SELECT STRPOS(b, a)`},
+			`SELECT strpos(b, a)`},
 		{`SELECT TRIM(BOTH a FROM b)`,
-			`SELECT BTRIM(b, a)`},
+			`SELECT btrim(b, a)`},
 		{`SELECT TRIM(LEADING a FROM b)`,
-			`SELECT LTRIM(b, a)`},
+			`SELECT ltrim(b, a)`},
 		{`SELECT TRIM(TRAILING a FROM b)`,
-			`SELECT RTRIM(b, a)`},
+			`SELECT rtrim(b, a)`},
 		{`SELECT TRIM(a, b)`,
-			`SELECT BTRIM(a, b)`},
+			`SELECT btrim(a, b)`},
 		// Offset has an optional ROW/ROWS keyword.
 		{`SELECT a FROM t1 OFFSET a ROW`,
 			`SELECT a FROM t1 OFFSET a`},
@@ -703,8 +748,6 @@ func TestParse2(t *testing.T) {
 		// See #1957.
 		{`SELECT+y[array[]]`,
 			`SELECT + y[ARRAY[]]`},
-		{`SELECT(0)FROM y[array[]]`,
-			`SELECT (0) FROM y[ARRAY[]]`},
 		{`SELECT a FROM t UNION DISTINCT SELECT 1 FROM t`,
 			`SELECT a FROM t UNION SELECT 1 FROM t`},
 		{`SELECT a FROM t EXCEPT DISTINCT SELECT 1 FROM t`,
@@ -717,53 +760,55 @@ func TestParse2(t *testing.T) {
 			`SET TIME ZONE 'Europe/Rome'`},
 		{`SET TIME ZONE INTERVAL '-7h'`,
 			`SET TIME ZONE INTERVAL '-7h0m0s'`},
+		{`SET TIME ZONE INTERVAL '-7h0m5s' HOUR TO MINUTE`,
+			`SET TIME ZONE INTERVAL '-7h0m0s'`},
 		// Special substring syntax
 		{`SELECT SUBSTRING('RoacH' from 2 for 3)`,
-			`SELECT SUBSTRING('RoacH', 2, 3)`},
+			`SELECT substring('RoacH', 2, 3)`},
 		{`SELECT SUBSTRING('RoacH' for 2 from 3)`,
-			`SELECT SUBSTRING('RoacH', 3, 2)`},
+			`SELECT substring('RoacH', 3, 2)`},
 		{`SELECT SUBSTRING('RoacH' from 2)`,
-			`SELECT SUBSTRING('RoacH', 2)`},
+			`SELECT substring('RoacH', 2)`},
 		{`SELECT SUBSTRING('RoacH' for 3)`,
-			`SELECT SUBSTRING('RoacH', 1, 3)`},
+			`SELECT substring('RoacH', 1, 3)`},
 		{`SELECT SUBSTRING('f(oabaroob' from '\(o(.)b')`,
-			`SELECT SUBSTRING('f(oabaroob', e'\\(o(.)b')`},
+			`SELECT substring('f(oabaroob', e'\\(o(.)b')`},
 		{`SELECT SUBSTRING('f(oabaroob' from '+(o(.)b' for '+')`,
-			`SELECT SUBSTRING('f(oabaroob', '+(o(.)b', '+')`},
+			`SELECT substring('f(oabaroob', '+(o(.)b', '+')`},
 		// Special position syntax
 		{`SELECT POSITION('ig' in 'high')`,
-			`SELECT STRPOS('high', 'ig')`},
+			`SELECT strpos('high', 'ig')`},
 		// Special overlay syntax
 		{`SELECT OVERLAY('w33333rce' PLACING 'resou' FROM 3)`,
-			`SELECT OVERLAY('w33333rce', 'resou', 3)`},
+			`SELECT overlay('w33333rce', 'resou', 3)`},
 		{`SELECT OVERLAY('w33333rce' PLACING 'resou' FROM 3 FOR 5)`,
-			`SELECT OVERLAY('w33333rce', 'resou', 3, 5)`},
+			`SELECT overlay('w33333rce', 'resou', 3, 5)`},
 		// Special extract syntax
 		{`SELECT EXTRACT(second from now())`,
-			`SELECT EXTRACT('second', now())`},
+			`SELECT extract('second', now())`},
 		// Special trim syntax
 		{`SELECT TRIM('xy' from 'xyxtrimyyx')`,
-			`SELECT BTRIM('xyxtrimyyx', 'xy')`},
+			`SELECT btrim('xyxtrimyyx', 'xy')`},
 		{`SELECT TRIM(both 'xy' from 'xyxtrimyyx')`,
-			`SELECT BTRIM('xyxtrimyyx', 'xy')`},
+			`SELECT btrim('xyxtrimyyx', 'xy')`},
 		{`SELECT TRIM(from 'xyxtrimyyx')`,
-			`SELECT BTRIM('xyxtrimyyx')`},
+			`SELECT btrim('xyxtrimyyx')`},
 		{`SELECT TRIM(both 'xyxtrimyyx')`,
-			`SELECT BTRIM('xyxtrimyyx')`},
+			`SELECT btrim('xyxtrimyyx')`},
 		{`SELECT TRIM(both from 'xyxtrimyyx')`,
-			`SELECT BTRIM('xyxtrimyyx')`},
+			`SELECT btrim('xyxtrimyyx')`},
 		{`SELECT TRIM(leading 'xy' from 'xyxtrimyyx')`,
-			`SELECT LTRIM('xyxtrimyyx', 'xy')`},
+			`SELECT ltrim('xyxtrimyyx', 'xy')`},
 		{`SELECT TRIM(leading from 'xyxtrimyyx')`,
-			`SELECT LTRIM('xyxtrimyyx')`},
+			`SELECT ltrim('xyxtrimyyx')`},
 		{`SELECT TRIM(leading 'xyxtrimyyx')`,
-			`SELECT LTRIM('xyxtrimyyx')`},
+			`SELECT ltrim('xyxtrimyyx')`},
 		{`SELECT TRIM(trailing 'xy' from 'xyxtrimyyx')`,
-			`SELECT RTRIM('xyxtrimyyx', 'xy')`},
+			`SELECT rtrim('xyxtrimyyx', 'xy')`},
 		{`SELECT TRIM(trailing from 'xyxtrimyyx')`,
-			`SELECT RTRIM('xyxtrimyyx')`},
+			`SELECT rtrim('xyxtrimyyx')`},
 		{`SELECT TRIM(trailing 'xyxtrimyyx')`,
-			`SELECT RTRIM('xyxtrimyyx')`},
+			`SELECT rtrim('xyxtrimyyx')`},
 		{`SHOW INDEX FROM t`,
 			`SHOW INDEXES FROM t`},
 		{`SHOW CONSTRAINT FROM t`,
@@ -1037,29 +1082,6 @@ INSERT INTO a@b VALUES (1, 2)
 `,
 		},
 		{
-			`ALTER INDEX a RENAME TO b`,
-			`syntax error at or near "RENAME"
-ALTER INDEX a RENAME TO b
-              ^
-`,
-		},
-		{
-
-			`ALTER INDEX a IF EXISTS RENAME TO b`,
-			`syntax error at or near "IF"
-ALTER INDEX a IF EXISTS RENAME TO b
-              ^
-`,
-		},
-		{
-
-			`DROP INDEX a`,
-			`syntax error at or near "EOF"
-DROP INDEX a
-            ^
-`,
-		},
-		{
 			`ALTER TABLE t RENAME COLUMN x TO family`,
 			`syntax error at or near "family"
 ALTER TABLE t RENAME COLUMN x TO family
@@ -1078,6 +1100,83 @@ SELECT CAST(1.2+2.3 AS notatype)
 			`syntax error at or near "notatype"
 SELECT ANNOTATE_TYPE(1.2+2.3, notatype)
                               ^
+`,
+		},
+		{
+			`CREATE USER foo WITH PASSWORD`,
+			`syntax error at or near "EOF"
+CREATE USER foo WITH PASSWORD
+                             ^
+`,
+		},
+		{
+			`ALTER TABLE t RENAME TO t[TRUE]`,
+			`syntax error at or near "["
+ALTER TABLE t RENAME TO t[TRUE]
+                         ^
+`,
+		},
+		{
+			`SELECT (1 + 2).*`,
+			`syntax error at or near "."
+SELECT (1 + 2).*
+              ^
+`,
+		},
+		{
+			`TABLE abc[TRUE]`,
+			`syntax error at or near "["
+TABLE abc[TRUE]
+         ^
+`,
+		},
+		{
+			`UPDATE kv SET k[0] = 9`,
+			`syntax error at or near "["
+UPDATE kv SET k[0] = 9
+               ^
+`,
+		},
+		{
+			`SELECT (ARRAY['a', 'b', 'c']).name`,
+			`syntax error at or near "."
+SELECT (ARRAY['a', 'b', 'c']).name
+                             ^
+`,
+		},
+		{
+			`SELECT (0) FROM y[array[]]`,
+			`syntax error at or near "["
+SELECT (0) FROM y[array[]]
+                 ^
+`,
+		},
+		{
+			`INSERT INTO kv (k[0]) VALUES ('hello')`,
+			`syntax error at or near "["
+INSERT INTO kv (k[0]) VALUES ('hello')
+                 ^
+`,
+		},
+		{
+			`SELECT CASE 1 = 1 WHEN true THEN ARRAY[1, 2] ELSE ARRAY[2, 3] END[1]`,
+			`syntax error at or near "["
+SELECT CASE 1 = 1 WHEN true THEN ARRAY[1, 2] ELSE ARRAY[2, 3] END[1]
+                                                                 ^
+`,
+		},
+		{
+			`SELECT EXISTS(SELECT 1)[1]`,
+			`syntax error at or near "["
+SELECT EXISTS(SELECT 1)[1]
+                       ^
+`,
+		},
+		{
+			`SELECT 1 + ANY ARRAY[1, 2, 3]`,
+			`+ ANY <array> is invalid because "+" is not a boolean operator at or near "]"
+SELECT 1 + ANY ARRAY[1, 2, 3]
+                            ^
 `,
 		},
 	}
@@ -1314,28 +1413,43 @@ func testEncodeSQL(t *testing.T, encode func(*bytes.Buffer, string), forceUTF8 b
 			if forceUTF8 && !utf8.Valid(bytepair) {
 				continue
 			}
-			s := string(bytepair)
-			var buf bytes.Buffer
-			encode(&buf, s)
-			sql := fmt.Sprintf("SELECT %s", buf.String())
-			for n := 0; n < len(sql); n++ {
-				ch := sql[n]
-				if ch < 0x20 || ch >= 0x7F {
-					t.Fatalf("unprintable character: %v (%v, %v): %s %v", ch, i, j, sql, []byte(sql))
-				}
-			}
-			stmts, err := parseTraditional(sql)
-			if err != nil {
-				t.Fatalf("%s: expected success, but found %s", sql, err)
-			}
-			stmt := stmts.String()
+			stmt := testEncodeString(t, bytepair, encode)
 			if e, ok := seen[stmt]; ok {
 				t.Fatalf("duplicate entry: %s, from %v, currently at %v, %v", stmt, e, i, j)
 			}
 			seen[stmt] = entry{i, j}
-			if sql != stmt {
-				t.Fatalf("expected %s, but found %s", sql, stmt)
-			}
 		}
 	}
+}
+
+func TestEncodeSQLStringSpecial(t *testing.T) {
+	tests := [][]byte{
+		// UTF8 replacement character
+		{0xEF, 0xBF, 0xBD},
+	}
+	for _, tc := range tests {
+		testEncodeString(t, tc, encodeSQLString)
+	}
+}
+
+func testEncodeString(t *testing.T, input []byte, encode func(*bytes.Buffer, string)) string {
+	s := string(input)
+	var buf bytes.Buffer
+	encode(&buf, s)
+	sql := fmt.Sprintf("SELECT %s", buf.String())
+	for n := 0; n < len(sql); n++ {
+		ch := sql[n]
+		if ch < 0x20 || ch >= 0x7F {
+			t.Fatalf("unprintable character: %v (%v): %s %v", ch, input, sql, []byte(sql))
+		}
+	}
+	stmts, err := parseTraditional(sql)
+	if err != nil {
+		t.Fatalf("%s: expected success, but found %s", sql, err)
+	}
+	stmt := stmts.String()
+	if sql != stmt {
+		t.Fatalf("expected %s, but found %s", sql, stmt)
+	}
+	return stmt
 }

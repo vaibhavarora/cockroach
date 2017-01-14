@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -49,61 +50,95 @@ import (
 type cliTest struct {
 	*server.TestServer
 	certsDir    string
-	cleanupFunc func()
+	cleanupFunc func() error
+
+	// t is the testing.T instance used for this test.
+	// Example_xxx tests may have this set to nil.
+	t *testing.T
+	// logScope binds the lifetime of the log files to this test, when t
+	// is not nil
+	logScope log.TestLogScope
 }
 
-func (c cliTest) stop() {
-	c.cleanupFunc()
-	security.SetReadFileFn(securitytest.Asset)
-	c.Stopper().Stop()
-}
+func newCLITest(t *testing.T, insecure bool) (cliTest, error) {
+	c := cliTest{t: t}
 
-func newCLITest() cliTest {
+	certsDir, err := ioutil.TempDir("", "cli-test")
+	if err != nil {
+		return cliTest{}, err
+	}
+	c.certsDir = certsDir
+
 	// Reset the client context for each test. We don't reset the
 	// pointer (because they are tied into the flags), but instead
 	// overwrite the existing struct's values.
 	baseCfg.InitDefaults()
-	cliCtx.InitCLIDefaults()
+	InitCLIDefaults()
 
+	if t != nil {
+		c.logScope = log.Scope(t, "")
+	}
+
+	s, err := serverutils.StartServerRaw(base.TestServerArgs{Insecure: insecure})
+	if err != nil {
+		if t != nil {
+			c.logScope.Close(t)
+		}
+		return cliTest{}, err
+	}
+	c.TestServer = s.(*server.TestServer)
+
+	if insecure {
+		c.cleanupFunc = func() error { return nil }
+	} else {
+		// Copy these assets to disk from embedded strings, so this test can
+		// run from a standalone binary.
+		// Disable embedded certs, or the security library will try to load
+		// our real files as embedded assets.
+		security.ResetReadFileFn()
+
+		assets := []string{
+			filepath.Join(security.EmbeddedCertsDir, security.EmbeddedCACert),
+			filepath.Join(security.EmbeddedCertsDir, security.EmbeddedCAKey),
+			filepath.Join(security.EmbeddedCertsDir, security.EmbeddedNodeCert),
+			filepath.Join(security.EmbeddedCertsDir, security.EmbeddedNodeKey),
+			filepath.Join(security.EmbeddedCertsDir, security.EmbeddedRootCert),
+			filepath.Join(security.EmbeddedCertsDir, security.EmbeddedRootKey),
+		}
+
+		for _, a := range assets {
+			securitytest.RestrictedCopy(nil, a, certsDir, filepath.Base(a))
+		}
+
+		c.cleanupFunc = func() error {
+			security.SetReadFileFn(securitytest.Asset)
+			return os.RemoveAll(certsDir)
+		}
+	}
+
+	// Ensure that CLI error messages are logged to stdout, where they
+	// can be captured.
 	osStderr = os.Stdout
 
-	s, err := serverutils.StartServerRaw(base.TestServerArgs{})
-	if err != nil {
-		log.Fatalf(context.Background(), "Could not start server: %v", err)
+	return c, nil
+}
+
+// stop cleans up after the test.
+// It also stops the test server is runStopper is true.
+// The log files are removed if the test has succeeded.
+func (c cliTest) stop(runStopper bool) {
+	if c.t != nil {
+		defer c.logScope.Close(c.t)
 	}
 
-	tempDir, err := ioutil.TempDir("", "cli-test")
-	if err != nil {
-		log.Fatal(context.Background(), err)
+	// Restore stderr.
+	osStderr = os.Stderr
+
+	if runStopper {
+		c.Stopper().Stop()
 	}
-
-	// Copy these assets to disk from embedded strings, so this test can
-	// run from a standalone binary.
-	// Disable embedded certs, or the security library will try to load
-	// our real files as embedded assets.
-	security.ResetReadFileFn()
-
-	assets := []string{
-		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedCACert),
-		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedCAKey),
-		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedNodeCert),
-		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedNodeKey),
-		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedRootCert),
-		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedRootKey),
-	}
-
-	for _, a := range assets {
-		securitytest.RestrictedCopy(nil, a, tempDir, filepath.Base(a))
-	}
-
-	return cliTest{
-		TestServer: s.(*server.TestServer),
-		certsDir:   tempDir,
-		cleanupFunc: func() {
-			if err := os.RemoveAll(tempDir); err != nil {
-				log.Fatal(context.Background(), err)
-			}
-		},
+	if err := c.cleanupFunc(); err != nil {
+		panic(err)
 	}
 }
 
@@ -165,43 +200,49 @@ func captureOutput(f func()) (out string, err error) {
 	return
 }
 
-func (c cliTest) RunWithArgs(a []string) {
+func (c cliTest) RunWithArgs(origArgs []string) {
 	sqlCtx.execStmts = nil
 	zoneConfig = ""
 	zoneDisableReplication = false
 
-	var args []string
-	args = append(args, a[0])
-	h, err := c.ServingHost()
-	if err != nil {
-		fmt.Println(err)
-	}
-	p, err := c.ServingPort()
-	if err != nil {
-		fmt.Println(err)
-	}
-	if err != nil {
-		fmt.Println(err)
-	}
-	args = append(args, fmt.Sprintf("--host=%s", h))
-	args = append(args, fmt.Sprintf("--port=%s", p))
-	// Always run in secure mode and use test certs.
-	args = append(args, "--insecure=false")
-	args = append(args, fmt.Sprintf("--ca-cert=%s", filepath.Join(c.certsDir, security.EmbeddedCACert)))
-	args = append(args, fmt.Sprintf("--cert=%s", filepath.Join(c.certsDir, security.EmbeddedNodeCert)))
-	args = append(args, fmt.Sprintf("--key=%s", filepath.Join(c.certsDir, security.EmbeddedNodeKey)))
-	args = append(args, a[1:]...)
+	if err := func() error {
+		h, p, err := net.SplitHostPort(c.ServingAddr())
+		if err != nil {
+			return err
+		}
+		args := append([]string(nil), origArgs[:1]...)
+		if c.Cfg.Insecure {
+			args = append(args, "--insecure")
+		} else {
+			args = append(args, "--insecure=false")
+			args = append(args, fmt.Sprintf("--ca-cert=%s", filepath.Join(c.certsDir, security.EmbeddedCACert)))
+			args = append(args, fmt.Sprintf("--cert=%s", filepath.Join(c.certsDir, security.EmbeddedNodeCert)))
+			args = append(args, fmt.Sprintf("--key=%s", filepath.Join(c.certsDir, security.EmbeddedNodeKey)))
+		}
+		args = append(args, fmt.Sprintf("--host=%s", h))
+		args = append(args, fmt.Sprintf("--port=%s", p))
+		args = append(args, origArgs[1:]...)
 
-	fmt.Fprintf(os.Stderr, "%s\n", args)
-	fmt.Println(strings.Join(a, " "))
-	if err := Run(args); err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", args)
+		fmt.Println(strings.Join(origArgs, " "))
+
+		return Run(args)
+	}(); err != nil {
 		fmt.Println(err)
 	}
 }
 
 func TestQuit(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	c := newCLITest()
+
+	c, err := newCLITest(t, false)
+	if err != nil {
+		panic(err)
+	}
+	// This test does not need to invoke the stopper because
+	// "quit" will have taken care of this.
+	defer c.stop(false)
+
 	c.Run("quit")
 	// Wait until this async command stops the server.
 	<-c.Stopper().IsStopped()
@@ -209,7 +250,7 @@ func TestQuit(t *testing.T) {
 	// NB: if this test is ever flaky due to port reuse, we could run against
 	// :0 (which however changes some of the errors we get).
 	// One way of getting that is:
-	//	c.TestServer.Cfg.AdvertiseAddr = "127.0.0.1:0"
+	//	c.Cfg.AdvertiseAddr = "127.0.0.1:0"
 
 	styled := func(s string) string {
 		const preamble = `unable to connect or connection lost.
@@ -252,15 +293,14 @@ communicate with a secure cluster\).
 			t.Errorf("expected '%s' to match pattern\n%s\ngot:\n%s", test.cmd, exp, out)
 		}
 	}
-	// Manually run the cleanup functions (intentionally only on success,
-	// preserving the logs on failure).
-	c.cleanupFunc()
-	security.SetReadFileFn(securitytest.Asset)
 }
 
 func Example_basic() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.Run("debug kv put a 1 b 2 c 3")
 	c.Run("debug kv scan")
@@ -317,8 +357,11 @@ func Example_basic() {
 }
 
 func Example_quoted() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.Run(`debug kv put a\x00 日本語`)                                  // UTF-8 input text
 	c.Run(`debug kv put a\x01 \u65e5\u672c\u8a9e`)                   // explicit Unicode code points
@@ -351,28 +394,29 @@ func Example_quoted() {
 }
 
 func Example_insecure() {
-	s, err := serverutils.StartServerRaw(
-		base.TestServerArgs{Insecure: true})
+	c, err := newCLITest(nil, true)
 	if err != nil {
-		log.Fatalf(context.Background(), "Could not start server: %v", err)
+		panic(err)
 	}
-	defer s.Stopper().Stop()
-	c := cliTest{TestServer: s.(*server.TestServer), cleanupFunc: func() {}}
+	defer c.stop(true)
 
-	c.Run("debug kv put --insecure a 1 b 2")
-	c.Run("debug kv scan --insecure")
+	c.Run("debug kv put a 1 b 2")
+	c.Run("debug kv scan")
 
 	// Output:
-	// debug kv put --insecure a 1 b 2
-	// debug kv scan --insecure
+	// debug kv put a 1 b 2
+	// debug kv scan
 	// "a"	"1"
 	// "b"	"2"
 	// 2 result(s)
 }
 
 func Example_ranges() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.Run("debug kv put a 1 b 2 c 3 d 4")
 	c.Run("debug kv scan")
@@ -433,8 +477,11 @@ func Example_ranges() {
 }
 
 func Example_logging() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.RunWithArgs([]string{"sql", "--alsologtostderr=false", "-e", "select 1"})
 	c.RunWithArgs([]string{"sql", "--log-backtrace-at=foo.go:1", "-e", "select 1"})
@@ -471,8 +518,11 @@ func Example_logging() {
 }
 
 func Example_cput() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.Run("debug kv put a 1 b 2 c 3 d 4")
 	c.Run("debug kv scan")
@@ -500,8 +550,11 @@ func Example_cput() {
 }
 
 func Example_max_results() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.Run("debug kv put a 1 b 2 c 3 d 4")
 	c.Run("debug kv scan --max-results=3")
@@ -532,8 +585,11 @@ func Example_max_results() {
 }
 
 func Example_zone() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.Run("zone ls")
 	c.Run("zone set system --file=./testdata/zone_attrs.yaml")
@@ -627,8 +683,11 @@ func Example_zone() {
 }
 
 func Example_sql() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.RunWithArgs([]string{"sql", "-e", "create database t; create table t.f (x int, y int); insert into t.f values (42, 69)"})
 	c.RunWithArgs([]string{"sql", "-e", "select 3", "-e", "select * from t.f"})
@@ -667,8 +726,8 @@ func Example_sql() {
 	// t
 	// sql -e explain select 3
 	// 1 row
-	// Level	Type	Description
-	// 0	empty	-
+	// Level	Type	Field	Description
+	// 0	nullrow
 	// sql -e select 1; select 2
 	// 1 row
 	// 1
@@ -678,9 +737,12 @@ func Example_sql() {
 	// 2
 }
 
-func Example_sql_escape() {
-	c := newCLITest()
-	defer c.stop()
+func Example_sql_format() {
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.RunWithArgs([]string{"sql", "-e", "create database t; create table t.t (s string, d string);"})
 	c.RunWithArgs([]string{"sql", "-e", "insert into t.t values (e'foo', 'printable ASCII')"})
@@ -698,9 +760,14 @@ func Example_sql_escape() {
 	c.RunWithArgs([]string{"sql", "-e", "insert into t.u values (0, 0, 0, 0, 0)"})
 	c.RunWithArgs([]string{"sql", "-e", "show columns from t.u"})
 	c.RunWithArgs([]string{"sql", "-e", "select * from t.u"})
+	c.RunWithArgs([]string{"sql", "-e", "create table t.times (bare timestamp, withtz timestamptz)"})
+	c.RunWithArgs([]string{"sql", "-e", "insert into t.times values ('2016-01-25 10:10:10', '2016-01-25 10:10:10-05:00')"})
+	c.RunWithArgs([]string{"sql", "-e", "select * from t.times"})
 	c.RunWithArgs([]string{"sql", "--pretty", "-e", "select * from t.t"})
 	c.RunWithArgs([]string{"sql", "--pretty", "-e", "show columns from t.u"})
 	c.RunWithArgs([]string{"sql", "--pretty", "-e", "select * from t.u"})
+	c.RunWithArgs([]string{"sql", "--pretty", "-e", "select '  hai' as x"})
+	c.RunWithArgs([]string{"sql", "--pretty", "-e", "explain(indent) select s from t.t union all select s from t.t"})
 
 	// Output:
 	// sql -e create database t; create table t.t (s string, d string);
@@ -746,18 +813,25 @@ func Example_sql_escape() {
 	// sql -e insert into t.u values (0, 0, 0, 0, 0)
 	// INSERT 1
 	// sql -e show columns from t.u
-	// 6 rows
+	// 5 rows
 	// Field	Type	Null	Default
 	// "\"foo"	INT	true	NULL
 	// "\\foo"	INT	true	NULL
 	// "foo\nbar"	INT	true	NULL
 	// "\u03ba\u1f79\u03c3\u03bc\u03b5"	INT	true	NULL
 	// "\u070885"	INT	true	NULL
-	// rowid	INT	false	unique_rowid()
 	// sql -e select * from t.u
 	// 1 row
 	// "\"foo"	"\\foo"	"foo\nbar"	"\u03ba\u1f79\u03c3\u03bc\u03b5"	"\u070885"
 	// 0	0	0	0	0
+	// sql -e create table t.times (bare timestamp, withtz timestamptz)
+	// CREATE TABLE
+	// sql -e insert into t.times values ('2016-01-25 10:10:10', '2016-01-25 10:10:10-05:00')
+	// INSERT 1
+	// sql -e select * from t.times
+	// 1 row
+	// bare	withtz
+	// 2016-01-25 10:10:10+00:00	2016-01-25 15:10:10+00:00
 	// sql --pretty -e select * from t.t
 	// +--------------------------------+--------------------------------+
 	// |               s                |               d                |
@@ -776,18 +850,17 @@ func Example_sql_escape() {
 	// +--------------------------------+--------------------------------+
 	// (9 rows)
 	// sql --pretty -e show columns from t.u
-	// +----------+------+-------+----------------+
-	// |  Field   | Type | Null  |    Default     |
-	// +----------+------+-------+----------------+
-	// | "foo     | INT  | true  | NULL           |
-	// | \foo     | INT  | true  | NULL           |
-	// | foo␤     | INT  | true  | NULL           |
-	// | bar      |      |       |                |
-	// | κόσμε    | INT  | true  | NULL           |
-	// | ܈85      | INT  | true  | NULL           |
-	// | rowid    | INT  | false | unique_rowid() |
-	// +----------+------+-------+----------------+
-	// (6 rows)
+	// +----------+------+------+---------+
+	// |  Field   | Type | Null | Default |
+	// +----------+------+------+---------+
+	// | "foo     | INT  | true | NULL    |
+	// | \foo     | INT  | true | NULL    |
+	// | foo␤     | INT  | true | NULL    |
+	// | bar      |      |      |         |
+	// | κόσμε    | INT  | true | NULL    |
+	// | ܈85      | INT  | true | NULL    |
+	// +----------+------+------+---------+
+	// (5 rows)
 	// sql --pretty -e select * from t.u
 	// +------+------+------------+-------+-----+
 	// | "foo | \foo | "foo\nbar" | κόσμε | ܈85 |
@@ -795,16 +868,37 @@ func Example_sql_escape() {
 	// |    0 |    0 |          0 |     0 |   0 |
 	// +------+------+------------+-------+-----+
 	// (1 row)
+	// sql --pretty -e select '  hai' as x
+	// +-------+
+	// |   x   |
+	// +-------+
+	// | ‌  hai |
+	// +-------+
+	// (1 row)
+	// sql --pretty -e explain(indent) select s from t.t union all select s from t.t
+	// +-------+--------+-------+-----------------+
+	// | Level |  Type  | Field |   Description   |
+	// +-------+--------+-------+-----------------+
+	// |     0 | append |       | ‌ -> append      |
+	// |     1 | scan   |       | ‌   -> scan      |
+	// |     1 |        | table | ‌      t@primary |
+	// |     1 | scan   |       | ‌   -> scan      |
+	// |     1 |        | table | ‌      t@primary |
+	// +-------+--------+-------+-----------------+
+	// (5 rows)
 }
 
 func Example_user() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	c.Run("user ls")
 	c.Run("user ls --pretty")
 	c.Run("user ls --pretty=false")
-	c.Run("user set foo --password=bar")
+	c.Run("user set foo")
 	// Don't use get, since the output of hashedPassword is random.
 	// c.Run("user get foo")
 	c.Run("user ls --pretty")
@@ -824,7 +918,7 @@ func Example_user() {
 	// user ls --pretty=false
 	// 0 rows
 	// username
-	// user set foo --password=bar
+	// user set foo
 	// INSERT 1
 	// user ls --pretty
 	// +----------+
@@ -907,9 +1001,9 @@ Available Commands:
   debug          debugging commands
 
 Flags:
-      --alsologtostderr Severity[=INFO]   logs at or above this threshold go to stderr (default NONE)
+      --alsologtostderr Severity[=INFO]   logs at or above this threshold go to stderr (default INFO)
       --log-backtrace-at traceLocation    when logging hits line file:N, emit a stack trace (default :0)
-      --log-dir string                    if non-empty, write log files in this directory (default "")
+      --log-dir string                    if non-empty, write log files in this directory
       --logtostderr                       log to standard error instead of files
       --no-color                          disable standard error log colorization
 
@@ -922,11 +1016,14 @@ Use "cockroach [command] --help" for more information about a command.
 }
 
 func Example_node() {
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(nil, false)
+	if err != nil {
+		panic(err)
+	}
+	defer c.stop(true)
 
 	// Refresh time series data, which is required to retrieve stats.
-	if err := c.TestServer.WriteSummaries(); err != nil {
+	if err := c.WriteSummaries(); err != nil {
 		log.Fatalf(context.Background(), "Couldn't write stats summaries: %s", err)
 	}
 
@@ -953,8 +1050,11 @@ func Example_node() {
 func TestFreeze(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(t, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.stop(true)
 
 	assertOutput := func(msg string) {
 		if !strings.HasSuffix(strings.TrimSpace(msg), "ok") {
@@ -982,11 +1082,14 @@ func TestNodeStatus(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	start := timeutil.Now()
-	c := newCLITest()
-	defer c.stop()
+	c, err := newCLITest(t, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.stop(true)
 
 	// Refresh time series data, which is required to retrieve stats.
-	if err := c.TestServer.WriteSummaries(); err != nil {
+	if err := c.WriteSummaries(); err != nil {
 		t.Fatalf("couldn't write stats summaries: %s", err)
 	}
 
@@ -1037,7 +1140,7 @@ func checkNodeStatus(t *testing.T, c cliTest, output string, start time.Time) {
 		t.Fatalf("%s", err)
 	}
 
-	nodeID := c.Gossip().GetNodeID()
+	nodeID := c.Gossip().NodeID.Get()
 	nodeIDStr := strconv.FormatInt(int64(nodeID), 10)
 	if a, e := fields[0], nodeIDStr; a != e {
 		t.Errorf("node id (%s) != expected (%s)", a, e)
@@ -1067,9 +1170,9 @@ func checkNodeStatus(t *testing.T, c cliTest, output string, start time.Time) {
 		idx    int
 		maxval int64
 	}{
-		{"live_bytes", 5, 30000},
+		{"live_bytes", 5, 40000},
 		{"key_bytes", 6, 30000},
-		{"value_bytes", 7, 30000},
+		{"value_bytes", 7, 40000},
 		{"intent_bytes", 8, 30000},
 		{"system_bytes", 9, 30000},
 		{"leader_ranges", 10, 3},

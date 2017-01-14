@@ -1,5 +1,4 @@
 // Copyright 2016 The Cockroach Authors.
-
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -52,7 +51,7 @@ import (
 //          return false, nil
 //       }
 //    }
-type varConvertFunc func(expr parser.VariableExpr) (ok bool, newExpr parser.VariableExpr)
+type varConvertFunc func(expr parser.VariableExpr) (ok bool, newExpr parser.Expr)
 
 type varConvertVisitor struct {
 	// If justCheck is true, the visitor only checks that all VariableExpr in the expression can be
@@ -72,8 +71,9 @@ func (v *varConvertVisitor) VisitPre(expr parser.Expr) (recurse bool, newExpr pa
 	}
 
 	if varExpr, ok := expr.(parser.VariableExpr); ok {
-		// Ignore sub-queries
-		if _, isSubquery := expr.(*subquery); isSubquery {
+		// Ignore sub-queries and placeholders
+		switch expr.(type) {
+		case *subquery, *parser.Placeholder:
 			return false, expr
 		}
 
@@ -108,6 +108,9 @@ func exprCheckVars(expr parser.Expr, conv varConvertFunc) bool {
 // Convert the variables in the given expression; the expression must only contain
 // variables known to the conversion function (exprCheckVars should be used first).
 func exprConvertVars(expr parser.TypedExpr, conv varConvertFunc) parser.TypedExpr {
+	if expr == nil {
+		return expr
+	}
 	v := varConvertVisitor{justCheck: false, conv: conv}
 	ret, _ := parser.WalkExpr(&v, expr)
 	return ret.(parser.TypedExpr)

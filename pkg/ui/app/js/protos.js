@@ -415,6 +415,15 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                                     "options": {
                                         "(gogoproto.nullable)": false
                                     }
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "int32",
+                                    "name": "lease_count",
+                                    "id": 4,
+                                    "options": {
+                                        "(gogoproto.nullable)": false
+                                    }
                                 }
                             ]
                         },
@@ -980,15 +989,6 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                                 {
                                     "rule": "optional",
                                     "type": "util.hlc.Timestamp",
-                                    "name": "start_stasis",
-                                    "id": 4,
-                                    "options": {
-                                        "(gogoproto.nullable)": false
-                                    }
-                                },
-                                {
-                                    "rule": "optional",
-                                    "type": "util.hlc.Timestamp",
                                     "name": "expiration",
                                     "id": 2,
                                     "options": {
@@ -1002,6 +1002,34 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                                     "id": 3,
                                     "options": {
                                         "(gogoproto.nullable)": false
+                                    }
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "util.hlc.Timestamp",
+                                    "name": "deprecated_start_stasis",
+                                    "id": 4,
+                                    "options": {
+                                        "(gogoproto.nullable)": false
+                                    }
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "util.hlc.Timestamp",
+                                    "name": "proposed_ts",
+                                    "id": 5,
+                                    "options": {
+                                        "(gogoproto.nullable)": true,
+                                        "(gogoproto.customname)": "ProposedTS"
+                                    }
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "int64",
+                                    "name": "epoch",
+                                    "id": 6,
+                                    "options": {
+                                        "(gogoproto.nullable)": true
                                     }
                                 }
                             ]
@@ -2126,6 +2154,12 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                                                     "type": "bool",
                                                     "name": "storing",
                                                     "id": 6
+                                                },
+                                                {
+                                                    "rule": "optional",
+                                                    "type": "bool",
+                                                    "name": "implicit",
+                                                    "id": 7
                                                 }
                                             ]
                                         }
@@ -4377,6 +4411,14 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                         {
                             "name": "MsgReadIndexResp",
                             "id": 16
+                        },
+                        {
+                            "name": "MsgPreVote",
+                            "id": 17
+                        },
+                        {
+                            "name": "MsgPreVoteResp",
+                            "id": 18
                         }
                     ]
                 },

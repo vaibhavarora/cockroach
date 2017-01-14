@@ -20,8 +20,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/pkg/acceptance/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/docker/docker/api/types/container"
 )
 
 const testGlob = "../cli/interactive_tests/test*.tcl"
@@ -30,13 +33,19 @@ const containerPath = "/go/src/github.com/cockroachdb/cockroach/cli/interactive_
 var cmdBase = []string{
 	"/usr/bin/env",
 	"COCKROACH_SKIP_UPDATE_CHECK=1",
-	"PGHOST=localhost",
-	"PGPORT=",
 	"/usr/bin/expect",
 }
 
 func TestDockerCLI(t *testing.T) {
-	if err := testDockerOneShot(t, "cli_test", []string{"stat", cluster.CockroachBinaryInContainer}); err != nil {
+	s := log.Scope(t, "")
+	defer s.Close(t)
+
+	containerConfig := container.Config{
+		Image: postgresTestImage,
+		Cmd:   []string{"stat", cluster.CockroachBinaryInContainer},
+	}
+	ctx := context.Background()
+	if err := testDockerOneShot(ctx, t, "cli_test", containerConfig); err != nil {
 		t.Skipf(`TODO(dt): No binary in one-shot container, see #6086: %s`, err)
 	}
 
@@ -53,12 +62,14 @@ func TestDockerCLI(t *testing.T) {
 		testFile := filepath.Base(p)
 		testPath := filepath.Join(containerPath, testFile)
 		t.Run(testFile, func(t *testing.T) {
+			log.Infof(ctx, "-- starting tests from: %s", testFile)
 			cmd := cmdBase
 			if verbose {
 				cmd = append(cmd, "-d")
 			}
 			cmd = append(cmd, "-f", testPath, cluster.CockroachBinaryInContainer)
-			if err := testDockerOneShot(t, "cli_test", cmd); err != nil {
+			containerConfig.Cmd = cmd
+			if err := testDockerOneShot(ctx, t, "cli_test", containerConfig); err != nil {
 				t.Error(err)
 			}
 		})

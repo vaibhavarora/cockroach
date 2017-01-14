@@ -5,25 +5,23 @@
 
 set -euxo pipefail
 
-GOVERSION="${GOVERSION-1.7.1}"
-
 cd "$(dirname "${0}")"
 
 sudo apt-get update -q && sudo apt-get install -q -y --no-install-recommends build-essential git gdb patch bzip2 docker.io
 
 sudo adduser "${USER}" docker
 
-mkdir -p ~/go-bootstrap
+mkdir -p ~/go-bootstrap ~/goroot ~/go
 curl "https://storage.googleapis.com/golang/go${GOVERSION}.linux-amd64.tar.gz" | tar -C ~/go-bootstrap -xz --strip=1
-curl "https://storage.googleapis.com/golang/go${GOVERSION}.src.tar.gz" | tar -C ~ -xz
+curl "https://storage.googleapis.com/golang/go${GOVERSION}.src.tar.gz" | tar --strip-components=1 -C ~/goroot -xz
 
 # Apply the patch for the "major" go version (e.g. 1.6, 1.7).
 GOPATCHVER=$(echo ${GOVERSION} | grep -o "^[0-9]\+\.[0-9]\+")
-patch -p1 -d ../go < "parallelbuilds-go${GOPATCHVER}.patch"
+patch -p1 -d ../goroot < "parallelbuilds-go${GOPATCHVER}.patch"
 
-(cd ~/go/src && GOROOT_BOOTSTRAP=~/go-bootstrap ./make.bash)
+(cd ~/goroot/src && GOROOT_BOOTSTRAP=~/go-bootstrap ./make.bash)
 
-echo 'export GOPATH=${HOME}; export PATH=${HOME}/go/bin:${GOPATH}/bin:${PATH}' >> ~/.bashrc_go
+echo 'export GOPATH=${HOME}/go; export PATH="${HOME}/goroot/bin:${HOME}/go/bin:${PATH}"' >> ~/.bashrc_go
 echo '. ~/.bashrc_go' >> ~/.bashrc
 
 . ~/.bashrc_go

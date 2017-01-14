@@ -25,6 +25,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -36,6 +37,8 @@ import (
 	"text/tabwriter"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -198,11 +201,6 @@ var (
 		"do not shorten the error or SQL strings when printing the summary for -allow-prepare-fail or -flex-types.")
 )
 
-// logicMaxOffset is the value of the MaxOffset parameter used for
-// each test database. This value is smaller than the default so as to
-// make the tests run faster.
-const logicMaxOffset = 50 * time.Millisecond
-
 // lineScanner handles reading from input test files.
 type lineScanner struct {
 	*bufio.Scanner
@@ -320,6 +318,10 @@ type logicQuery struct {
 	// expectedValues indicates the number of rows expected when
 	// expectedHash is set.
 	expectedValues int
+
+	// rawOpts are the query options, before parsing. Used to display in error
+	// messages.
+	rawOpts string
 }
 
 // logicTest executes the test cases specified in a file. The file format is
@@ -329,7 +331,7 @@ type logicQuery struct {
 // https://github.com/gregrahn/sqllogictest/ for a github mirror of the
 // sqllogictest source.
 type logicTest struct {
-	*testing.T
+	t *testing.T
 	// the database server instantiated for this input file.
 	srv serverutils.TestServerInterface
 	// map of built clients. Needs to be persisted so that we can
@@ -363,9 +365,14 @@ type logicTest struct {
 	// been marked using a result label in the input. See the
 	// explanation for labels in processInputFiles().
 	labelMap map[string]string
+
+	// logScope binds the lifetime of the log files to this test.
+	logScope log.TestLogScope
 }
 
 func (t *logicTest) close() {
+	defer t.logScope.Close(t.t)
+
 	t.traceStop()
 
 	if t.cleanupRootUser != nil {
@@ -385,6 +392,16 @@ func (t *logicTest) close() {
 	t.db = nil
 }
 
+// out emits a message both on stdout and the log files if
+// verbose is set.
+func (t *logicTest) outf(format string, args ...interface{}) {
+	if t.verbose {
+		fmt.Printf(format, args...)
+		fmt.Println()
+		log.Infof(context.Background(), format, args...)
+	}
+}
+
 // setUser sets the DB client to the specified user.
 // It returns a cleanup function to be run when the credentials
 // are no longer needed.
@@ -401,7 +418,7 @@ func (t *logicTest) setUser(user string) func() {
 		defer func() {
 			if inDBName != outDBName {
 				// Propagate the DATABASE setting to the newly-live connection.
-				if _, err := t.db.Exec(fmt.Sprintf("SET DATABASE = %s", inDBName)); err != nil {
+				if _, err := t.db.Exec(fmt.Sprintf("SET DATABASE = '%s'", inDBName)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -423,7 +440,7 @@ func (t *logicTest) setUser(user string) func() {
 		return func() {}
 	}
 
-	pgURL, cleanupFunc := sqlutils.PGUrl(t.T, t.srv.ServingAddr(), user, "TestLogic")
+	pgURL, cleanupFunc := sqlutils.PGUrl(t.t, t.srv.ServingAddr(), "TestLogic", url.User(user))
 	db, err := gosql.Open("postgres", pgURL.String())
 	if err != nil {
 		t.Fatal(err)
@@ -432,14 +449,14 @@ func (t *logicTest) setUser(user string) func() {
 	t.db = db
 	t.user = user
 
-	if t.verbose {
-		fmt.Printf("--- new user: %s\n", user)
-	}
+	t.outf("--- new user: %s", user)
 
 	return cleanupFunc
 }
 
 func (t *logicTest) setup() {
+	t.logScope = log.Scope(t.t, "TestLogic")
+
 	// TODO(pmattis): Add a flag to make it easy to run the tests against a local
 	// MySQL or Postgres instance.
 	// TODO(andrei): if createTestServerParams() is used here, the command filter
@@ -447,7 +464,6 @@ func (t *logicTest) setup() {
 	// modifiedSystemConfigSpan set even though it should, for
 	// "testdata/rename_table". Figure out what's up with that.
 	params := base.TestServerArgs{
-		MaxOffset: logicMaxOffset,
 		Knobs: base.TestingKnobs{
 			SQLExecutor: &sql.ExecutorTestingKnobs{
 				WaitForGossipUpdate:   true,
@@ -455,7 +471,7 @@ func (t *logicTest) setup() {
 			},
 		},
 	}
-	t.srv, _, _ = serverutils.StartServer(t.T, params)
+	t.srv, _, _ = serverutils.StartServer(t.t, params)
 
 	// db may change over the lifetime of this function, with intermediate
 	// values cached in t.clients and finally closed in t.close().
@@ -465,6 +481,10 @@ func (t *logicTest) setup() {
 CREATE DATABASE test;
 SET DATABASE = test;
 `); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := t.db.Exec(fmt.Sprintf("CREATE USER %s;", server.TestUser)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -487,7 +507,7 @@ func (t *logicTest) processTestFile(path string) error {
 	defer t.traceStop()
 
 	if t.verbose {
-		fmt.Println("--- queries start here")
+		t.outf("--- queries start here")
 		defer t.printCompletion(path)
 	}
 
@@ -512,6 +532,9 @@ func (t *logicTest) processTestFile(path string) error {
 			// Skip comment lines.
 			continue
 		}
+		if len(fields) == 2 && fields[1] == "error" {
+			return fmt.Errorf("%s:%d: no expected error provided", path, s.line)
+		}
 		switch cmd {
 		case "repeat":
 			// A line "repeat X" makes the test repeat the following statement or query X times.
@@ -527,9 +550,23 @@ func (t *logicTest) processTestFile(path string) error {
 			}
 			repeat = count
 
+		case "sleep":
+			var err error
+			var duration time.Duration
+			// A line "sleep Xs" makes the test sleep for X seconds.
+			if len(fields) != 2 {
+				err = errors.New("invalid line format")
+			} else if duration, err = time.ParseDuration(fields[1]); err != nil {
+				err = errors.New("invalid duration")
+			}
+			if err != nil {
+				return fmt.Errorf("%s:%d invalid sleep line: %s", path, s.line, err)
+			}
+			time.Sleep(duration)
+
 		case "statement":
-			stmt := logicStatement{pos: fmt.Sprintf("%s:%d", path, s.line)}
-			// Parse "query error <regexp>"
+			stmt := logicStatement{pos: fmt.Sprintf("\n%s:%d", path, s.line)}
+			// Parse "statement error <regexp>"
 			if m := errorRE.FindStringSubmatch(s.Text()); m != nil {
 				stmt.expectErrCode = m[1]
 				stmt.expectErr = m[2]
@@ -556,7 +593,7 @@ func (t *logicTest) processTestFile(path string) error {
 			t.success(path)
 
 		case "query":
-			query := logicQuery{pos: fmt.Sprintf("%s:%d", path, s.line)}
+			query := logicQuery{pos: fmt.Sprintf("\n%s:%d", path, s.line)}
 			label := ""
 			// Parse "query error <regexp>"
 			if m := errorRE.FindStringSubmatch(s.Text()); m != nil {
@@ -585,7 +622,8 @@ func (t *logicTest) processTestFile(path string) error {
 				// same output.
 				query.colTypes = fields[1]
 				if len(fields) >= 3 {
-					for _, opt := range strings.Split(fields[2], ",") {
+					query.rawOpts = fields[2]
+					for _, opt := range strings.Split(query.rawOpts, ",") {
 						switch opt {
 						case "nosort":
 							query.sorter = nil
@@ -750,7 +788,7 @@ func (t *logicTest) processTestFile(path string) error {
 			if len(fields) != 1 {
 				return fmt.Errorf("fix-txn-priority takes no arguments, found: %v", fields[1:])
 			}
-			fmt.Println("Setting deterministic priorities.")
+			t.outf("Setting deterministic priorities.")
 
 			execKnobs.FixTxnPriority = true
 			defer func() { execKnobs.FixTxnPriority = false }()
@@ -765,7 +803,7 @@ func (t *logicTest) processTestFile(path string) error {
 			if err != nil {
 				return fmt.Errorf("kv-batch-size needs an integer argument; %s", err)
 			}
-			fmt.Printf("Setting kv batch size %d\n", batchSize)
+			t.outf("Setting kv batch size %d", batchSize)
 			defer sqlbase.SetKVBatchSize(int64(batchSize))()
 
 		default:
@@ -783,7 +821,7 @@ func (t *logicTest) verifyError(sql, pos, expectErr, expectErrCode string, err e
 	if expectErr == "" && expectErrCode == "" && err != nil {
 		return t.unexpectedError(sql, pos, err)
 	}
-	if expectErr != "" && !testutils.IsError(err, expectErr) {
+	if !testutils.IsError(err, expectErr) {
 		t.Errorf("%s: expected %q, but found %v", pos, expectErr, err)
 		return false
 	}
@@ -822,7 +860,7 @@ func (t *logicTest) unexpectedError(sql string, pos string, err error) bool {
 		stmt, err := t.db.Prepare(sql)
 		if err != nil {
 			if *showSQL {
-				fmt.Printf("\t-- fails prepare: %s\n", err)
+				t.outf("\t-- fails prepare: %s", err)
 			}
 			t.signalIgnoredError(err, pos, sql)
 			return true
@@ -837,7 +875,7 @@ func (t *logicTest) unexpectedError(sql string, pos string, err error) bool {
 
 func (t *logicTest) execStatement(stmt logicStatement) bool {
 	if *showSQL {
-		fmt.Printf("%s;\n", stmt.sql)
+		t.outf("%s;", stmt.sql)
 	}
 	_, err := t.db.Exec(stmt.sql)
 
@@ -869,7 +907,7 @@ func (t *logicTest) hashResults(results []string) (string, error) {
 
 func (t *logicTest) execQuery(query logicQuery) error {
 	if *showSQL {
-		fmt.Printf("%s;\n", query.sql)
+		t.outf("%s;", query.sql)
 	}
 	rows, err := t.db.Query(query.sql)
 	if ok := t.verifyError(query.sql, query.pos, query.expectErr, query.expectErrCode, err); !ok {
@@ -974,6 +1012,7 @@ func (t *logicTest) execQuery(query logicQuery) error {
 
 	if query.sorter != nil {
 		query.sorter(len(cols), results)
+		query.sorter(len(cols), query.expectedResults)
 	}
 
 	if query.expectedHash != "" {
@@ -996,7 +1035,15 @@ func (t *logicTest) execQuery(query logicQuery) error {
 		for _, expectedResultRaw := range query.expectedResultsRaw {
 			fmt.Fprintf(tw, "    %s\n", expectedResultRaw)
 		}
-		fmt.Fprint(&buf, "but found:\n")
+		sortMsg := ""
+		if query.sorter != nil {
+			// We performed an order-insensitive comparison of "actual" vs "expected"
+			// rows by sorting both, but we'll display the error with the expected
+			// rows in the order in which they were put in the file, and the actual
+			// rows in the order in which the query returned them.
+			sortMsg = " -> ignore the following ordering of rows"
+		}
+		fmt.Fprintf(&buf, "but found (query options: %q%s) :\n", query.rawOpts, sortMsg)
 		for _, resultLine := range resultLines {
 			fmt.Fprint(tw, "    ")
 			for _, value := range resultLine {
@@ -1017,12 +1064,16 @@ func (t *logicTest) success(file string) {
 	now := timeutil.Now()
 	if now.Sub(t.lastProgress) >= 2*time.Second {
 		t.lastProgress = now
-		fmt.Printf("--- progress: %s: %d statements/queries\n", file, t.progress)
+		t.outf("--- progress: %s: %d statements/queries", file, t.progress)
 	}
 }
 
 func TestLogic(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+
+	if testutils.Stress() {
+		t.Skip()
+	}
 
 	var globs []string
 	if *bigtest {
@@ -1082,7 +1133,7 @@ func TestLogic(t *testing.T) {
 	totalUnsupported := 0
 	lastProgress := timeutil.Now()
 	l := logicTest{
-		T:               t,
+		t:               t,
 		verbose:         testing.Verbose() || log.V(1),
 		perErrorSummary: make(map[string][]string),
 	}
@@ -1094,7 +1145,7 @@ func TestLogic(t *testing.T) {
 			// the `t` given to this anonymous function may be different
 			// from the t above, so re-bind it to `l` for the duration of
 			// the test.
-			l.T = t
+			l.t = t
 			defer l.close()
 			l.setup()
 			if err := l.processTestFile(path); err != nil {
@@ -1108,7 +1159,7 @@ func TestLogic(t *testing.T) {
 		now := timeutil.Now()
 		if now.Sub(lastProgress) >= 2*time.Second {
 			lastProgress = now
-			fmt.Printf("--- total progress: %d statements/queries\n", total)
+			l.outf("--- total progress: %d statements/queries", total)
 		}
 	}
 
@@ -1117,7 +1168,7 @@ func TestLogic(t *testing.T) {
 		unsupportedMsg = fmt.Sprintf(", ignored %d unsupported queries", totalUnsupported)
 	}
 
-	fmt.Printf("--- total: %d tests, %d failures%s\n", total, totalFail, unsupportedMsg)
+	l.outf("--- total: %d tests, %d failures%s", total, totalFail, unsupportedMsg)
 }
 
 type errorSummaryEntry struct {
@@ -1146,19 +1197,21 @@ func (t *logicTest) printErrorSummary() {
 		return
 	}
 
-	fmt.Println("--- summary of ignored errors:")
+	t.outf("--- summary of ignored errors:")
 	summary := make(errorSummary, len(t.perErrorSummary))
 	i := 0
 	for errmsg, sql := range t.perErrorSummary {
 		summary[i] = errorSummaryEntry{errmsg: errmsg, sql: sql}
 	}
 	sort.Sort(summary)
-	for _, t := range summary {
-		fmt.Printf("%s (%d entries)\n", t.errmsg, len(t.sql))
-		for _, q := range t.sql {
-			fmt.Println("\t", strings.Replace(q, "\n", "\n\t", -1))
+	for _, s := range summary {
+		t.outf("%s (%d entries)", s.errmsg, len(s.sql))
+		var buf bytes.Buffer
+		for _, q := range s.sql {
+			buf.WriteByte('\t')
+			buf.WriteString(strings.Replace(q, "\n", "\n\t", -1))
 		}
-		fmt.Println()
+		t.outf("%s", buf.String())
 	}
 }
 
@@ -1232,31 +1285,51 @@ func (t *logicTest) signalIgnoredError(err error, pos string, sql string) {
 	t.perErrorSummary[errmsg] = append(t.perErrorSummary[errmsg], buf.String())
 }
 
-// Errorf overloads testing.T.Errorf to handle printing the
-// per-query "FAIL" marker when -show-sql is set. It also
-// registers the error to the failure counter.
-func (t *logicTest) Errorf(format string, args ...interface{}) {
+// Error is a wrapper around testing.T.Error that handles printing the per-query
+// "FAIL" marker when -show-sql is set. It also registers the error to the
+// failure counter.
+func (t *logicTest) Error(args ...interface{}) {
 	if *showSQL {
-		fmt.Println("\t-- FAIL")
+		t.outf("\t-- FAIL")
 	}
-	t.T.Errorf(format, args...)
+	t.t.Error(args...)
 	t.failures++
 }
 
-// Fatalf overloads testing.T.Fatalf to ensure the fatal error message
+// Errorf is a wrapper around testing.T.Errorf that handles printing the
+// per-query "FAIL" marker when -show-sql is set. It also registers the error to
+// the failure counter.
+func (t *logicTest) Errorf(format string, args ...interface{}) {
+	if *showSQL {
+		t.outf("\t-- FAIL")
+	}
+	t.t.Errorf(format, args...)
+	t.failures++
+}
+
+// Fatal is a wrapper around testing.T.Fatal that ensures the fatal error message
 // is printed on its own line when -show-sql is set.
+func (t *logicTest) Fatal(args ...interface{}) {
+	if *showSQL {
+		fmt.Println()
+	}
+	t.t.Fatal(args...)
+}
+
+// Fatalf is a wrapper around testing.T.Fatalf that ensures the fatal error
+// message is printed on its own line when -show-sql is set.
 func (t *logicTest) Fatalf(format string, args ...interface{}) {
 	if *showSQL {
 		fmt.Println()
 	}
-	t.T.Fatalf(format, args...)
+	t.t.Fatalf(format, args...)
 }
 
 // finishOne marks completion of a single test. It handles
 // printing the success marker then -show-sql is set.
 func (t *logicTest) finishOne(msg string) {
 	if *showSQL {
-		fmt.Printf("\t-- %s;\n", msg)
+		t.outf("\t-- %s;", msg)
 	}
 }
 
@@ -1267,6 +1340,6 @@ func (t *logicTest) printCompletion(path string) {
 	if t.unsupported > 0 {
 		unsupportedMsg = fmt.Sprintf(", ignored %d unsupported queries", t.unsupported)
 	}
-	fmt.Printf("--- done: %s: %d tests, %d failures%s\n", path, t.progress, t.failures,
+	t.outf("--- done: %s: %d tests, %d failures%s", path, t.progress, t.failures,
 		unsupportedMsg)
 }

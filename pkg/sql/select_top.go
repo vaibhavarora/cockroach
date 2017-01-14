@@ -19,7 +19,7 @@ package sql
 import "github.com/cockroachdb/cockroach/pkg/sql/parser"
 
 // selectTopNode encapsulate the whole logic of a select statement.
-// This exposes the selectNode, groupNode, windowNode, sortNode, distinctNode and limitNode
+// This exposes the renderNode, groupNode, windowNode, sortNode, distinctNode and limitNode
 // side-by-side so that they can "see" each other during query optimization.
 type selectTopNode struct {
 	// The various nodes involved in obtaining the results.
@@ -29,133 +29,24 @@ type selectTopNode struct {
 	sort     *sortNode
 	distinct *distinctNode
 	limit    *limitNode
-	// The result node that actually runs the query.
-	// Populated during expandPlan() by connecting the nodes above
-	// together.
+	// The result node that actually runs the query.  Populated during
+	// expandSelectTopNode() by connecting the nodes above together.
 	plan planNode
 }
 
-func (n *selectTopNode) ExplainTypes(f func(string, string)) {
-	if n.plan == nil {
-		// The sub-nodes are not connected yet.
-		// Ask them for typing individually.
-		if n.limit != nil {
-			n.limit.ExplainTypes(f)
-		}
-		if n.distinct != nil {
-			n.distinct.ExplainTypes(f)
-		}
-		if n.sort != nil {
-			n.sort.ExplainTypes(f)
-		}
-		if n.window != nil {
-			n.window.ExplainTypes(f)
-		}
-		if n.group != nil {
-			n.group.ExplainTypes(f)
-		}
-
-		// The source is always reported as sub-plan by ExplainPlan,
-		// so it will explain its own types.
-	}
-}
-
 func (n *selectTopNode) SetLimitHint(numRows int64, soft bool) {
-	n.plan.SetLimitHint(numRows, soft)
-}
-
-func (n *selectTopNode) expandPlan() error {
 	if n.plan != nil {
-		panic("can't expandPlan twice!")
+		n.plan.SetLimitHint(numRows, soft)
 	}
-
-	var squash bool
-
-	n.plan = n.source
-	if err := n.source.expandPlan(); err != nil {
-		return err
-	}
-
-	n.plan = n.group.wrap(n.plan)
-	if n.group != nil {
-		if err := n.group.expandPlan(); err != nil {
-			return err
-		}
-	}
-
-	n.plan = n.window.wrap(n.plan)
-	if n.window != nil {
-		if err := n.window.expandPlan(); err != nil {
-			return err
-		}
-	}
-
-	squash, n.plan = n.sort.wrap(n.plan)
-	if squash {
-		n.sort = nil
-	}
-	if n.sort != nil {
-		if err := n.sort.expandPlan(); err != nil {
-			return err
-		}
-	}
-
-	n.plan = n.distinct.wrap(n.plan)
-	if n.distinct != nil {
-		if err := n.distinct.expandPlan(); err != nil {
-			return err
-		}
-	}
-
-	n.plan = n.limit.wrap(n.plan)
-	if n.limit != nil {
-		if err := n.limit.expandPlan(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (n *selectTopNode) ExplainPlan(v bool) (name, description string, subplans []planNode) {
-	if !v {
-		return n.plan.ExplainPlan(v)
-	}
-
-	if n.plan != nil {
-		subplans = []planNode{n.plan}
-	} else {
-		// We are not connected yet, but we may still be interested in the
-		// sub-query plans. Get them.
-		subplans = []planNode{}
-		if n.limit != nil {
-			_, _, plans := n.limit.ExplainPlan(false)
-			subplans = append(subplans, plans[1:]...)
-		}
-		if n.distinct != nil {
-			_, _, plans := n.distinct.ExplainPlan(false)
-			subplans = append(subplans, plans[1:]...)
-		}
-		if n.sort != nil {
-			_, _, plans := n.sort.ExplainPlan(false)
-			subplans = append(subplans, plans[1:]...)
-		}
-		if n.window != nil {
-			_, _, plans := n.window.ExplainPlan(false)
-			subplans = append(subplans, plans[1:]...)
-		}
-		if n.group != nil {
-			_, _, plans := n.group.ExplainPlan(false)
-			subplans = append(subplans, plans[1:]...)
-		}
-		subplans = append(subplans, n.source)
-	}
-	return "select", "", subplans
 }
 
 func (n *selectTopNode) Columns() ResultColumns {
+	if n.plan != nil {
+		return n.plan.Columns()
+	}
+
 	// sort, window, group and source may have different ideas about the
 	// result columns. Ask them in turn.
-	// (We cannot ask n.plan because it may not be connected yet.)
 	if n.sort != nil {
 		return n.sort.Columns()
 	}
@@ -169,10 +60,19 @@ func (n *selectTopNode) Columns() ResultColumns {
 }
 
 func (n *selectTopNode) Ordering() orderingInfo {
-	if n.plan == nil {
-		return n.source.Ordering()
+	if n.plan != nil {
+		return n.plan.Ordering()
 	}
-	return n.plan.Ordering()
+	if n.sort != nil {
+		return n.sort.Ordering()
+	}
+	if n.window != nil {
+		return n.window.Ordering()
+	}
+	if n.group != nil {
+		return n.group.Ordering()
+	}
+	return n.source.Ordering()
 }
 
 func (n *selectTopNode) MarkDebug(mode explainMode) { n.plan.MarkDebug(mode) }

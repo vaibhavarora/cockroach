@@ -41,7 +41,11 @@ type typeList interface {
 	// getAt returns the type at the given index in the typeList, or nil if the typeList
 	// cannot have a parameter at index i.
 	getAt(i int) Type
-	// human readable signature
+	// Length returns the number of types in the list
+	Length() int
+	// Types returns a realized copy of the list. variadic lists return a list of size one.
+	Types() []Type
+	// String returns a human readable signature
 	String() string
 }
 
@@ -49,7 +53,6 @@ var _ typeList = ArgTypes{}
 var _ typeList = NamedArgTypes{}
 var _ typeList = AnyType{}
 var _ typeList = VariadicType{}
-var _ typeList = SingleType{}
 
 // ArgTypes is a typeList implementation that accepts a specific number of
 // argument types.
@@ -68,7 +71,15 @@ func (a ArgTypes) match(types ArgTypes) bool {
 }
 
 func (a ArgTypes) matchAt(typ Type, i int) bool {
-	return i < len(a) && a[i].FamilyEqual(typ)
+	// The parameterized types for Tuples are checked in the type checking
+	// routines before getting here, so we only need to check if the argument
+	// type is a TypeTuple below. This allows us to avoid defining overloads
+	// for TypeTuple{}, TypeTuple{TypeAny}, TypeTuple{TypeAny, TypeAny}, etc.
+	// for Tuple operators.
+	if typ.FamilyEqual(TypeTuple) {
+		typ = TypeTuple
+	}
+	return i < len(a) && a[i].Equivalent(typ)
 }
 
 func (a ArgTypes) matchLen(l int) bool {
@@ -77,6 +88,16 @@ func (a ArgTypes) matchLen(l int) bool {
 
 func (a ArgTypes) getAt(i int) Type {
 	return a[i]
+}
+
+// Length implements the typeList interface.
+func (a ArgTypes) Length() int {
+	return len(a)
+}
+
+// Types implements the typeList interface.
+func (a ArgTypes) Types() []Type {
+	return a
 }
 
 func (a ArgTypes) String() string {
@@ -111,7 +132,11 @@ func (a NamedArgTypes) match(types ArgTypes) bool {
 }
 
 func (a NamedArgTypes) matchAt(typ Type, i int) bool {
-	return i < len(a) && a[i].Typ.FamilyEqual(typ)
+	// See ArgTypes.matchAt for explanation.
+	if typ.FamilyEqual(TypeTuple) {
+		typ = TypeTuple
+	}
+	return i < len(a) && a[i].Typ.Equivalent(typ)
 }
 
 func (a NamedArgTypes) matchLen(l int) bool {
@@ -120,6 +145,21 @@ func (a NamedArgTypes) matchLen(l int) bool {
 
 func (a NamedArgTypes) getAt(i int) Type {
 	return a[i].Typ
+}
+
+// Length implements the typeList interface.
+func (a NamedArgTypes) Length() int {
+	return len(a)
+}
+
+// Types implements the typeList interface.
+func (a NamedArgTypes) Types() []Type {
+	n := len(a)
+	ret := make([]Type, n, n)
+	for i, s := range a {
+		ret[i] = s.Typ
+	}
+	return ret
 }
 
 func (a NamedArgTypes) String() string {
@@ -154,8 +194,18 @@ func (AnyType) getAt(i int) Type {
 	panic("getAt called on AnyType")
 }
 
+// Length implements the typeList interface.
+func (a AnyType) Length() int {
+	return 1
+}
+
+// Types implements the typeList interface.
+func (a AnyType) Types() []Type {
+	return []Type{TypeAny}
+}
+
 func (AnyType) String() string {
-	return "*"
+	return "anyelement..."
 }
 
 // VariadicType is a typeList implementation which accepts any number of
@@ -175,7 +225,7 @@ func (v VariadicType) match(types ArgTypes) bool {
 }
 
 func (v VariadicType) matchAt(typ Type, i int) bool {
-	return typ == TypeNull || typ.Equal(v.Typ)
+	return typ == TypeNull || typ.Equivalent(v.Typ)
 }
 
 func (v VariadicType) matchLen(l int) bool {
@@ -186,44 +236,18 @@ func (v VariadicType) getAt(i int) Type {
 	return v.Typ
 }
 
+// Length implements the typeList interface.
+func (v VariadicType) Length() int {
+	return 1
+}
+
+// Types implements the typeList interface.
+func (v VariadicType) Types() []Type {
+	return []Type{v.Typ}
+}
+
 func (v VariadicType) String() string {
 	return fmt.Sprintf("%s...", v.Typ)
-}
-
-// SingleType is a typeList implementation which accepts a single
-// argument of type typ. It is logically identical to an ArgTypes
-// implementation with length 1, but avoids the slice allocation.
-type SingleType struct {
-	Typ Type
-}
-
-func (s SingleType) match(types ArgTypes) bool {
-	if len(types) != 1 {
-		return false
-	}
-	return s.matchAt(types[0], 0)
-}
-
-func (s SingleType) matchAt(typ Type, i int) bool {
-	if i != 0 {
-		return false
-	}
-	return typ.Equal(s.Typ)
-}
-
-func (s SingleType) matchLen(l int) bool {
-	return l == 1
-}
-
-func (s SingleType) getAt(i int) Type {
-	if i != 0 {
-		return nil
-	}
-	return s.Typ
-}
-
-func (s SingleType) String() string {
-	return s.Typ.String()
 }
 
 // typeCheckOverloadedExprs determines the correct overload to use for the given set of
@@ -273,7 +297,7 @@ func typeCheckOverloadedExprs(
 	// and adds them to the type checked slice.
 	defaultTypeCheck := func(errorOnPlaceholders bool) error {
 		for _, expr := range constExprs {
-			typ, err := expr.e.TypeCheck(ctx, nil)
+			typ, err := expr.e.TypeCheck(ctx, TypeAny)
 			if err != nil {
 				return fmt.Errorf("error type checking constant value: %v", err)
 			}
@@ -281,7 +305,7 @@ func typeCheckOverloadedExprs(
 		}
 		for _, expr := range placeholderExprs {
 			if errorOnPlaceholders {
-				_, err := expr.e.TypeCheck(ctx, nil)
+				_, err := expr.e.TypeCheck(ctx, TypeAny)
 				return err
 			}
 			// If we dont want to error on args, avoid type checking them without a desired type.
@@ -293,7 +317,7 @@ func typeCheckOverloadedExprs(
 	// If no overloads are provided, just type check parameters and return.
 	if len(overloads) == 0 {
 		for _, expr := range resolvableExprs {
-			typ, err := expr.e.TypeCheck(ctx, nil)
+			typ, err := expr.e.TypeCheck(ctx, TypeAny)
 			if err != nil {
 				return nil, nil, fmt.Errorf("error type checking resolved expression: %v", err)
 			}
@@ -336,7 +360,7 @@ func typeCheckOverloadedExprs(
 
 	// Filter out overloads on resolved types.
 	for _, expr := range resolvableExprs {
-		paramDesired := NoTypePreference
+		paramDesired := TypeAny
 		if len(overloads) == 1 {
 			// Once we get down to a single overload candidate, begin desiring its
 			// parameter types for the corresponding argument expressions.
@@ -370,7 +394,7 @@ func typeCheckOverloadedExprs(
 				typ, err := expr.e.TypeCheck(ctx, des)
 				if err != nil {
 					return true, nil, fmt.Errorf("error type checking constant value: %v", err)
-				} else if des != nil && !typ.ResolvedType().Equal(des) {
+				} else if des != nil && !typ.ResolvedType().Equivalent(des) {
 					panic(fmt.Errorf("desired constant value type %s but set type %s", des, typ.ResolvedType()))
 				}
 				typedExprs[expr.i] = typ
@@ -398,9 +422,9 @@ func typeCheckOverloadedExprs(
 	}
 
 	// The first heuristic is to prefer candidates that return the desired type.
-	if desired != nil {
+	if desired != TypeAny {
 		filterOverloads(func(o overloadImpl) bool {
-			return o.returnType().Equal(desired)
+			return o.returnType().Equivalent(desired)
 		})
 		if ok, fn, err := checkReturn(); ok {
 			return typedExprs, fn, err
@@ -411,7 +435,7 @@ func typeCheckOverloadedExprs(
 	if len(resolvableExprs) > 0 {
 		homogeneousTyp = typedExprs[resolvableExprs[0].i].ResolvedType()
 		for _, resExprs := range resolvableExprs[1:] {
-			if !homogeneousTyp.Equal(typedExprs[resExprs.i].ResolvedType()) {
+			if !homogeneousTyp.Equivalent(typedExprs[resExprs.i].ResolvedType()) {
 				homogeneousTyp = nil
 				break
 			}
@@ -436,7 +460,7 @@ func typeCheckOverloadedExprs(
 			if all {
 				for _, expr := range constExprs {
 					filterOverloads(func(o overloadImpl) bool {
-						return o.params().getAt(expr.i).Equal(homogeneousTyp)
+						return o.params().getAt(expr.i).Equivalent(homogeneousTyp)
 					})
 				}
 			}
@@ -455,7 +479,7 @@ func typeCheckOverloadedExprs(
 			natural := naturalConstantType(expr.e.(Constant))
 			if natural != nil {
 				filterOverloads(func(o overloadImpl) bool {
-					return o.params().getAt(expr.i).Equal(natural)
+					return o.params().getAt(expr.i).Equivalent(natural)
 				})
 			}
 		}
@@ -472,14 +496,14 @@ func typeCheckOverloadedExprs(
 		bestConstType = commonNumericConstantType(constExprs)
 		for _, expr := range constExprs {
 			filterOverloads(func(o overloadImpl) bool {
-				return o.params().getAt(expr.i).Equal(bestConstType)
+				return o.params().getAt(expr.i).Equivalent(bestConstType)
 			})
 		}
 		if ok, fn, err := checkReturn(); ok {
 			return typedExprs, fn, err
 		}
 		if homogeneousTyp != nil {
-			if !homogeneousTyp.Equal(bestConstType) {
+			if !homogeneousTyp.Equivalent(bestConstType) {
 				homogeneousTyp = nil
 			}
 		} else {
@@ -493,7 +517,7 @@ func typeCheckOverloadedExprs(
 	if homogeneousTyp != nil && len(placeholderExprs) > 0 {
 		for _, expr := range placeholderExprs {
 			filterOverloads(func(o overloadImpl) bool {
-				return o.params().getAt(expr.i).Equal(homogeneousTyp)
+				return o.params().getAt(expr.i).Equivalent(homogeneousTyp)
 			})
 		}
 		if ok, fn, err := checkReturn(); ok {

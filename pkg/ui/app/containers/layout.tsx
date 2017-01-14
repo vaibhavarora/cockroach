@@ -1,10 +1,10 @@
 import * as React from "react";
 import _ from "lodash";
 import { IInjectedProps } from "react-router";
+import { StickyContainer } from "react-sticky";
 
 import { TitledComponent } from "../interfaces/layout";
-import SideBar from "../components/layoutSidebar";
-import Header from "../components/layoutHeader";
+import NavigationBar from "../components/layoutSidebar";
 import TimeWindowManager from "../containers/timewindow";
 import Banner from "../containers/banner/bannerContainer";
 
@@ -35,21 +35,19 @@ export default class extends React.Component<IInjectedProps, {}> {
     }
 
     return <div>
-      <Banner />
-      <div id="content">
-        <TimeWindowManager/>
-        <SideBar/>
-        <div id="page-container">
-          <div id="root">
-            <div className="page">
-              <Header>
-                { title }
-              </Header>
-              { children }
-            </div>
-          </div>
-        </div>
-      </div>
+      <TimeWindowManager/>
+      <Banner/>
+      <NavigationBar/>
+      <StickyContainer className="page">
+        {
+          // TODO(mrtracy): The title can be moved down to individual pages,
+          // it is not always the top element on the page (for example, on
+          // pages with a back button).
+          !!title ? <section className="header">{ title }</section>
+                  : null
+        }
+        { children }
+      </StickyContainer>
     </div>;
   }
 }

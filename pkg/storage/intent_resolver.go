@@ -23,7 +23,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -106,7 +108,10 @@ func (ir *intentResolver) processWriteIntentError(
 			log.Infof(ctx, "on %s: %s", method, pushErr)
 		}
 
-		if _, isExpected := pushErr.GetDetail().(*roachpb.TransactionPushError); !isExpected {
+		switch pushErr.GetDetail().(type) {
+		case *roachpb.TransactionPushError:
+		case *roachpb.AmbiguousResultError:
+		default:
 			// If an unexpected error occurred, make sure it bubbles up to the
 			// client. Examples are timeouts and logic errors.
 			return pushErr
@@ -265,7 +270,7 @@ func (ir *intentResolver) maybePushTransactions(
 // differently and would be better served by different entry points,
 // but combining them simplifies the plumbing necessary in Replica.
 func (ir *intentResolver) processIntentsAsync(r *Replica, intents []intentsWithArg) {
-	if len(intents) == 0 {
+	if r.store.TestingKnobs().DisableAsyncIntentResolution {
 		return
 	}
 	now := r.store.Clock().Now()
@@ -273,115 +278,122 @@ func (ir *intentResolver) processIntentsAsync(r *Replica, intents []intentsWithA
 	stopper := r.store.Stopper()
 
 	for _, item := range intents {
-		if item.args.Method() != roachpb.EndTransaction {
-			if err := stopper.RunLimitedAsyncTask(ctx, ir.sem, func(ctx context.Context) {
-				// Everything here is best effort; give up rather than waiting
-				// too long (helps avoid deadlocks during test shutdown,
-				// although this is imperfect due to the use of an
-				// uninterruptible WaitGroup.Wait in beginCmds).
-				ctxWithTimeout, cancel := context.WithTimeout(ctx, base.NetworkTimeout)
-				defer cancel()
-				h := roachpb.Header{Timestamp: now}
-				resolveIntents, pushErr := ir.maybePushTransactions(ctxWithTimeout,
-					item.intents, h, roachpb.PUSH_TOUCH, true /* skipInFlight */)
-
-				// resolveIntents with poison=true because we're resolving
-				// intents outside of the context of an EndTransaction.
-				//
-				// Naively, it doesn't seem like we need to poison the abort
-				// cache since we're pushing with PUSH_TOUCH - meaning that
-				// the primary way our Push leads to aborting intents is that
-				// of the transaction having timed out (and thus presumably no
-				// client being around any more, though at the time of writing
-				// we don't guarantee that). But there are other paths in which
-				// the Push comes back successful while the coordinating client
-				// may still be active. Examples of this are when:
-				//
-				// - the transaction was aborted by someone else, but the
-				//   coordinating client may still be running.
-				// - the transaction entry wasn't written yet, which at the
-				//   time of writing has our push abort it, leading to the
-				//   same situation as above.
-				//
-				// Thus, we must poison.
-				if err := ir.resolveIntents(ctxWithTimeout, resolveIntents,
-					true /* wait */, true /* poison */); err != nil {
-					log.Warningf(ctx, "%s: failed to resolve intents: %s", r, err)
-					return
-				}
-				if pushErr != nil {
-					log.Warningf(ctx, "%s: failed to push during intent resolution: %s", r, pushErr)
-					return
-				}
-			}); err != nil {
+		err := stopper.RunLimitedAsyncTask(
+			ctx, ir.sem, false /* wait */, func(ctx context.Context) {
+				ir.processIntents(ctx, r, item, now)
+			})
+		if err != nil {
+			if err == stop.ErrThrottled {
+				// A limited task was not available. Rather than waiting for one, we
+				// reuse the current goroutine.
+				ir.processIntents(ctx, r, item, now)
+			} else {
 				log.Warningf(ctx, "failed to resolve intents: %s", err)
 				return
 			}
-		} else { // EndTransaction
-			if err := stopper.RunLimitedAsyncTask(ctx, ir.sem, func(ctx context.Context) {
-				ctxWithTimeout, cancel := context.WithTimeout(ctx, base.NetworkTimeout)
-				defer cancel()
+		}
+	}
+}
 
-				// For EndTransaction, we know the transaction is finalized so
-				// we can skip the push and go straight to the resolve.
-				//
-				// This mechanism assumes that when an EndTransaction fails,
-				// the client makes no assumptions about the result. For
-				// example, an attempt to explicitly rollback the transaction
-				// may succeed (triggering this code path), but the result may
-				// not make it back to the client.
-				if err := ir.resolveIntents(ctxWithTimeout, item.intents,
-					true /* wait */, false /* !poison */); err != nil {
-					log.Warningf(ctx, "%s: failed to resolve intents: %s", r, err)
-					return
-				}
+func (ir *intentResolver) processIntents(
+	ctx context.Context, r *Replica, item intentsWithArg, now hlc.Timestamp,
+) {
+	// Everything here is best effort; give up rather than waiting
+	// too long (helps avoid deadlocks during test shutdown,
+	// although this is imperfect due to the use of an
+	// uninterruptible WaitGroup.Wait in beginCmds).
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, base.NetworkTimeout)
+	defer cancel()
 
-				// We successfully resolved the intents, so we're able to GC from
-				// the txn span directly.
-				b := &client.Batch{}
-				txn := item.intents[0].Txn
-				txnKey := keys.TransactionKey(txn.Key, txn.ID)
+	if item.args.Method() != roachpb.EndTransaction {
+		h := roachpb.Header{Timestamp: now}
+		resolveIntents, pushErr := ir.maybePushTransactions(ctxWithTimeout,
+			item.intents, h, roachpb.PUSH_TOUCH, true /* skipInFlight */)
 
-				// This is pretty tricky. Transaction keys are range-local and
-				// so they are encoded specially. The key range addressed by
-				// (txnKey, txnKey.Next()) might be empty (since Next() does
-				// not imply monotonicity on the address side). Instead, we
-				// send this request to a range determined using the resolved
-				// transaction anchor, i.e. if the txn is anchored on
-				// /Local/RangeDescriptor/"a"/uuid, the key range below would
-				// be ["a", "a\x00"). However, the first range is special again
-				// because the above procedure results in KeyMin, but we need
-				// at least KeyLocalMax.
-				//
-				// #7880 will address this by making GCRequest less special and
-				// thus obviating the need to cook up an artificial range here.
-				var gcArgs roachpb.GCRequest
-				{
-					key := keys.MustAddr(txn.Key)
-					if localMax := keys.MustAddr(keys.LocalMax); key.Less(localMax) {
-						key = localMax
-					}
-					endKey := key.Next()
+		// resolveIntents with poison=true because we're resolving
+		// intents outside of the context of an EndTransaction.
+		//
+		// Naively, it doesn't seem like we need to poison the abort
+		// cache since we're pushing with PUSH_TOUCH - meaning that
+		// the primary way our Push leads to aborting intents is that
+		// of the transaction having timed out (and thus presumably no
+		// client being around any more, though at the time of writing
+		// we don't guarantee that). But there are other paths in which
+		// the Push comes back successful while the coordinating client
+		// may still be active. Examples of this are when:
+		//
+		// - the transaction was aborted by someone else, but the
+		//   coordinating client may still be running.
+		// - the transaction entry wasn't written yet, which at the
+		//   time of writing has our push abort it, leading to the
+		//   same situation as above.
+		//
+		// Thus, we must poison.
+		if err := ir.resolveIntents(ctxWithTimeout, resolveIntents,
+			true /* wait */, true /* poison */); err != nil {
+			log.Warningf(ctx, "%s: failed to resolve intents: %s", r, err)
+			return
+		}
+		if pushErr != nil {
+			log.Warningf(ctx, "%s: failed to push during intent resolution: %s", r, pushErr)
+			return
+		}
+	} else { // EndTransaction
+		// For EndTransaction, we know the transaction is finalized so
+		// we can skip the push and go straight to the resolve.
+		//
+		// This mechanism assumes that when an EndTransaction fails,
+		// the client makes no assumptions about the result. For
+		// example, an attempt to explicitly rollback the transaction
+		// may succeed (triggering this code path), but the result may
+		// not make it back to the client.
+		if err := ir.resolveIntents(ctxWithTimeout, item.intents,
+			true /* wait */, false /* !poison */); err != nil {
+			log.Warningf(ctx, "%s: failed to resolve intents: %s", r, err)
+			return
+		}
 
-					gcArgs.Span = roachpb.Span{
-						Key:    key.AsRawKey(),
-						EndKey: endKey.AsRawKey(),
-					}
-				}
+		// We successfully resolved the intents, so we're able to GC from
+		// the txn span directly.
+		b := &client.Batch{}
+		txn := item.intents[0].Txn
+		txnKey := keys.TransactionKey(txn.Key, *txn.ID)
 
-				gcArgs.Keys = append(gcArgs.Keys, roachpb.GCRequest_GCKey{
-					Key: txnKey,
-				})
-				b.AddRawRequest(&gcArgs)
-				if err := ir.store.db.Run(ctx, b); err != nil {
-					log.Warningf(ctx, "could not GC completed transaction anchored at %s: %s",
-						roachpb.Key(txn.Key), err)
-					return
-				}
-			}); err != nil {
-				log.Warningf(ctx, "failed to resolve intents: %s", err)
-				return
+		// This is pretty tricky. Transaction keys are range-local and
+		// so they are encoded specially. The key range addressed by
+		// (txnKey, txnKey.Next()) might be empty (since Next() does
+		// not imply monotonicity on the address side). Instead, we
+		// send this request to a range determined using the resolved
+		// transaction anchor, i.e. if the txn is anchored on
+		// /Local/RangeDescriptor/"a"/uuid, the key range below would
+		// be ["a", "a\x00"). However, the first range is special again
+		// because the above procedure results in KeyMin, but we need
+		// at least KeyLocalMax.
+		//
+		// #7880 will address this by making GCRequest less special and
+		// thus obviating the need to cook up an artificial range here.
+		var gcArgs roachpb.GCRequest
+		{
+			key := keys.MustAddr(txn.Key)
+			if localMax := keys.MustAddr(keys.LocalMax); key.Less(localMax) {
+				key = localMax
 			}
+			endKey := key.Next()
+
+			gcArgs.Span = roachpb.Span{
+				Key:    key.AsRawKey(),
+				EndKey: endKey.AsRawKey(),
+			}
+		}
+
+		gcArgs.Keys = append(gcArgs.Keys, roachpb.GCRequest_GCKey{
+			Key: txnKey,
+		})
+		b.AddRawRequest(&gcArgs)
+		if err := ir.store.db.Run(ctx, b); err != nil {
+			log.Warningf(ctx, "could not GC completed transaction anchored at %s: %s",
+				roachpb.Key(txn.Key), err)
+			return
 		}
 	}
 }
@@ -443,11 +455,12 @@ func (ir *intentResolver) resolveIntents(
 			// TODO(tschottdorf): no tracing here yet.
 			return ir.store.DB().Run(ctx, b)
 		}
-		if wait || ir.store.Stopper().RunLimitedAsyncTask(ctx, ir.sem, func(ctx context.Context) {
-			if err := action(); err != nil {
-				log.Warningf(ctx, "unable to resolve external intents: %s", err)
-			}
-		}) != nil {
+		if wait || ir.store.Stopper().RunLimitedAsyncTask(
+			ctx, ir.sem, true /* wait */, func(ctx context.Context) {
+				if err := action(); err != nil {
+					log.Warningf(ctx, "unable to resolve external intents: %s", err)
+				}
+			}) != nil {
 			// Try async to not keep the caller waiting, but when draining
 			// just go ahead and do it synchronously. See #1684.
 			// TODO(tschottdorf): This is ripe for removal.

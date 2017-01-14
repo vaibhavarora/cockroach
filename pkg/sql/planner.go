@@ -24,10 +24,13 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/mon"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/pkg/errors"
 )
 
 // planner is the centerpiece of SQL statement execution combining session
@@ -61,16 +64,21 @@ type planner struct {
 	// It's used in layers below the executor to modify the behavior of SELECT.
 	avoidCachedDescriptors bool
 
+	// If set, the planner should skip checking for the SELECT privilege when
+	// initializing plans to read from a table. This should be used with care.
+	skipSelectPrivilegeChecks bool
+
 	// If set, contains the in progress COPY FROM columns.
 	copyFrom *copyNode
 
 	// Avoid allocations by embedding commonly used visitors.
-	subqueryVisitor             subqueryVisitor
-	subqueryPlanVisitor         subqueryPlanVisitor
-	collectSubqueryPlansVisitor collectSubqueryPlansVisitor
-	nameResolutionVisitor       nameResolutionVisitor
+	subqueryVisitor       subqueryVisitor
+	subqueryPlanVisitor   subqueryPlanVisitor
+	nameResolutionVisitor nameResolutionVisitor
 
 	execCfg *ExecutorConfig
+
+	noCopy util.NoCopy
 }
 
 // makePlanner creates a new planner instances, referencing a dummy Session.
@@ -109,9 +117,15 @@ type queryRunner interface {
 
 	// The following methods run SQL queries.
 
-	// queryRow executes a SQL query string where exactly 1 result row is
-	// expected and returns that row.
-	queryRow(sql string, args ...interface{}) (parser.DTuple, error)
+	// parser.EvalPlanner gives us the QueryRow method.
+	parser.EvalPlanner
+
+	// queryRows executes a SQL query string where multiple result rows are returned.
+	queryRows(sql string, args ...interface{}) ([]parser.DTuple, error)
+
+	// queryRowsAsRoot executes a SQL query string using security.RootUser
+	// and multiple result rows are returned.
+	queryRowsAsRoot(sql string, args ...interface{}) ([]parser.DTuple, error)
 
 	// exec executes a SQL query string and returns the number of rows
 	// affected.
@@ -189,18 +203,72 @@ func (p *planner) resetContexts() {
 
 	p.semaCtx = parser.MakeSemaContext()
 	p.semaCtx.Location = &p.session.Location
+	p.semaCtx.SearchPath = p.session.SearchPath
 
 	p.evalCtx = parser.EvalContext{
-		Location: &p.session.Location,
+		Location:   &p.session.Location,
+		Database:   p.session.Database,
+		SearchPath: p.session.SearchPath,
+		Planner:    p,
 	}
 }
 
-func makeInternalPlanner(opName string, txn *client.Txn, user string) *planner {
+// runShowTransactionState returns the state of current transaction.
+func (p *planner) runShowTransactionState(txnState *txnState, implicitTxn bool) (Result, error) {
+	var result Result
+	result.PGTag = (*parser.Show)(nil).StatementTag()
+	result.Type = (*parser.Show)(nil).StatementType()
+	result.Columns = ResultColumns{{Name: "TRANSACTION STATUS", Typ: parser.TypeString}}
+	result.Rows = NewRowContainer(p.session.makeBoundAccount(), result.Columns, 0)
+	state := txnState.State
+	if implicitTxn {
+		state = NoTxn
+	}
+	if _, err := result.Rows.AddRow(parser.DTuple{parser.NewDString(state.String())}); err != nil {
+		result.Rows.Close()
+		result.Err = err
+		return result, err
+	}
+	return result, nil
+}
+
+// noteworthyInternalMemoryUsageBytes is the minimum size tracked by
+// each internal SQL pool before the pool start explicitly logging
+// overall usage growth in the log.
+var noteworthyInternalMemoryUsageBytes = envutil.EnvOrDefaultInt64("COCKROACH_NOTEWORTHY_INTERNAL_MEMORY_USAGE", 100*1024)
+
+func makeInternalPlanner(
+	opName string, txn *client.Txn, user string, memMetrics *MemoryMetrics,
+) *planner {
 	p := makePlanner(opName)
 	p.setTxn(txn)
 	p.resetContexts()
 	p.session.User = user
+
+	p.session.mon = mon.MakeUnlimitedMonitor(p.session.context,
+		"internal-root",
+		memMetrics.CurBytesCount, memMetrics.MaxBytesHist,
+		noteworthyInternalMemoryUsageBytes)
+
+	p.session.sessionMon = mon.MakeMonitor("internal-session",
+		memMetrics.SessionCurBytesCount,
+		memMetrics.SessionMaxBytesHist,
+		-1, noteworthyInternalMemoryUsageBytes/5)
+	p.session.sessionMon.Start(p.session.context, &p.session.mon, mon.BoundAccount{})
+
+	p.session.TxnState.mon = mon.MakeMonitor("internal-txn",
+		memMetrics.TxnCurBytesCount,
+		memMetrics.TxnMaxBytesHist,
+		-1, noteworthyInternalMemoryUsageBytes/5)
+	p.session.TxnState.mon.Start(p.session.context, &p.session.mon, mon.BoundAccount{})
+
 	return p
+}
+
+func finishInternalPlanner(p *planner) {
+	p.session.TxnState.mon.Stop(p.session.context)
+	p.session.sessionMon.Stop(p.session.context)
+	p.session.mon.Stop(p.session.context)
 }
 
 // resetForBatch implements the queryRunner interface.
@@ -212,14 +280,19 @@ func (p *planner) resetForBatch(e *Executor) {
 	p.databaseCache = cache
 	p.session.TxnState.schemaChangers.curGroupNum++
 	p.resetContexts()
-	p.evalCtx.NodeID = e.nodeID
+	p.evalCtx.NodeID = e.cfg.NodeID.Get()
 	p.evalCtx.ReCache = e.reCache
 }
 
-// query initializes a planNode from a SQL statement string.  This
-// should not be used directly; queryRow() and exec() below should be
-// used instead.
+// query initializes a planNode from a SQL statement string. Close() must be
+// called on the returned planNode after use.
 func (p *planner) query(sql string, args ...interface{}) (planNode, error) {
+	if log.V(2) {
+		log.Infof(p.ctx(), "internal query: %s", sql)
+		if len(args) > 0 {
+			log.Infof(p.ctx(), "placeholders: %q", args)
+		}
+	}
 	stmt, err := parser.ParseOneTraditional(sql)
 	if err != nil {
 		return nil, err
@@ -228,42 +301,70 @@ func (p *planner) query(sql string, args ...interface{}) (planNode, error) {
 	return p.makePlan(stmt, false)
 }
 
-// queryRow implements the queryRunner interface.
-func (p *planner) queryRow(sql string, args ...interface{}) (parser.DTuple, error) {
-	p.session.mon.StartMonitor()
-	defer p.session.mon.StopMonitor(p.ctx())
+// QueryRow implements the parser.EvalPlanner interface.
+func (p *planner) QueryRow(sql string, args ...interface{}) (parser.DTuple, error) {
+	rows, err := p.queryRows(sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	switch len(rows) {
+	case 0:
+		return nil, nil
+	case 1:
+		return rows[0], nil
+	default:
+		return nil, &parser.MultipleResultsError{SQL: sql}
+	}
+}
+
+// queryRows implements the queryRunner interface.
+func (p *planner) queryRows(sql string, args ...interface{}) ([]parser.DTuple, error) {
 	plan, err := p.query(sql, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer plan.Close()
-	if err := plan.Start(); err != nil {
+	if err := p.startPlan(plan); err != nil {
 		return nil, err
 	}
-	if next, err := plan.Next(); !next {
+	if next, err := plan.Next(); err != nil || !next {
 		return nil, err
 	}
-	values := plan.Values()
-	next, err := plan.Next()
-	if err != nil {
-		return nil, err
+
+	var rows []parser.DTuple
+	for {
+		if values := plan.Values(); values != nil {
+			valCopy := append(parser.DTuple(nil), values...)
+			rows = append(rows, valCopy)
+		}
+
+		next, err := plan.Next()
+		if err != nil {
+			return nil, err
+		}
+		if !next {
+			break
+		}
 	}
-	if next {
-		return nil, errors.Errorf("%s: unexpected multiple results", sql)
-	}
-	return values, nil
+	return rows, nil
+}
+
+// queryRowsAsRoot implements the queryRunner interface.
+func (p *planner) queryRowsAsRoot(sql string, args ...interface{}) ([]parser.DTuple, error) {
+	currentUser := p.session.User
+	defer func() { p.session.User = currentUser }()
+	p.session.User = security.RootUser
+	return p.queryRows(sql, args...)
 }
 
 // exec implements the queryRunner interface.
 func (p *planner) exec(sql string, args ...interface{}) (int, error) {
-	p.session.mon.StartMonitor()
-	defer p.session.mon.StopMonitor(p.ctx())
 	plan, err := p.query(sql, args...)
 	if err != nil {
 		return 0, err
 	}
 	defer plan.Close()
-	if err := plan.Start(); err != nil {
+	if err := p.startPlan(plan); err != nil {
 		return 0, err
 	}
 	return countRowsAffected(plan)
@@ -332,9 +433,16 @@ func (p *planner) fillFKTableMap(m tableLookupsByID) error {
 	return nil
 }
 
-func (p *planner) virtualSchemas() *virtualSchemaHolder {
-	if p.session.executor == nil {
-		return nil
+// isDatabaseVisible returns true if the given database is visible to the
+// current user. Only the current database and system databases are available
+// to ordinary users; everything is available to root.
+func (p *planner) isDatabaseVisible(dbName string) bool {
+	if p.session.User == security.RootUser {
+		return true
+	} else if dbName == p.evalCtx.Database {
+		return true
+	} else if isSystemDatabaseName(dbName) {
+		return true
 	}
-	return &p.session.executor.virtualSchemas
+	return false
 }

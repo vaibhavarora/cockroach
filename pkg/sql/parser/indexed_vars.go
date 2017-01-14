@@ -19,10 +19,15 @@ package parser
 import (
 	"bytes"
 	"fmt"
+
+	"github.com/pkg/errors"
 )
 
 // IndexedVarContainer provides the implementation of TypeCheck, Eval, and
 // String for IndexedVars.
+// If an object that wishes to implement this interface has lost the
+// textual name that an IndexedVar originates from, it can use the
+// ordinal column reference syntax: fmt.Fprintf(buf, "@%d", idx)
 type IndexedVarContainer interface {
 	IndexedVarEval(idx int, ctx *EvalContext) (Datum, error)
 	IndexedVarResolvedType(idx int) Type
@@ -50,28 +55,72 @@ func (v *IndexedVar) Walk(_ Visitor) Expr {
 
 // TypeCheck is part of the Expr interface.
 func (v *IndexedVar) TypeCheck(_ *SemaContext, desired Type) (TypedExpr, error) {
+	if v.container == nil {
+		// A more technically correct message would be to say that the
+		// reference is unbound and thus cannot be typed. However this is
+		// a tad bit too technical for the average SQL use case and
+		// instead we acknowledge that we only get here if someone has
+		// used a column reference in a place where it's not allowed by
+		// the docs, so just say that instead.
+		return nil, errors.Errorf("column reference %s not allowed in this context", v)
+	}
 	return v, nil
 }
 
 // Eval is part of the TypedExpr interface.
 func (v *IndexedVar) Eval(ctx *EvalContext) (Datum, error) {
+	if v.container == nil {
+		panic("indexed var must be bound to a container before evaluation")
+	}
 	return v.container.IndexedVarEval(v.Idx, ctx)
 }
 
 // ResolvedType is part of the TypedExpr interface.
 func (v *IndexedVar) ResolvedType() Type {
+	if v.container == nil {
+		panic("indexed var must be bound to a container before type resolution")
+	}
 	return v.container.IndexedVarResolvedType(v.Idx)
 }
 
 // Format implements the NodeFormatter interface.
 func (v *IndexedVar) Format(buf *bytes.Buffer, f FmtFlags) {
-	v.container.IndexedVarFormat(buf, f, v.Idx)
+	if f.indexedVarFormat != nil {
+		f.indexedVarFormat(buf, f, v.container, v.Idx)
+	} else if f.symbolicVars || v.container == nil {
+		fmt.Fprintf(buf, "@%d", v.Idx+1)
+	} else {
+		v.container.IndexedVarFormat(buf, f, v.Idx)
+	}
 }
 
-// IndexedVarHelper is a structure that helps with initialization of IndexVars.
+// NewOrdinalReference is a helper routine to create a standalone
+// IndexedVar with the given index value. This needs to undergo
+// BindIfUnbound() below before it can be fully used.
+func NewOrdinalReference(r int) *IndexedVar {
+	return &IndexedVar{Idx: r, container: nil}
+}
+
+// IndexedVarHelper is a structure that helps with initialization of IndexedVars.
 type IndexedVarHelper struct {
 	vars      []IndexedVar
 	container IndexedVarContainer
+}
+
+// BindIfUnbound attaches an IndexedVar to an existing container.
+// This is needed for standalone column ordinals created during parsing.
+func (h *IndexedVarHelper) BindIfUnbound(ivar *IndexedVar) error {
+	if ivar.container != nil {
+		return nil
+	}
+	if ivar.Idx < 0 || ivar.Idx >= len(h.vars) {
+		return errors.Errorf("invalid column ordinal: @%d", ivar.Idx+1)
+	}
+	// This container must also remember it has "seen" the variable
+	// so that IndexedVarUsed() below returns the right results.
+	// The IndexedVar() method ensures this.
+	*ivar = *h.IndexedVar(ivar.Idx)
+	return nil
 }
 
 // MakeIndexedVarHelper initializes an IndexedVarHelper structure.
@@ -135,3 +184,44 @@ func (h *IndexedVarHelper) GetIndexedVars() []IndexedVar {
 	h.vars = nil
 	return ret
 }
+
+// Reset re-initializes an IndexedVarHelper structure with the same
+// number of slots. After a helper has been reset, all the expressions
+// that were linked to the helper before it was reset must be
+// re-bound, e.g. using Rebind(). Resetting is useful to ensure that
+// the helper's knowledge of which IndexedVars are actually used by
+// linked expressions is up to date, especially after
+// optimizations/transforms which eliminate sub-expressions. The
+// optimizations performed by setNeededColumns() work then best.
+func (h *IndexedVarHelper) Reset() {
+	h.vars = make([]IndexedVar, len(h.vars))
+}
+
+// Rebind collects all the IndexedVars in the given expression
+// and re-binds them to this helper.
+func (h *IndexedVarHelper) Rebind(expr TypedExpr, alsoReset, normalizeToNonNil bool) TypedExpr {
+	if alsoReset {
+		h.Reset()
+	}
+	if expr == nil || expr == DBoolTrue {
+		if normalizeToNonNil {
+			return DBoolTrue
+		}
+		return nil
+	}
+	ret, _ := WalkExpr(h, expr)
+	return ret.(TypedExpr)
+}
+
+var _ Visitor = &IndexedVarHelper{}
+
+// VisitPre implements the Visitor interface.
+func (h *IndexedVarHelper) VisitPre(expr Expr) (recurse bool, newExpr Expr) {
+	if iv, ok := expr.(*IndexedVar); ok {
+		return false, h.IndexedVar(iv.Idx)
+	}
+	return true, expr
+}
+
+// VisitPost implements the Visitor interface.
+func (*IndexedVarHelper) VisitPost(expr Expr) Expr { return expr }

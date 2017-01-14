@@ -4,9 +4,9 @@ CREATE DATABASE "foo-bar"
 query T
 SHOW DATABASES
 ----
+foo-bar
 information_schema
 pg_catalog
-foo-bar
 system
 test
 
@@ -27,9 +27,9 @@ CREATE DATABASE "foo bar"
 query T
 SHOW DATABASES
 ----
+foo bar
 information_schema
 pg_catalog
-foo bar
 system
 test
 
@@ -57,19 +57,19 @@ statement OK
 CREATE TABLE d2.t1 (k STRING PRIMARY KEY, v STRING)
 
 statement ok
-CREATE VIEW d1.v1 AS SELECT * FROM d1.t1
+CREATE VIEW d1.v1 AS SELECT k,v FROM d1.t1
 
 statement ok
-CREATE VIEW d1.v2 AS SELECT * FROM d1.v1
+CREATE VIEW d1.v2 AS SELECT k,v FROM d1.v1
 
 statement ok
-CREATE VIEW d2.v1 AS SELECT * FROM d2.t1
+CREATE VIEW d2.v1 AS SELECT k,v FROM d2.t1
 
 statement ok
-CREATE VIEW d2.v2 AS SELECT * FROM d1.t1
+CREATE VIEW d2.v2 AS SELECT k,v FROM d1.t1
 
 statement ok
-CREATE VIEW d2.v3 AS SELECT * FROM d1.v2
+CREATE VIEW d2.v3 AS SELECT k,v FROM d1.v2
 
 statement ok
 CREATE VIEW d2.v4 AS SELECT COUNT(*) FROM d1.t1 as x JOIN d2.t1 as y ON x.k = y.k
@@ -123,10 +123,10 @@ SELECT * FROM d2.v4
 query T
 SHOW DATABASES
 ----
-information_schema
-pg_catalog
 d1
 d2
+information_schema
+pg_catalog
 system
 test
 
@@ -136,9 +136,9 @@ DROP DATABASE d1
 query T
 SHOW DATABASES
 ----
+d2
 information_schema
 pg_catalog
-d2
 system
 test
 
@@ -171,3 +171,36 @@ test
 
 query error database "d2" does not exist
 SELECT * FROM d2.v1
+
+## drop a database containing tables with foreign key constraints, e.g. #8497
+
+statement ok
+CREATE DATABASE constraint_db
+
+statement ok
+CREATE TABLE constraint_db.t1 (
+  p FLOAT PRIMARY KEY,
+  a INT UNIQUE CHECK (a > 4),
+  CONSTRAINT c2 CHECK (a < 99)
+)
+
+statement ok
+CREATE TABLE constraint_db.t2 (
+    t1_ID INT,
+    CONSTRAINT fk FOREIGN KEY (t1_ID) REFERENCES constraint_db.t1(a),
+    INDEX (t1_ID)
+)
+
+statement ok
+DROP DATABASE constraint_db
+
+query T
+SHOW DATABASES
+----
+information_schema
+pg_catalog
+system
+test
+
+query error database "constraint_db" does not exist
+SELECT * FROM constraint_db.t1

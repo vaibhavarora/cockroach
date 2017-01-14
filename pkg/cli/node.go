@@ -46,7 +46,7 @@ var lsNodesCmd = &cobra.Command{
 	commands.
 	`,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runLsNodes),
+	RunE:         MaybeDecorateGRPCError(runLsNodes),
 }
 
 func runLsNodes(cmd *cobra.Command, args []string) error {
@@ -89,7 +89,9 @@ var nodesColumnHeaders = []string{
 	"system_bytes",
 	"replicas_leaders",
 	"replicas_leaseholders",
-	"ranges_available",
+	"ranges",
+	"ranges_unavailable",
+	"ranges_underreplicated",
 }
 
 var statusNodeCmd = &cobra.Command{
@@ -100,7 +102,7 @@ var statusNodeCmd = &cobra.Command{
 	is specified, this will display the status for all nodes in the cluster.
 	`,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runStatusNode),
+	RunE:         MaybeDecorateGRPCError(runStatusNode),
 }
 
 func runStatusNode(cmd *cobra.Command, args []string) error {
@@ -177,7 +179,9 @@ func nodeStatusesToRows(statuses []status.NodeStatus) [][]string {
 			strconv.FormatInt(int64(metricVals["sysbytes"]), 10),
 			strconv.FormatInt(int64(metricVals["replicas.leaders"]), 10),
 			strconv.FormatInt(int64(metricVals["replicas.leaseholders"]), 10),
-			strconv.FormatInt(int64(metricVals["ranges.available"]), 10),
+			strconv.FormatInt(int64(metricVals["ranges"]), 10),
+			strconv.FormatInt(int64(metricVals["ranges.unavailable"]), 10),
+			strconv.FormatInt(int64(metricVals["ranges.underreplicated"]), 10),
 		})
 	}
 	return rows

@@ -18,6 +18,7 @@ package sql
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/pkg/errors"
 )
@@ -29,7 +30,7 @@ type planMaker interface {
 	// It performs as many early checks as possible on the structure of
 	// the SQL statement, including verifying permissions and type
 	// checking.  The returned plan object is not ready to execute; the
-	// planNode.expandPlan() method must be called first. See makePlan()
+	// optimizePlan() method must be called first. See makePlan()
 	// below.
 	//
 	// This method should not be used directly; instead prefer makePlan()
@@ -37,7 +38,7 @@ type planMaker interface {
 	newPlan(stmt parser.Statement, desiredTypes []parser.Type, autoCommit bool) (planNode, error)
 
 	// makePlan prepares the query plan for a single SQL statement.  it
-	// calls newPlan() then expandPlan() on the result.  Execution must
+	// calls newPlan() then optimizePlan() on the result.  Execution must
 	// start by calling Start() first and then iterating using Next()
 	// and Values() in order to retrieve matching rows.
 	//
@@ -60,7 +61,7 @@ type planMaker interface {
 	// that the plan will never be run. A planNode built with prepare()
 	// will do just enough work to check the structural validity of the
 	// SQL statement and determine types for placeholders. However it is
-	// not appropriate to call expandPlan(), Next() or Values() on a plan
+	// not appropriate to call optimizePlan(), Next() or Values() on a plan
 	// object created with prepare().
 	prepare(stmt parser.Statement) (planNode, error)
 }
@@ -68,13 +69,19 @@ type planMaker interface {
 var _ planMaker = &planner{}
 
 // planNode defines the interface for executing a query or portion of a query.
+//
+// The following methods apply to planNodes and contain special cases
+// for each type; they thus need to be extended when adding/removing
+// planNode instances:
+// - planMaker.newPlan()
+// - planMaker.prepare()
+// - planMaker.setNeededColumns()  (needed_columns.go)
+// - planMaker.expandPlan()        (expand_plan.go)
+// - planVisitor.visit()           (walk.go)
+// - planNodeNames                 (walk.go)
+// - planMaker.optimizeFilters()   (filter_opt.go)
+//
 type planNode interface {
-	// ExplainTypes reports the data types involved in the node, excluding
-	// the result column types.
-	//
-	// Available after newPlan().
-	ExplainTypes(explainFn func(elem string, desc string))
-
 	// SetLimitHint tells this node to optimize things under the assumption that
 	// we will only need the first `numRows` rows.
 	//
@@ -87,10 +94,10 @@ type planNode interface {
 	// never be called more than numRows times.
 	//
 	// The action of calling this method triggers limit-based query plan
-	// optimizations, e.g. in selectNode.expandPlan(). The primary user
-	// is limitNode.Start() after it has fully evaluated the limit and
-	// offset expressions. EXPLAIN also does this, see
-	// explainTypesNode.expandPlan() and explainPlanNode.expandPlan().
+	// optimizations, e.g. in expandSelectNode(). The primary user is
+	// limitNode.Start() after it has fully evaluated the limit and
+	// offset expressions. EXPLAIN also does this, see expandPlan() for
+	// explainPlanNode.
 	//
 	// TODO(radu) Arguably, this interface has room for improvement.  A
 	// limitNode may have a hard limit locally which is larger than the
@@ -100,35 +107,18 @@ type planNode interface {
 	// Available during/after newPlan().
 	SetLimitHint(numRows int64, soft bool)
 
-	// expandPlan finalizes type checking of placeholders and expands
-	// the query plan to its final form, including index selection and
-	// expansion of sub-queries. Returns an error if the initialization
-	// fails.  The SQL "prepare" phase, as well as the EXPLAIN
-	// statement, should merely build the plan node(s) and call
-	// expandPlan(). This is called automatically by makePlan().
-	//
-	// Available after newPlan().
-	expandPlan() error
-
-	// ExplainPlan returns a name and description and a list of child nodes.
-	//
-	// Available after expandPlan() (or makePlan).
-	ExplainPlan(verbose bool) (name, description string, children []planNode)
-
 	// Columns returns the column names and types. The length of the
 	// returned slice is guaranteed to be equal to the length of the
 	// tuple returned by Values().
 	//
-	// Stable after expandPlan() (or makePlan).
-	// Available after newPlan(), but may change on intermediate plan
-	// nodes during expandPlan() due to index selection.
+	// Available after newPlan().
 	Columns() ResultColumns
 
 	// The indexes of the columns the output is ordered by.
 	//
-	// Stable after expandPlan() (or makePlan).
+	// Stable after optimizePlan() (or makePlan).
 	// Available after newPlan(), but may change on intermediate plan
-	// nodes during expandPlan() due to index selection.
+	// nodes during optimizePlan() due to index selection.
 	Ordering() orderingInfo
 
 	// MarkDebug puts the node in a special debugging mode, which allows
@@ -136,14 +126,16 @@ type planNode interface {
 	// before the first call to Next() since it may need to recurse into
 	// sub-nodes created by Start().
 	//
-	// Available after expandPlan().
+	// Available after optimizePlan().
 	MarkDebug(mode explainMode)
 
 	// Start begins the processing of the query/statement and starts
 	// performing side effects for data-modifying statements. Returns an
 	// error if initial processing fails.
 	//
-	// Available after expandPlan() (or makePlan).
+	// Note: Don't use directly. Use startPlan() instead.
+	//
+	// Available after optimizePlan() (or makePlan).
 	Start() error
 
 	// Next performs one unit of work, returning false if an error is
@@ -185,34 +177,38 @@ type planNodeFastPath interface {
 	FastPathResults() (int, bool)
 }
 
-var _ planNode = &distinctNode{}
-var _ planNode = &groupNode{}
-var _ planNode = &indexJoinNode{}
-var _ planNode = &limitNode{}
-var _ planNode = &scanNode{}
-var _ planNode = &sortNode{}
-var _ planNode = &valuesNode{}
-var _ planNode = &selectTopNode{}
-var _ planNode = &selectNode{}
-var _ planNode = &unionNode{}
-var _ planNode = &emptyNode{}
-var _ planNode = &explainDebugNode{}
-var _ planNode = &explainTraceNode{}
-var _ planNode = &insertNode{}
-var _ planNode = &updateNode{}
-var _ planNode = &deleteNode{}
+var _ planNode = &alterTableNode{}
 var _ planNode = &createDatabaseNode{}
+var _ planNode = &createIndexNode{}
 var _ planNode = &createTableNode{}
 var _ planNode = &createViewNode{}
-var _ planNode = &createIndexNode{}
+var _ planNode = &delayedNode{}
+var _ planNode = &deleteNode{}
+var _ planNode = &distinctNode{}
 var _ planNode = &dropDatabaseNode{}
 var _ planNode = &dropIndexNode{}
 var _ planNode = &dropTableNode{}
 var _ planNode = &dropViewNode{}
-var _ planNode = &alterTableNode{}
+var _ planNode = &emptyNode{}
+var _ planNode = &explainDebugNode{}
+var _ planNode = &explainTraceNode{}
+var _ planNode = &filterNode{}
+var _ planNode = &groupNode{}
+var _ planNode = &indexJoinNode{}
+var _ planNode = &insertNode{}
 var _ planNode = &joinNode{}
-var _ planNode = &distSQLNode{}
-var _ planNode = &delayedNode{}
+var _ planNode = &limitNode{}
+var _ planNode = &ordinalityNode{}
+var _ planNode = &scanNode{}
+var _ planNode = &renderNode{}
+var _ planNode = &selectTopNode{}
+var _ planNode = &sortNode{}
+var _ planNode = &splitNode{}
+var _ planNode = &unionNode{}
+var _ planNode = &updateNode{}
+var _ planNode = &valueGenerator{}
+var _ planNode = &valuesNode{}
+var _ planNode = &windowNode{}
 
 // makePlan implements the Planner interface.
 func (p *planner) makePlan(stmt parser.Statement, autoCommit bool) (planNode, error) {
@@ -220,10 +216,28 @@ func (p *planner) makePlan(stmt parser.Statement, autoCommit bool) (planNode, er
 	if err != nil {
 		return nil, err
 	}
-	if err := plan.expandPlan(); err != nil {
+	if err := p.semaCtx.Placeholders.AssertAllAssigned(); err != nil {
 		return nil, err
 	}
+
+	needed := allColumns(plan)
+	plan, err = p.optimizePlan(plan, needed)
+	if err != nil {
+		return nil, err
+	}
+
+	if log.V(3) {
+		log.Infof(p.ctx(), "statement %s compiled to:\n%s", stmt, planToString(plan))
+	}
 	return plan, nil
+}
+
+// startPlan starts the plan and all its sub-query nodes.
+func (p *planner) startPlan(plan planNode) error {
+	if err := p.startSubqueryPlans(plan); err != nil {
+		return err
+	}
+	return plan.Start()
 }
 
 // newPlan constructs a planNode from a statement. This is used
@@ -242,6 +256,19 @@ func (p *planner) newPlan(
 		p.txn.SetSystemConfigTrigger()
 	}
 
+	// TODO(dan): This iteration makes the plan dispatch no longer constant
+	// time. We could fix that with a map of `reflect.Type` but including
+	// reflection in such a primary codepath is unfortunate. Instead, the
+	// upcoming IR work will provide unique numeric type tags, which will
+	// elegantly solve this.
+	for _, planHook := range planHooks {
+		if fn, header, err := planHook(p.ctx(), stmt, p.execCfg); err != nil {
+			return nil, err
+		} else if fn != nil {
+			return &hookFnNode{f: fn, header: header}, nil
+		}
+	}
+
 	switch n := stmt.(type) {
 	case *parser.AlterTable:
 		return p.AlterTable(n)
@@ -257,6 +284,8 @@ func (p *planner) newPlan(
 		return p.CreateIndex(n)
 	case *parser.CreateTable:
 		return p.CreateTable(n)
+	case *parser.CreateUser:
+		return p.CreateUser(n)
 	case *parser.CreateView:
 		return p.CreateView(n)
 	case *parser.Delete:
@@ -303,22 +332,24 @@ func (p *planner) newPlan(
 		return p.SetDefaultIsolation(n)
 	case *parser.Show:
 		return p.Show(n)
+	case *parser.ShowColumns:
+		return p.ShowColumns(n)
+	case *parser.ShowConstraints:
+		return p.ShowConstraints(n)
 	case *parser.ShowCreateTable:
 		return p.ShowCreateTable(n)
 	case *parser.ShowCreateView:
 		return p.ShowCreateView(n)
-	case *parser.ShowColumns:
-		return p.ShowColumns(n)
 	case *parser.ShowDatabases:
 		return p.ShowDatabases(n)
 	case *parser.ShowGrants:
 		return p.ShowGrants(n)
 	case *parser.ShowIndex:
 		return p.ShowIndex(n)
-	case *parser.ShowConstraints:
-		return p.ShowConstraints(n)
 	case *parser.ShowTables:
 		return p.ShowTables(n)
+	case *parser.ShowUsers:
+		return p.ShowUsers(n)
 	case *parser.Split:
 		return p.Split(n)
 	case *parser.Truncate:
@@ -364,6 +395,8 @@ func (p *planner) prepare(stmt parser.Statement) (planNode, error) {
 		return p.ShowConstraints(n)
 	case *parser.ShowTables:
 		return p.ShowTables(n)
+	case *parser.ShowUsers:
+		return p.ShowUsers(n)
 	case *parser.Split:
 		return p.Split(n)
 	case *parser.Update:

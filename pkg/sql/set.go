@@ -25,7 +25,6 @@ import (
 	"gopkg.in/inf.v0"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
@@ -64,37 +63,95 @@ func (p *planner) Set(n *parser.Set) (planNode, error) {
 			}
 		}
 		p.session.Database = dbName
+		p.evalCtx.Database = dbName
 
 	case `SYNTAX`:
 		s, err := p.getStringVal(name, typedValues)
 		if err != nil {
 			return nil, err
 		}
-		switch sqlbase.NormalizeName(parser.Name(s)) {
-		case sqlbase.ReNormalizeName(parser.Modern.String()):
+		switch parser.Name(s).Normalize() {
+		case parser.ReNormalizeName(parser.Modern.String()):
 			p.session.Syntax = int32(parser.Modern)
-		case sqlbase.ReNormalizeName(parser.Traditional.String()):
+		case parser.ReNormalizeName(parser.Traditional.String()):
 			p.session.Syntax = int32(parser.Traditional)
 		default:
 			return nil, fmt.Errorf("%s: \"%s\" is not in (%q, %q)", name, s, parser.Modern, parser.Traditional)
 		}
 
-	case `EXTRA_FLOAT_DIGITS`:
-		// These settings are sent by the JDBC driver but we silently ignore them.
+	case `DEFAULT_TRANSACTION_ISOLATION`:
+		// It's unfortunate that clients want us to support both SET
+		// SESSION CHARACTERISTICS AS TRANSACTION ..., which takes the
+		// isolation level as keywords/identifiers (e.g. JDBC), and SET
+		// DEFAULT_TRANSACTION_ISOLATION TO '...', which takes an
+		// expression (e.g. psycopg2). But that's how it is.  Just ensure
+		// this code keeps in sync with SetDefaultIsolation() below.
+		s, err := p.getStringVal(name, typedValues)
+		if err != nil {
+			return nil, err
+		}
+		switch strings.ToUpper(s) {
+		case `READ UNCOMMITTED`, `READ COMMITTED`, `SNAPSHOT`:
+			p.session.DefaultIsolationLevel = enginepb.SNAPSHOT
+		case `REPEATABLE READ`, `SERIALIZABLE`:
+			p.session.DefaultIsolationLevel = enginepb.SERIALIZABLE
+		default:
+			return nil, fmt.Errorf("%s: unknown isolation level: %q", name, s)
+		}
 
 	case `DIST_SQL`:
 		s, err := p.getStringVal(name, typedValues)
 		if err != nil {
 			return nil, err
 		}
-		switch sqlbase.NormalizeName(parser.Name(s)) {
-		case sqlbase.ReNormalizeName("sync"):
-			p.session.DistSQLMode = distSQLSync
-		case sqlbase.ReNormalizeName("async"):
-			p.session.DistSQLMode = distSQLAsync
+		switch parser.Name(s).Normalize() {
+		case parser.ReNormalizeName("off"):
+			p.session.DistSQLMode = distSQLOff
+		case parser.ReNormalizeName("on"):
+			p.session.DistSQLMode = distSQLOn
+		case parser.ReNormalizeName("always"):
+			p.session.DistSQLMode = distSQLAlways
 		default:
 			return nil, fmt.Errorf("%s: \"%s\" not supported", name, s)
 		}
+
+	// These settings are sent by various client drivers. We don't support
+	// changing them, so we either silently ignore them or throw an error given
+	// a setting that we do not respect.
+	case `EXTRA_FLOAT_DIGITS`:
+	// See https://www.postgresql.org/docs/9.6/static/runtime-config-client.html
+	case `APPLICATION_NAME`:
+	// Set by clients to improve query logging.
+	// See https://www.postgresql.org/docs/9.6/static/runtime-config-logging.html#GUC-APPLICATION-NAME
+	case `CLIENT_ENCODING`:
+		// See https://www.postgresql.org/docs/9.6/static/multibyte.html
+		s, err := p.getStringVal(name, typedValues)
+		if err != nil {
+			return nil, err
+		}
+		if strings.ToUpper(s) != "UTF8" {
+			return nil, fmt.Errorf("non-UTF8 encoding %s not supported", s)
+		}
+	case `SEARCH_PATH`:
+	// Controls the schema search order. We don't really support this as we
+	// don't have first-class support for schemas.
+	// TODO(jordan) can we hook this up to EvalContext.SearchPath without
+	// breaking things?
+	// See https://www.postgresql.org/docs/9.6/static/runtime-config-client.html
+	case `STANDARD_CONFORMING_STRINGS`:
+		// If true, escape backslash literals in strings. We do this by default,
+		// and we do not support the opposite behavior.
+		// See https://www.postgresql.org/docs/9.1/static/runtime-config-compatible.html#GUC-STANDARD-CONFORMING-STRINGS
+		s, err := p.getStringVal(name, typedValues)
+		if err != nil {
+			return nil, err
+		}
+		if parser.Name(s).Normalize() != parser.ReNormalizeName("on") {
+			return nil, fmt.Errorf("%s: \"%s\" not supported", name, s)
+		}
+	case `CLIENT_MIN_MESSAGES`:
+	// Controls returned message verbosity. We don't support this.
+	// See https://www.postgresql.org/docs/9.6/static/runtime-config-compatible.html
 
 	default:
 		return nil, fmt.Errorf("unknown variable: %q", name)
@@ -119,6 +176,8 @@ func (p *planner) getStringVal(name string, values []parser.TypedExpr) (string, 
 }
 
 func (p *planner) SetDefaultIsolation(n *parser.SetDefaultIsolation) (planNode, error) {
+	// Note: We also support SET DEFAULT_TRANSACTION_ISOLATION TO ' .... ' above.
+	// Ensure both versions stay in sync.
 	switch n.Isolation {
 	case parser.SerializableIsolation:
 		p.session.DefaultIsolationLevel = enginepb.SERIALIZABLE

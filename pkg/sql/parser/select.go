@@ -215,6 +215,13 @@ type TableExpr interface {
 func (*AliasedTableExpr) tableExpr() {}
 func (*ParenTableExpr) tableExpr()   {}
 func (*JoinTableExpr) tableExpr()    {}
+func (*FuncExpr) tableExpr()         {}
+
+// The Explain node, used for the EXPLAIN statement, can also be
+// present as a data source in FROM, and thus implements the TableExpr
+// interface.
+
+func (*Explain) tableExpr() {}
 
 // IndexHints represents "@<index_name>" or "@{param[,param]}" where param is
 // one of:
@@ -245,9 +252,10 @@ func (n *IndexHints) Format(buf *bytes.Buffer, f FmtFlags) {
 // AliasedTableExpr represents a table expression coupled with an optional
 // alias.
 type AliasedTableExpr struct {
-	Expr  TableExpr
-	Hints *IndexHints
-	As    AliasClause
+	Expr       TableExpr
+	Hints      *IndexHints
+	Ordinality bool
+	As         AliasClause
 }
 
 // Format implements the NodeFormatter interface.
@@ -255,6 +263,9 @@ func (node *AliasedTableExpr) Format(buf *bytes.Buffer, f FmtFlags) {
 	FormatNode(buf, f, node.Expr)
 	if node.Hints != nil {
 		FormatNode(buf, f, node.Hints)
+	}
+	if node.Ordinality {
+		buf.WriteString(" WITH ORDINALITY")
 	}
 	if node.As.Alias != "" {
 		buf.WriteString(" AS ")

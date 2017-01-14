@@ -20,22 +20,24 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/coreos/etcd/raft"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
 const rangeID = 1
 const keySize = 1 << 7  // 128 B
 const valSize = 1 << 10 // 1 KiB
 
-func fillTestRange(t testing.TB, rep *Replica, size int64) {
+func fillTestRange(rep *Replica, size int64) error {
 	src := rand.New(rand.NewSource(0))
 	for i := int64(0); i < size/int64(keySize+valSize); i++ {
 		key := keys.MakeRowSentinelKey(randutil.RandBytes(src, keySize))
@@ -44,29 +46,31 @@ func fillTestRange(t testing.TB, rep *Replica, size int64) {
 		if _, pErr := client.SendWrappedWith(context.Background(), rep, roachpb.Header{
 			RangeID: rangeID,
 		}, &pArgs); pErr != nil {
-			t.Fatal(pErr)
+			return pErr.GoError()
 		}
 	}
 	rep.mu.Lock()
 	after := rep.mu.state.Stats.Total()
 	rep.mu.Unlock()
 	if after < size {
-		t.Fatalf("range not full after filling: wrote %d, but range at %d", size, after)
+		return errors.Errorf("range not full after filling: wrote %d, but range at %d", size, after)
 	}
+	return nil
 }
 
 func TestSkipLargeReplicaSnapshot(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	storeCfg := TestStoreConfig()
+	storeCfg := TestStoreConfig(nil)
 	storeCfg.TestingKnobs.DisableSplitQueue = true
 
-	const snapSize = 1 << 20 // 1 MiB
+	const snapSize = 5 * (keySize + valSize)
 	cfg := config.DefaultZoneConfig()
 	cfg.RangeMaxBytes = snapSize
 	defer config.TestingSetDefaultZoneConfig(cfg)()
 
-	store, _, stopper := createTestStoreWithContext(t, &storeCfg)
+	stopper := stop.NewStopper()
 	defer stopper.Stop()
+	store := createTestStoreWithConfig(t, stopper, &storeCfg)
 
 	rep, err := store.GetReplica(rangeID)
 	if err != nil {
@@ -74,20 +78,26 @@ func TestSkipLargeReplicaSnapshot(t *testing.T) {
 	}
 	rep.SetMaxBytes(snapSize)
 
-	if pErr := rep.redirectOnOrAcquireLease(context.Background()); pErr != nil {
+	if _, pErr := rep.redirectOnOrAcquireLease(context.Background()); pErr != nil {
 		t.Fatal(pErr)
 	}
 
-	fillTestRange(t, rep, snapSize)
-
-	if _, err := rep.GetSnapshot(context.Background()); err != nil {
+	if err := fillTestRange(rep, snapSize); err != nil {
 		t.Fatal(err)
 	}
-	rep.CloseOutSnap()
 
-	fillTestRange(t, rep, snapSize*2)
+	if snap, err := rep.GetSnapshot(context.Background(), "test"); err != nil {
+		t.Fatal(err)
+	} else {
+		snap.Close()
+	}
 
-	if _, err := rep.Snapshot(); err != raft.ErrSnapshotTemporarilyUnavailable {
+	if err := fillTestRange(rep, snapSize*2); err != nil {
+		t.Fatal(err)
+	}
+
+	const expected = "not generating test snapshot because replica is too large"
+	if _, err := rep.GetSnapshot(context.Background(), "test"); !testutils.IsError(err, expected) {
 		rep.mu.Lock()
 		after := rep.mu.state.Stats.Total()
 		rep.mu.Unlock()

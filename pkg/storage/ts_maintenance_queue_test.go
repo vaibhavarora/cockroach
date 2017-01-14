@@ -20,7 +20,10 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/kr/pretty"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -29,14 +32,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/kr/pretty"
 )
 
 type modelTimeSeriesDataStore struct {
@@ -94,22 +97,24 @@ func TestTimeSeriesMaintenanceQueue(t *testing.T) {
 		pruneSeenEndKeys:   make(map[string]struct{}),
 	}
 
-	cfg := storage.TestStoreConfig()
+	manual := hlc.NewManualClock(1)
+	cfg := storage.TestStoreConfig(hlc.NewClock(manual.UnixNano, time.Nanosecond))
 	cfg.TimeSeriesDataStore = model
 	cfg.TestingKnobs.DisableScanner = true
 	cfg.TestingKnobs.DisableSplitQueue = true
 
-	store, stopper, _ := createTestStoreWithConfig(t, cfg)
+	stopper := stop.NewStopper()
 	defer stopper.Stop()
+	store := createTestStoreWithConfig(t, stopper, cfg)
 
 	// Generate several splits.
 	splitKeys := []roachpb.Key{roachpb.Key("c"), roachpb.Key("b"), roachpb.Key("a")}
 	for _, k := range splitKeys {
-		rng := store.LookupReplica(roachpb.RKey(k), nil)
+		repl := store.LookupReplica(roachpb.RKey(k), nil)
 		args := adminSplitArgs(k, k)
 		if _, pErr := client.SendWrappedWith(context.Background(), store, roachpb.Header{
-			RangeID: rng.RangeID,
-		}, &args); pErr != nil {
+			RangeID: repl.RangeID,
+		}, args); pErr != nil {
 			t.Fatal(pErr)
 		}
 	}
@@ -127,7 +132,7 @@ func TestTimeSeriesMaintenanceQueue(t *testing.T) {
 	}
 
 	// Wait for splits to complete and system config to be available.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if a, e := store.ReplicaCount(), len(expectedEndKeys); a != e {
 			return fmt.Errorf("expected %d replicas in store; found %d", a, e)
 		}
@@ -138,10 +143,11 @@ func TestTimeSeriesMaintenanceQueue(t *testing.T) {
 	})
 
 	// Force replica scan to run, which will populate the model.
+	now := store.Clock().Now()
 	store.ForceTimeSeriesMaintenanceQueueProcess()
 
 	// Wait for processing to complete.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		model.Lock()
 		defer model.Unlock()
 		if a, e := model.containsCalled, len(expectedStartKeys); a != e {
@@ -154,49 +160,118 @@ func TestTimeSeriesMaintenanceQueue(t *testing.T) {
 	})
 
 	model.Lock()
-	defer model.Unlock()
 	if a, e := model.pruneSeenStartKeys, expectedStartKeys; !reflect.DeepEqual(a, e) {
 		t.Errorf("start keys seen by PruneTimeSeries did not match expectation: %s", pretty.Diff(a, e))
 	}
 	if a, e := model.pruneSeenEndKeys, expectedEndKeys; !reflect.DeepEqual(a, e) {
 		t.Errorf("end keys seen by PruneTimeSeries did not match expectation: %s", pretty.Diff(a, e))
 	}
+	model.Unlock()
+
+	testutils.SucceedsSoon(t, func() error {
+		keys := []roachpb.RKey{roachpb.RKeyMin}
+		for _, k := range splitKeys {
+			keys = append(keys, roachpb.RKey(k))
+		}
+		for _, key := range keys {
+			repl := store.LookupReplica(key, nil)
+			ts, err := repl.GetQueueLastProcessed(context.TODO(), "timeSeriesMaintenance")
+			if err != nil {
+				return err
+			}
+			if ts.Less(now) {
+				return errors.Errorf("expected last processed %s > %s", ts, now)
+			}
+		}
+		return nil
+	})
+
+	// Force replica scan to run. But because we haven't moved the
+	// clock forward, no pruning will take place on second invocation.
+	store.ForceTimeSeriesMaintenanceQueueProcess()
+	model.Lock()
+	if a, e := model.containsCalled, len(expectedStartKeys); a != e {
+		t.Errorf("ContainsTimeSeries called %d times; expected %d", a, e)
+	}
+	if a, e := model.pruneCalled, len(expectedStartKeys); a != e {
+		t.Errorf("PruneTimeSeries called %d times; expected %d", a, e)
+	}
+	model.Unlock()
+
+	// Move clock forward and force to scan again.
+	manual.Increment(storage.TimeSeriesMaintenanceInterval.Nanoseconds())
+	store.ForceTimeSeriesMaintenanceQueueProcess()
+	testutils.SucceedsSoon(t, func() error {
+		model.Lock()
+		defer model.Unlock()
+		if a, e := model.containsCalled, len(expectedStartKeys)*2; a != e {
+			return errors.Errorf("ContainsTimeSeries called %d times; expected %d", a, e)
+		}
+		if a, e := model.pruneCalled, len(expectedStartKeys)*2; a != e {
+			return errors.Errorf("PruneTimeSeries called %d times; expected %d", a, e)
+		}
+		return nil
+	})
 }
 
 // TestTimeSeriesMaintenanceQueueServer verifies that the time series
 // maintenance queue runs correctly on a test server.
 func TestTimeSeriesMaintenanceQueueServer(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+
+	s, _, db := serverutils.StartServer(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{
+			Store: &storage.StoreTestingKnobs{
+				DisableScanner: true,
+			},
+		},
+	})
 	defer s.Stopper().Stop()
 	tsrv := s.(*server.TestServer)
 	tsdb := tsrv.TsDB()
 
 	// Populate time series data into the server. One time series, with one
-	// datapoint at the current time and one datapoint older than the pruning
+	// datapoint at the current time and two datapoints older than the pruning
 	// threshold. Datapoint timestamps are set to the midpoint of sample duration
 	// periods; this simplifies verification.
 	seriesName := "test.metric"
+	sourceName := "source1"
 	now := tsrv.Clock().PhysicalNow()
-	pastThreshold := now - (ts.Resolution10s.PruneThreshold() * 2)
+	nearPast := now - (ts.Resolution10s.PruneThreshold() * 2)
+	farPast := now - (ts.Resolution10s.PruneThreshold() * 4)
 	sampleDuration := ts.Resolution10s.SampleDuration()
 	datapoints := []tspb.TimeSeriesDatapoint{
 		{
-			TimestampNanos: pastThreshold - pastThreshold%sampleDuration + sampleDuration/2,
+			TimestampNanos: farPast - farPast%sampleDuration + sampleDuration/2,
+			Value:          100.0,
+		},
+		{
+			TimestampNanos: nearPast - (nearPast)%sampleDuration + sampleDuration/2,
 			Value:          200.0,
 		},
 		{
 			TimestampNanos: now - now%sampleDuration + sampleDuration/2,
-			Value:          100.0,
+			Value:          300.0,
 		},
 	}
 	if err := tsdb.StoreData(context.TODO(), ts.Resolution10s, []tspb.TimeSeriesData{
 		{
 			Name:       seriesName,
-			Source:     "source1",
+			Source:     sourceName,
 			Datapoints: datapoints,
 		},
 	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate a split key at a timestamp halfway between near past and far past.
+	splitKey := ts.MakeDataKey(
+		seriesName, sourceName, ts.Resolution10s, farPast+(nearPast-farPast)/2,
+	)
+
+	// Force a range split in between near past and far past. This guarantees
+	// that the pruning operation will issue a DeleteRange which spans ranges.
+	if err := db.AdminSplit(context.TODO(), splitKey); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,12 +307,12 @@ func TestTimeSeriesMaintenanceQueueServer(t *testing.T) {
 	store.ForceTimeSeriesMaintenanceQueueProcess()
 
 	// Verify the older datapoint has been pruned.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		actualDatapoints, err = getDatapoints()
 		if err != nil {
 			return err
 		}
-		if a, e := actualDatapoints, datapoints[1:]; !reflect.DeepEqual(a, e) {
+		if a, e := actualDatapoints, datapoints[2:]; !reflect.DeepEqual(a, e) {
 			return fmt.Errorf("got datapoints %v, expected %v, diff: %s", a, e, pretty.Diff(a, e))
 		}
 		return nil

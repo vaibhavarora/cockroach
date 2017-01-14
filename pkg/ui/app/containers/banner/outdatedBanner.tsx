@@ -101,32 +101,32 @@ let clusterID = (state: AdminUIState): string => state.cachedData.cluster.data &
 
 // TODO(maxlang): change the way uiData stores data so we don't need an added check to see if the value was fetched
 // TODO(maxlang): determine whether they dismissed a node version mismatch or an upstream version check
-let versionCheckDismissedFetched = (state: AdminUIState): boolean => state.uiData.data && _.has(state.uiData.data, VERSION_DISMISSED_KEY);
-let versionCheckDismissed = (state: AdminUIState): number => versionCheckDismissedFetched(state) ? state.uiData.data[VERSION_DISMISSED_KEY] : undefined;
+let versionCheckDismissedFetched = (state: AdminUIState): boolean => _.has(state.uiData, VERSION_DISMISSED_KEY);
+let versionCheckDismissed = (state: AdminUIState): number => versionCheckDismissedFetched(state) ? state.uiData[VERSION_DISMISSED_KEY].data : undefined;
 
 let versions = createSelector(
   nodeStatuses,
-  (statuses: NodeStatus[]): string[] => statuses && _.uniq(_.map(statuses, (s: NodeStatus) => s.build_info && s.build_info.tag))
+  (statuses: NodeStatus[]): string[] => statuses && _.uniq(_.map(statuses, (s: NodeStatus) => s.build_info && s.build_info.tag)),
 );
 
 let nodeCount = createSelector(
   nodeStatuses,
-  (statuses: NodeStatus[]) => statuses && statuses.length
+  (statuses: NodeStatus[]) => statuses && statuses.length,
 );
 
 let versionCount = createSelector(
   versions,
-  (v: string[]) => v && v.length
+  (v: string[]) => v && v.length,
 );
 
 let versionsMatch = createSelector(
   versions,
-  (v: string[]) => v && v.length === 1
+  (v: string[]) => v && v.length === 1,
 );
 
 let buildtag = createSelector(
   versions,
-  (v: string[]): string => v && v.length === 1 ? v[0] : null
+  (v: string[]): string => v && v.length === 1 ? v[0] : null,
 );
 
 // Connect the DisconnectedBanner class with our redux store.
@@ -149,7 +149,7 @@ let outdatedBannerConnected = connect(
     refreshNodes,
     loadUIData,
     saveUIData,
-  }
+  },
 )(OutdatedBanner);
 
 export default outdatedBannerConnected;

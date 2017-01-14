@@ -60,6 +60,17 @@ SELECT avg(k) OVER (PARTITION BY v) FROM kv ORDER BY 1
 5.5000000000000000
 5.5000000000000000
 
+# Not working until #12482 is fixed.
+#query R
+#SELECT avg(k) OVER (PARTITION BY kv.*) FROM kv ORDER BY 1
+#----
+#1.0000000000000000
+#3.0000000000000000
+#5.0000000000000000
+#6.0000000000000000
+#7.0000000000000000
+#8.0000000000000000
+
 query R
 SELECT avg(k) OVER (ORDER BY w) FROM kv ORDER BY 1
 ----
@@ -69,6 +80,27 @@ SELECT avg(k) OVER (ORDER BY w) FROM kv ORDER BY 1
 5.5000000000000000
 7.5000000000000000
 7.5000000000000000
+
+query R
+SELECT avg(k) OVER (ORDER BY 1-w) FROM kv ORDER BY 1
+----
+3.7500000000000000
+3.7500000000000000
+4.0000000000000000
+4.0000000000000000
+5.0000000000000000
+5.0000000000000000
+
+# Not working until #12482 is fixed.
+#query R
+#SELECT avg(k) OVER (ORDER BY kv.*) FROM kv ORDER BY 1
+#----
+#1.0000000000000000
+#2.0000000000000000
+#3.0000000000000000
+#3.7500000000000000
+#4.4000000000000000
+#5.0000000000000000
 
 query R
 SELECT avg(k) OVER (ORDER BY w DESC) FROM kv ORDER BY 1
@@ -177,7 +209,7 @@ SELECT avg(k) OVER (PARTITION BY a) FROM kv
 query error column name "a" not found
 SELECT avg(k) OVER (ORDER BY a) FROM kv
 
-query error aggregate function calls cannot contain window function call avg
+query error aggregate function calls cannot contain window function call avg\(\)
 SELECT avg(avg(k) OVER ()) FROM kv ORDER BY 1
 
 query R
@@ -185,19 +217,19 @@ SELECT avg(avg(k)) OVER () FROM kv ORDER BY 1
 ----
 5.0000000000000000
 
-query error OVER specified, but now is not a window function nor an aggregate function
+query error OVER specified, but now\(\) is neither a window function nor an aggregate function
 SELECT now() OVER () FROM kv ORDER BY 1
 
-query error window function rank requires an OVER clause
+query error window function rank\(\) requires an OVER clause
 SELECT rank() FROM kv
 
-query error unknown signature for rank: rank\(int\)
+query error unknown signature: rank\(int\)
 SELECT rank(22) FROM kv
 
-query error window function calls cannot be nested under avg
+query error window function calls cannot be nested under avg\(\)
 SELECT avg(avg(k) OVER ()) OVER () FROM kv ORDER BY 1
 
-query error OVER specified, but round is not a window function nor an aggregate function
+query error OVER specified, but round\(\) is neither a window function nor an aggregate function
 SELECT round(avg(k) OVER ()) OVER () FROM kv ORDER BY 1
 
 query R
@@ -344,6 +376,16 @@ SELECT k, min(d) OVER (PARTITION BY v ORDER BY w) FROM kv ORDER BY 1
 8  3
 
 query IR
+SELECT k, pow(max(d) OVER (PARTITION BY v), k::DECIMAL) FROM kv ORDER BY 1
+----
+1  7.9000000000000000
+3  512.0000000000000000
+5  -3408200705601.0000000000000000
+6  243087.4555210000000000
+7  1920390.8986159000000000
+8  16777216.0000000000000000
+
+query IR
 SELECT k, max(d) OVER (PARTITION BY v) FROM kv ORDER BY 1
 ----
 1  7.9
@@ -423,12 +465,15 @@ SELECT k, max(stddev) OVER (ORDER BY d DESC) FROM (SELECT k, d, stddev(d) OVER (
 7  3.5355339059327376
 8  3.5355339059327376
 
-query ITT
+query ITTT
 EXPLAIN SELECT k, stddev(d) OVER w FROM kv WINDOW w as (PARTITION BY v) ORDER BY variance(d) OVER w, k
 ----
-0  sort    +"variance(d) OVER w",+k
-1  window  stddev(d) OVER w, variance(d) OVER w
-2  scan    kv@primary -
+0  sort
+0          order  +"variance(d) OVER w",+k
+1  window
+2  scan
+2          table  kv@primary
+2          spans  ALL
 
 query ITTT
 EXPLAIN (DEBUG) SELECT k, stddev(d) OVER w FROM kv WINDOW w as (PARTITION BY v) ORDER BY variance(d) OVER w, k
@@ -463,21 +508,87 @@ EXPLAIN (DEBUG) SELECT k, stddev(d) OVER w FROM kv WINDOW w as (PARTITION BY v) 
 4  4                (3, 3.5355339059327376, 12.5000000000000000)  ROW
 5  5                (8, 3.5355339059327376, 12.5000000000000000)  ROW
 
-query ITTT
+query ITTTTT
 EXPLAIN (TYPES) SELECT k, stddev(d) OVER w FROM kv WINDOW w as (PARTITION BY v) ORDER BY variance(d) OVER w, k
 ----
-0  select         result                     (k int, "stddev(d) OVER w" decimal)
-1  sort           result                     (k int, "stddev(d) OVER w" decimal)
-2  window         result                     (k int, "stddev(d) OVER w" decimal, "variance(d) OVER w" decimal)
-2  window         render stddev(d) OVER w    (stddev((d)[decimal]) OVER w)[decimal]
-2  window         render variance(d) OVER w  (variance((d)[decimal]) OVER w)[decimal]
-3  render/filter  result                     (k int, d decimal, d decimal, v int, v int)
-3  render/filter  render 0                   (k)[int]
-3  render/filter  render 1                   (d)[decimal]
-3  render/filter  render 2                   (d)[decimal]
-3  render/filter  render 3                   (v)[int]
-3  render/filter  render 4                   (v)[int]
-4  scan           result                     (k int, v int, w int, f float, d decimal, s string, b bool)
+0  sort                                                        (k int, "stddev(d) OVER w" decimal)
+0          order     +"variance(d) OVER w",+k
+1  window                                                      (k int, "stddev(d) OVER w" decimal, "variance(d) OVER w" decimal)
+1          window 0  (stddev((d)[decimal]) OVER w)[decimal]
+1          window 1  (variance((d)[decimal]) OVER w)[decimal]
+1          render 1  (stddev((d)[decimal]) OVER w)[decimal]
+1          render 2  (variance((d)[decimal]) OVER w)[decimal]
+2  render                                                      (k int, d decimal, d decimal, v int, v int)                                                      +k,unique
+2          render 0  (k)[int]
+2          render 1  (d)[decimal]
+2          render 2  (d)[decimal]
+2          render 3  (v)[int]
+2          render 4  (v)[int]
+3  scan                                                        (k int, v int, w[omitted] int, f[omitted] float, d decimal, s[omitted] string, b[omitted] bool)  +k,unique
+3          table     kv@primary
+3          spans     ALL
+
+query ITTTTT
+EXPLAIN (TYPES) SELECT k, stddev(d) OVER (PARTITION BY v, 'a') FROM kv ORDER BY variance(d) OVER (PARTITION BY v, 100), k
+----
+0  sort                                                                                           (k int, "stddev(d) OVER (PARTITION BY v, 'a')" decimal)
+0          order     +"variance(d) OVER (PARTITION BY v, 100)",+k
+1  window                                                                                         (k int, "stddev(d) OVER (PARTITION BY v, 'a')" decimal, "variance(d) OVER (PARTITION BY v, 100)" decimal)
+1          window 0  (stddev((d)[decimal]) OVER (PARTITION BY (v)[int], ('a')[string]))[decimal]
+1          window 1  (variance((d)[decimal]) OVER (PARTITION BY (v)[int], (100)[int]))[decimal]
+1          render 1  (stddev((d)[decimal]) OVER (PARTITION BY (v)[int], ('a')[string]))[decimal]
+1          render 2  (variance((d)[decimal]) OVER (PARTITION BY (v)[int], (100)[int]))[decimal]
+2  render                                                                                         (k int, d decimal, d decimal, v int, "'a'" string, v int, "100" int)                                       +k,unique
+2          render 0  (k)[int]
+2          render 1  (d)[decimal]
+2          render 2  (d)[decimal]
+2          render 3  (v)[int]
+2          render 4  ('a')[string]
+2          render 5  (v)[int]
+2          render 6  (100)[int]
+3  scan                                                                                           (k int, v int, w[omitted] int, f[omitted] float, d decimal, s[omitted] string, b[omitted] bool)            +k,unique
+3          table     kv@primary
+3          spans     ALL
+
+query ITTTTT
+EXPLAIN (TYPES,NONORMALIZE) SELECT k, stddev(d) OVER (PARTITION BY v, 'a') FROM kv ORDER BY k
+----
+0  sort                                                                                           (k int, "stddev(d) OVER (PARTITION BY v, 'a')" decimal)                                          +k
+0          order     +k
+1  window                                                                                         (k int, "stddev(d) OVER (PARTITION BY v, 'a')" decimal)
+1          window 0  (stddev((d)[decimal]) OVER (PARTITION BY (v)[int], ('a')[string]))[decimal]
+1          render 1  (stddev((d)[decimal]) OVER (PARTITION BY (v)[int], ('a')[string]))[decimal]
+2  render                                                                                         (k int, d decimal, v int, "'a'" string)                                                          +k,unique
+2          render 0  (k)[int]
+2          render 1  (d)[decimal]
+2          render 2  (v)[int]
+2          render 3  ('a')[string]
+3  scan                                                                                           (k int, v int, w[omitted] int, f[omitted] float, d decimal, s[omitted] string, b[omitted] bool)  +k,unique
+3          table     kv@primary
+3          spans     ALL
+
+query ITTTTT
+EXPLAIN (TYPES) SELECT k, k + stddev(d) OVER (PARTITION BY v, 'a') FROM kv ORDER BY variance(d) OVER (PARTITION BY v, 100), k
+----
+0  sort                                                                                                                 (k int, "k + stddev(d) OVER (PARTITION BY v, 'a')" decimal)
+0          order     +"variance(d) OVER (PARTITION BY v, 100)",+k
+1  window                                                                                                               (k int, "k + stddev(d) OVER (PARTITION BY v, 'a')" decimal, "variance(d) OVER (PARTITION BY v, 100)" decimal)
+1          window 0  (stddev((d)[decimal]) OVER (PARTITION BY (v)[int], ('a')[string]))[decimal]
+1          window 1  (variance((d)[decimal]) OVER (PARTITION BY (v)[int], (100)[int]))[decimal]
+1          render 1  ((k)[int] + (stddev((d)[decimal]) OVER (PARTITION BY (v)[int], ('a')[string]))[decimal])[decimal]
+1          render 2  (variance((d)[decimal]) OVER (PARTITION BY (v)[int], (100)[int]))[decimal]
+2  render                                                                                                               (k int, d decimal, d decimal, v int, "'a'" string, v int, "100" int, k int)                                    +k,unique
+2          render 0  (k)[int]
+2          render 1  (d)[decimal]
+2          render 2  (d)[decimal]
+2          render 3  (v)[int]
+2          render 4  ('a')[string]
+2          render 5  (v)[int]
+2          render 6  (100)[int]
+2          render 7  (k)[int]
+3  scan                                                                                                                 (k int, v int, w[omitted] int, f[omitted] float, d decimal, s[omitted] string, b[omitted] bool)                +k,unique
+3          table     kv@primary
+3          spans     ALL
 
 statement OK
 INSERT INTO kv VALUES
@@ -523,6 +634,19 @@ SELECT k, v, w, row_number() OVER (PARTITION BY v ORDER BY w) FROM kv ORDER BY 1
 9   2     9  4
 10  4     9  3
 11  NULL  9  2
+
+query IIII
+SELECT k, v, w, v - w + 2 + row_number() OVER (PARTITION BY v ORDER BY w) FROM kv ORDER BY 1
+----
+1   2     3  3
+3   4     5  3
+5   NULL  5  NULL
+6   2     3  4
+7   2     2  3
+8   4     2  5
+9   2     9  -1
+10  4     9  0
+11  NULL  9  NULL
 
 query II
 SELECT k, rank() OVER () FROM kv ORDER BY 1
@@ -706,10 +830,10 @@ SELECT k, v, w, cume_dist() OVER (PARTITION BY v ORDER BY w) FROM kv ORDER BY 1
 10  4     9  1
 11  NULL  9  1
 
-query error argument of ntile must be greater than zero
+query error argument of ntile\(\) must be greater than zero
 SELECT k, ntile(-10) OVER () FROM kv ORDER BY 1
 
-query error argument of ntile must be greater than zero
+query error argument of ntile\(\) must be greater than zero
 SELECT k, ntile(0) OVER () FROM kv ORDER BY 1
 
 query II
@@ -1064,16 +1188,16 @@ SELECT k, lead(k, w) OVER (PARTITION BY v ORDER BY w) FROM kv ORDER BY 1
 10  NULL
 11  NULL
 
-query error unknown signature for lag: lag\(int, int, string\)
+query error unknown signature: lag\(int, int, string\)
 SELECT k, lag(k, 1, 'FOO') OVER () FROM kv ORDER BY 1
 
-query error unknown signature for lead: lead\(int, int, string\)
+query error unknown signature: lead\(int, int, string\)
 SELECT k, lead(k, 1, 'FOO') OVER () FROM kv ORDER BY 1
 
-query error unknown signature for lag: lag\(int, int, string\)
+query error unknown signature: lag\(int, int, string\)
 SELECT k, lag(k, 1, s) OVER () FROM kv ORDER BY 1
 
-query error unknown signature for lead: lead\(int, int, string\)
+query error unknown signature: lead\(int, int, string\)
 SELECT k, lead(k, 1, s) OVER () FROM kv ORDER BY 1
 
 query II
@@ -1297,13 +1421,13 @@ SELECT k, v, w, last_value(w) OVER (PARTITION BY v ORDER BY w DESC) FROM kv ORDE
 10  4     9  9
 11  NULL  9  9
 
-query error unknown signature for nth_value: nth_value\(int, string\)
+query error unknown signature: nth_value\(int, string\)
 SELECT k, nth_value(v, 'FOO') OVER () FROM kv ORDER BY 1
 
-query error argument of nth_value must be greater than zero
+query error argument of nth_value\(\) must be greater than zero
 SELECT k, nth_value(v, -99) OVER () FROM kv ORDER BY 1
 
-query error argument of nth_value must be greater than zero
+query error argument of nth_value\(\) must be greater than zero
 SELECT k, nth_value(v, 0) OVER () FROM kv ORDER BY 1
 
 query II
@@ -1426,8 +1550,11 @@ SELECT k, nth_value(v, v) OVER () FROM kv ORDER BY 1
 statement ok
 INSERT INTO kv VALUES (12, -1, DEFAULT, DEFAULT, DEFAULT, DEFAULT)
 
-query error argument of nth_value must be greater than zero
+query error argument of nth_value\(\) must be greater than zero
 SELECT k, nth_value(v, v) OVER () FROM kv ORDER BY 1
 
 statement ok
 DELETE FROM kv WHERE k = 12
+
+query error FILTER within a window function call is not yet supported
+SELECT k, rank() FILTER (WHERE k=1) OVER () FROM kv

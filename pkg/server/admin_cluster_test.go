@@ -24,8 +24,9 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 )
 
@@ -42,9 +43,6 @@ func TestAdminAPITableStats(t *testing.T) {
 		},
 	})
 	defer tc.Stopper().Stop()
-	if err := tc.WaitForFullReplication(); err != nil {
-		t.Fatal(err)
-	}
 	server0 := tc.Server(0)
 
 	// Create clients (SQL, HTTP) connected to server 0.
@@ -86,8 +84,8 @@ func TestAdminAPITableStats(t *testing.T) {
 
 	// The new SQL table may not yet have split into its own range. Wait for
 	// this to occur, and for full replication.
-	util.SucceedsSoon(t, func() error {
-		if err := util.GetJSON(client, url, &tsResponse); err != nil {
+	testutils.SucceedsSoon(t, func() error {
+		if err := httputil.GetJSON(client, url, &tsResponse); err != nil {
 			return err
 		}
 		if tsResponse.RangeCount != 1 {
@@ -115,7 +113,7 @@ func TestAdminAPITableStats(t *testing.T) {
 	// lower.
 	tc.StopServer(1)
 
-	if err := util.GetJSON(client, url, &tsResponse); err != nil {
+	if err := httputil.GetJSON(client, url, &tsResponse); err != nil {
 		t.Fatal(err)
 	}
 	if a, e := tsResponse.NodeCount, int64(nodeCount); a != e {
@@ -140,5 +138,5 @@ func TestAdminAPITableStats(t *testing.T) {
 	// timeout; however, in aggregate (or in stress tests) this will suffice for
 	// detecting leaks.
 	client.Timeout = 1 * time.Nanosecond
-	_ = util.GetJSON(client, url, &tsResponse)
+	_ = httputil.GetJSON(client, url, &tsResponse)
 }

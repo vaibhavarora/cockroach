@@ -21,7 +21,6 @@
 #include <google/protobuf/repeated_field.h>
 #include <google/protobuf/stubs/stringprintf.h>
 #include "rocksdb/cache.h"
-#include "rocksdb/compaction_filter.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
 #include "rocksdb/filter_policy.h"
@@ -35,6 +34,7 @@
 #include "rocksdb/utilities/write_batch_with_index.h"
 #include "cockroach/pkg/roachpb/data.pb.h"
 #include "cockroach/pkg/roachpb/internal.pb.h"
+#include "cockroach/pkg/storage/engine/enginepb/rocksdb.pb.h"
 #include "cockroach/pkg/storage/engine/enginepb/mvcc.pb.h"
 #include "db.h"
 #include "encoding.h"
@@ -68,6 +68,7 @@ struct DBEngine {
   virtual DBStatus GetStats(DBStatsResult* stats) = 0;
 
   DBSSTable* GetSSTables(int* n);
+  DBString GetUserProperties();
 };
 
 struct DBImpl : public DBEngine {
@@ -114,6 +115,25 @@ struct DBBatch : public DBEngine {
 
   DBBatch(DBEngine* db);
   virtual ~DBBatch() {
+  }
+
+  virtual DBStatus Put(DBKey key, DBSlice value);
+  virtual DBStatus Merge(DBKey key, DBSlice value);
+  virtual DBStatus Delete(DBKey key);
+  virtual DBStatus CommitBatch();
+  virtual DBStatus ApplyBatchRepr(DBSlice repr);
+  virtual DBSlice BatchRepr();
+  virtual DBStatus Get(DBKey key, DBString* value);
+  virtual DBIterator* NewIter(bool prefix);
+  virtual DBStatus GetStats(DBStatsResult* stats);
+};
+
+struct DBWriteOnlyBatch : public DBEngine {
+  int updates;
+  rocksdb::WriteBatch batch;
+
+  DBWriteOnlyBatch(DBEngine* db);
+  virtual ~DBWriteOnlyBatch() {
   }
 
   virtual DBStatus Put(DBKey key, DBSlice value);
@@ -235,6 +255,35 @@ bool SplitKey(rocksdb::Slice buf, rocksdb::Slice *key, rocksdb::Slice *timestamp
   return true;
 }
 
+bool DecodeTimestamp(rocksdb::Slice *timestamp, int64_t *wall_time, int32_t *logical) {
+  uint64_t w;
+  if (!DecodeUint64(timestamp, &w)) {
+    return false;
+  }
+  *wall_time = int64_t(w);
+  *logical = 0;
+  if (timestamp->size() > 0) {
+    // TODO(peter): Use varint decoding here.
+    uint32_t l;
+    if (!DecodeUint32(timestamp, &l)) {
+      return false;
+    }
+    *logical = int32_t(l);
+  }
+  return true;
+}
+
+bool DecodeHLCTimestamp(rocksdb::Slice buf, cockroach::util::hlc::Timestamp* timestamp) {
+  int64_t wall_time;
+  int32_t logical;
+  if (!DecodeTimestamp(&buf, &wall_time, &logical)) {
+    return false;
+  }
+  timestamp->set_wall_time(wall_time);
+  timestamp->set_logical(logical);
+  return true;
+}
+
 bool DecodeKey(rocksdb::Slice buf, rocksdb::Slice *key, int64_t *wall_time, int32_t *logical) {
   key->clear();
 
@@ -244,19 +293,8 @@ bool DecodeKey(rocksdb::Slice buf, rocksdb::Slice *key, int64_t *wall_time, int3
   }
   if (timestamp.size() > 0) {
     timestamp.remove_prefix(1);  // The NUL prefix.
-    uint64_t w;
-    if (!DecodeUint64(&timestamp, &w)) {
+    if (!DecodeTimestamp(&timestamp, wall_time, logical)) {
       return false;
-    }
-    *wall_time = int64_t(w);
-    *logical = 0;
-    if (timestamp.size() > 0) {
-      // TODO(peter): Use varint decoding here.
-      uint32_t l;
-      if (!DecodeUint32(&timestamp, &l)) {
-        return false;
-      }
-      *logical = int32_t(l);
     }
   }
   return timestamp.empty();
@@ -464,7 +502,7 @@ class DBPrefixExtractor : public rocksdb::SliceTransform {
 
 class DBBatchInserter : public rocksdb::WriteBatch::Handler {
  public:
-  DBBatchInserter(rocksdb::WriteBatchWithIndex* batch)
+  DBBatchInserter(rocksdb::WriteBatchBase* batch)
       : batch_(batch) {
   }
 
@@ -479,7 +517,7 @@ class DBBatchInserter : public rocksdb::WriteBatch::Handler {
   }
 
  private:
-  rocksdb::WriteBatchWithIndex* const batch_;
+  rocksdb::WriteBatchBase* const batch_;
 };
 
 // Method used to sort InternalTimeSeriesSamples.
@@ -1355,9 +1393,42 @@ DBSSTable* DBEngine::GetSSTables(int* n) {
   return tables;
 }
 
+DBString DBEngine::GetUserProperties() {
+  rocksdb::TablePropertiesCollection props;
+  rocksdb::Status status = rep->GetPropertiesOfAllTables(&props);
+
+  cockroach::storage::engine::enginepb::SSTUserPropertiesCollection all;
+  if (!status.ok()) {
+    all.set_error(status.ToString());
+    return ToDBString(all.SerializeAsString());
+  }
+
+  for (auto i = props.begin(); i != props.end(); i++) {
+    cockroach::storage::engine::enginepb::SSTUserProperties* sst = all.add_sst();
+    sst->set_path(i->first);
+    auto userprops = i->second->user_collected_properties;
+
+    auto ts_min = userprops.find("crdb.ts.min");
+    if (ts_min != userprops.end()) {
+      DecodeHLCTimestamp(rocksdb::Slice(ts_min->second), sst->mutable_ts_min());
+    }
+
+    auto ts_max = userprops.find("crdb.ts.max");
+    if (ts_max != userprops.end()) {
+      DecodeHLCTimestamp(rocksdb::Slice(ts_max->second), sst->mutable_ts_max());
+    }
+  }
+  return ToDBString(all.SerializeAsString());
+}
+
 DBBatch::DBBatch(DBEngine* db)
     : DBEngine(db->rep),
       batch(&kComparator),
+      updates(0) {
+}
+
+DBWriteOnlyBatch::DBWriteOnlyBatch(DBEngine* db)
+    : DBEngine(db->rep),
       updates(0) {
 }
 
@@ -1377,6 +1448,57 @@ DBCache* DBRefCache(DBCache *cache) {
 void DBReleaseCache(DBCache *cache) {
   delete cache;
 }
+
+
+class TimeBoundTblPropCollector : public rocksdb::TablePropertiesCollector {
+ public:
+  const char* Name() const override { return "TimeBoundTblPropCollector"; }
+
+  rocksdb::Status Finish(rocksdb::UserCollectedProperties* properties) override {
+    *properties = rocksdb::UserCollectedProperties{
+        {"crdb.ts.min", ts_min_},
+        {"crdb.ts.max", ts_max_},
+    };
+    return rocksdb::Status::OK();
+  }
+
+  rocksdb::Status AddUserKey(const rocksdb::Slice& user_key, const rocksdb::Slice& value, rocksdb::EntryType type,
+                    rocksdb::SequenceNumber seq, uint64_t file_size) override {
+    rocksdb::Slice unused;
+    rocksdb::Slice ts;
+    if (SplitKey(user_key, &unused, &ts) && !ts.empty()) {
+      ts.remove_prefix(1);  // The NUL prefix.
+      if (ts_max_.empty() || ts.compare(ts_max_) > 0) {
+        ts_max_.assign(ts.data(), ts.size());
+      }
+      if (ts_min_.empty() || ts.compare(ts_min_) < 0) {
+        ts_min_.assign(ts.data(), ts.size());
+      }
+    }
+    return rocksdb::Status::OK();
+  }
+
+  virtual rocksdb::UserCollectedProperties GetReadableProperties() const override {
+    return rocksdb::UserCollectedProperties{};
+  }
+
+ private:
+  std::string ts_min_;
+  std::string ts_max_;
+  uint32_t count_ = 0;
+};
+
+class TimeBoundTblPropCollectorFactory : public rocksdb::TablePropertiesCollectorFactory {
+ public:
+  explicit TimeBoundTblPropCollectorFactory() {}
+  virtual rocksdb::TablePropertiesCollector* CreateTablePropertiesCollector(
+      rocksdb::TablePropertiesCollectorFactory::Context context) override {
+    return new TimeBoundTblPropCollector();
+  }
+  const char* Name() const override {
+    return "TimeBoundTblPropCollectorFactory";
+  }
+};
 
 DBStatus DBOpen(DBEngine **db, DBSlice dir, DBOptions db_opts) {
   rocksdb::BlockBasedTableOptions table_options;
@@ -1422,6 +1544,24 @@ DBStatus DBOpen(DBEngine **db, DBSlice dir, DBOptions db_opts) {
   options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
   options.max_open_files = db_opts.max_open_files;
 
+  // Do not create bloom filters for the last level (i.e. the largest
+  // level which contains data in the LSM store). Setting this option
+  // reduces the size of the bloom filters by 10x. This is significant
+  // given that bloom filters require 1.25 bytes (10 bits) per key
+  // which can translate into gigabytes of memory given typical key
+  // and value sizes. The downside is that bloom filters will only be
+  // usable on the higher levels, but that seems acceptable. We
+  // typically see read amplification of 5-6x on clusters (i.e. there
+  // are 5-6 levels of sstables) which means we'll achieve 80-90% of
+  // the benefit of having bloom filters on every level for only 10%
+  // of the memory cost.
+  options.optimize_filters_for_hits = true;
+
+  // Use the TablePropertiesCollector hook to store the min and max MVCC
+  // timestamps present in each sstable in the metadata for that sstable.
+  std::shared_ptr<rocksdb::TablePropertiesCollectorFactory> time_bound_prop_collector(new TimeBoundTblPropCollectorFactory());
+  options.table_properties_collector_factories.push_back(time_bound_prop_collector);
+
   // The write buffer size is the size of the in memory structure that
   // will be flushed to create L0 files. Note that 8 MB is larger than
   // 4 MB (the target L0 file size), but that reflects the
@@ -1447,11 +1587,14 @@ DBStatus DBOpen(DBEngine **db, DBSlice dir, DBOptions db_opts) {
   // this number is reached.
   //
   // TODO(peter): untuned.
-  options.level0_slowdown_writes_trigger = 16;
-  // Maximum number of L0 files. Writes are stopped at this point.
+  options.level0_slowdown_writes_trigger = 20;
+  // Maximum number of L0 files. Writes are stopped at this
+  // point. This is set significantly higher than
+  // level0_slowdown_writes_trigger to avoid completely blocking
+  // writes.
   //
   // TODO(peter): untuned.
-  options.level0_stop_writes_trigger = 17;
+  options.level0_stop_writes_trigger = 32;
   // Flush write buffers to L0 as soon as they are full. A higher
   // value could be beneficial if there are duplicate records in each
   // of the individual write buffers, but perf testing hasn't shown
@@ -1521,17 +1664,14 @@ DBStatus DBFlush(DBEngine* db) {
 }
 
 DBStatus DBCompact(DBEngine* db) {
-  return ToDBStatus(db->rep->CompactRange(rocksdb::CompactRangeOptions(), NULL, NULL));
-}
-
-DBStatus DBCheckpoint(DBEngine* db, DBSlice dir) {
-  rocksdb::Checkpoint* cp = nullptr;
-  rocksdb::Status status = rocksdb::Checkpoint::Create(db->rep, &cp);
-  if (!status.ok()) {
-    return ToDBStatus(status);
-  }
-  std::unique_ptr<rocksdb::Checkpoint> cp_deleter(cp);
-  return ToDBStatus(cp->CreateCheckpoint(ToString(dir)));
+  rocksdb::CompactRangeOptions options;
+  // By default, RocksDB doesn't recompact the bottom level (unless
+  // there is a compaction filter, which we don't use). However,
+  // recompacting the bottom layer is necessary to pick up changes to
+  // settings like bloom filter configurations (which is the biggest
+  // reason we currently have to use this function).
+  options.bottommost_level_compaction = rocksdb::BottommostLevelCompaction::kForce;
+  return ToDBStatus(db->rep->CompactRange(options, NULL, NULL));
 }
 
 DBStatus DBImpl::Put(DBKey key, DBSlice value) {
@@ -1540,6 +1680,12 @@ DBStatus DBImpl::Put(DBKey key, DBSlice value) {
 }
 
 DBStatus DBBatch::Put(DBKey key, DBSlice value) {
+  ++updates;
+  batch.Put(EncodeKey(key), ToSlice(value));
+  return kSuccess;
+}
+
+DBStatus DBWriteOnlyBatch::Put(DBKey key, DBSlice value) {
   ++updates;
   batch.Put(EncodeKey(key), ToSlice(value));
   return kSuccess;
@@ -1559,6 +1705,12 @@ DBStatus DBImpl::Merge(DBKey key, DBSlice value) {
 }
 
 DBStatus DBBatch::Merge(DBKey key, DBSlice value) {
+  ++updates;
+  batch.Merge(EncodeKey(key), ToSlice(value));
+  return kSuccess;
+}
+
+DBStatus DBWriteOnlyBatch::Merge(DBKey key, DBSlice value) {
   ++updates;
   batch.Merge(EncodeKey(key), ToSlice(value));
   return kSuccess;
@@ -1587,6 +1739,10 @@ DBStatus DBBatch::Get(DBKey key, DBString* value) {
   return ProcessDeltaKey(&base, iter.get(), base.key, value);
 }
 
+DBStatus DBWriteOnlyBatch::Get(DBKey key, DBString* value) {
+  return FmtStatus("unsupported");
+}
+
 DBStatus DBSnapshot::Get(DBKey key, DBString* value) {
   DBGetter base(rep, read_opts, EncodeKey(key));
   return base.Get(value);
@@ -1607,12 +1763,34 @@ DBStatus DBBatch::Delete(DBKey key) {
   return kSuccess;
 }
 
+DBStatus DBWriteOnlyBatch::Delete(DBKey key) {
+  ++updates;
+  batch.Delete(EncodeKey(key));
+  return kSuccess;
+}
+
 DBStatus DBSnapshot::Delete(DBKey key) {
   return FmtStatus("unsupported");
 }
 
 DBStatus DBDelete(DBEngine *db, DBKey key) {
   return db->Delete(key);
+}
+
+DBStatus DBDeleteRange(DBEngine* db, DBIterator *iter, DBKey start, DBKey end) {
+  // TODO(peter): Replace with the RocksDB DeleteRange support when
+  // that lands and is stable.
+  rocksdb::Iterator *const iter_rep = iter->rep.get();
+  iter_rep->Seek(EncodeKey(start));
+  const std::string end_key = EncodeKey(end);
+  for (; iter_rep->Valid() && kComparator.Compare(iter_rep->key(), end_key) < 0;
+       iter_rep->Next()) {
+    DBStatus status = db->Delete(ToDBKey(iter_rep->key()));
+    if (status.data != NULL) {
+      return status;
+    }
+  }
+  return kSuccess;
 }
 
 DBStatus DBImpl::CommitBatch() {
@@ -1627,12 +1805,24 @@ DBStatus DBBatch::CommitBatch() {
   return ToDBStatus(rep->Write(options, batch.GetWriteBatch()));
 }
 
+DBStatus DBWriteOnlyBatch::CommitBatch() {
+  if (updates == 0) {
+    return kSuccess;
+  }
+  rocksdb::WriteOptions options;
+  return ToDBStatus(rep->Write(options, &batch));
+}
+
 DBStatus DBSnapshot::CommitBatch() {
   return FmtStatus("unsupported");
 }
 
-DBStatus DBCommitBatch(DBEngine* db) {
-  return db->CommitBatch();
+DBStatus DBCommitAndCloseBatch(DBEngine* db) {
+  DBStatus status = db->CommitBatch();
+  if (status.data == NULL) {
+    DBClose(db);
+  }
+  return status;
 }
 
 DBStatus DBImpl::ApplyBatchRepr(DBSlice repr) {
@@ -1642,6 +1832,16 @@ DBStatus DBImpl::ApplyBatchRepr(DBSlice repr) {
 }
 
 DBStatus DBBatch::ApplyBatchRepr(DBSlice repr) {
+  // TODO(peter): It would be slightly more efficient to iterate over
+  // repr directly instead of first converting it to a string.
+  DBBatchInserter inserter(&batch);
+  rocksdb::WriteBatch batch(ToString(repr));
+  batch.Iterate(&inserter);
+  updates += batch.Count();
+  return kSuccess;
+}
+
+DBStatus DBWriteOnlyBatch::ApplyBatchRepr(DBSlice repr) {
   // TODO(peter): It would be slightly more efficient to iterate over
   // repr directly instead of first converting it to a string.
   DBBatchInserter inserter(&batch);
@@ -1667,6 +1867,10 @@ DBSlice DBBatch::BatchRepr() {
   return ToDBSlice(batch.GetWriteBatch()->Data());
 }
 
+DBSlice DBWriteOnlyBatch::BatchRepr() {
+  return ToDBSlice(batch.GetWriteBatch()->Data());
+}
+
 DBSlice DBSnapshot::BatchRepr() {
   return ToDBSlice("unsupported");
 }
@@ -1679,7 +1883,10 @@ DBEngine* DBNewSnapshot(DBEngine* db)  {
   return new DBSnapshot(db);
 }
 
-DBEngine* DBNewBatch(DBEngine *db) {
+DBEngine* DBNewBatch(DBEngine *db, bool writeOnly) {
+  if (writeOnly) {
+    return new DBWriteOnlyBatch(db);
+  }
   return new DBBatch(db);
 }
 
@@ -1701,6 +1908,10 @@ DBIterator* DBBatch::NewIter(bool prefix) {
   rocksdb::WBWIIterator* delta = batch.NewIterator();
   iter->rep.reset(new BaseDeltaIterator(base, delta, prefix));
   return iter;
+}
+
+DBIterator* DBWriteOnlyBatch::NewIter(bool prefix) {
+  return NULL;
 }
 
 DBIterator* DBSnapshot::NewIter(bool prefix) {
@@ -1742,6 +1953,10 @@ DBStatus DBImpl::GetStats(DBStatsResult* stats) {
 }
 
 DBStatus DBBatch::GetStats(DBStatsResult* stats) {
+  return FmtStatus("unsupported");
+}
+
+DBStatus DBWriteOnlyBatch::GetStats(DBStatsResult* stats) {
   return FmtStatus("unsupported");
 }
 
@@ -2011,8 +2226,13 @@ DBSSTable* DBGetSSTables(DBEngine* db, int* n) {
   return db->GetSSTables(n);
 }
 
+DBString DBGetUserProperties(DBEngine* db) {
+  return db->GetUserProperties();
+}
+
 DBStatus DBEngineAddFile(DBEngine* db, DBSlice path) {
-  rocksdb::Status status = db->rep->AddFile(ToString(path));
+  const std::vector<std::string> paths = { ToString(path) };
+  rocksdb::Status status = db->rep->AddFile(paths);
   if (!status.ok()) {
     return ToDBStatus(status);
   }
@@ -2021,13 +2241,11 @@ DBStatus DBEngineAddFile(DBEngine* db, DBSlice path) {
 
 struct DBSstFileWriter {
   std::unique_ptr<rocksdb::Options> options;
-  rocksdb::ImmutableCFOptions ioptions;
   rocksdb::SstFileWriter rep;
 
   DBSstFileWriter(rocksdb::Options* o)
       : options(o),
-        ioptions(*o),
-        rep(rocksdb::EnvOptions(), ioptions, o->comparator) {
+        rep(rocksdb::EnvOptions(), *o, o->comparator) {
   }
   virtual ~DBSstFileWriter() { }
 };

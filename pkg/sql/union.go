@@ -73,7 +73,7 @@ func (p *planner) UnionClause(
 		// TODO(dan): This currently checks whether the types are exactly the same,
 		// but Postgres is more lenient:
 		// http://www.postgresql.org/docs/9.5/static/typeconv-union-case.html.
-		if !l.Typ.Equal(r.Typ) {
+		if !l.Typ.Equivalent(r.Typ) {
 			return nil, fmt.Errorf("%v types %s and %s cannot be matched", n.Type, l.Typ, r.Typ)
 		}
 		if l.hidden != r.hidden {
@@ -155,12 +155,6 @@ func (n *unionNode) SetLimitHint(numRows int64, soft bool) {
 	n.right.SetLimitHint(numRows, true)
 	n.left.SetLimitHint(numRows, true)
 }
-
-func (n *unionNode) ExplainPlan(_ bool) (name, description string, children []planNode) {
-	return "union", "-", []planNode{n.left, n.right}
-}
-
-func (n *unionNode) ExplainTypes(_ func(string, string)) {}
 
 func (n *unionNode) MarkDebug(mode explainMode) {
 	if mode != explainDebug {
@@ -249,13 +243,6 @@ func (n *unionNode) readLeft() (bool, error) {
 	return false, nil
 }
 
-func (n *unionNode) expandPlan() error {
-	if err := n.right.expandPlan(); err != nil {
-		return err
-	}
-	return n.left.expandPlan()
-}
-
 func (n *unionNode) Start() error {
 	if err := n.right.Start(); err != nil {
 		return err
@@ -284,7 +271,7 @@ func (n *unionNode) Close() {
 }
 
 // unionNodeEmit represents the emitter logic for one of the six combinations of
-// UNION/INTERSECT/EXCEPT and ALL/DISTINCE. As right and then left are iterated,
+// UNION/INTERSECT/EXCEPT and ALL/DISTINCT. As right and then left are iterated,
 // state is kept and used to compute the set operation as well as distinctness.
 type unionNodeEmit interface {
 	emitRight([]byte) bool

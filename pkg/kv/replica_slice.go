@@ -18,13 +18,12 @@
 package kv
 
 import (
-	"math/rand"
-
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/shuffle"
 )
 
 // ReplicaInfo extends the Replica structure with the associated node
@@ -41,10 +40,10 @@ func (i ReplicaInfo) attrs() []string {
 // A ReplicaSlice is a slice of ReplicaInfo.
 type ReplicaSlice []ReplicaInfo
 
-// newReplicaSlice creates a ReplicaSlice from the replicas listed in the range
+// NewReplicaSlice creates a ReplicaSlice from the replicas listed in the range
 // descriptor and using gossip to lookup node descriptors. Replicas on nodes
 // that are not gossiped are omitted from the result.
-func newReplicaSlice(gossip *gossip.Gossip, desc *roachpb.RangeDescriptor) ReplicaSlice {
+func NewReplicaSlice(gossip *gossip.Gossip, desc *roachpb.RangeDescriptor) ReplicaSlice {
 	if gossip == nil {
 		return nil
 	}
@@ -65,10 +64,14 @@ func newReplicaSlice(gossip *gossip.Gossip, desc *roachpb.RangeDescriptor) Repli
 	return replicas
 }
 
-// Swap interchanges the replicas stored at the given indices.
-func (rs ReplicaSlice) Swap(i, j int) {
-	rs[i], rs[j] = rs[j], rs[i]
-}
+// ReplicaSlice implements shuffle.Interface.
+var _ shuffle.Interface = ReplicaSlice{}
+
+// Len returns the total number of replicas in the slice.
+func (rs ReplicaSlice) Len() int { return len(rs) }
+
+// Swap swaps the replicas with indexes i and j.
+func (rs ReplicaSlice) Swap(i, j int) { rs[i], rs[j] = rs[j], rs[i] }
 
 // FindReplica returns the index of the replica which matches the specified store
 // ID. If no replica matches, -1 is returned.
@@ -116,7 +119,7 @@ func (rs ReplicaSlice) SortByCommonAttributePrefix(attrs []string) int {
 			}
 		}
 		if topIndex < len(rs)-1 {
-			rs.randPerm(firstNotOrdered, topIndex, rand.Intn)
+			shuffle.Shuffle(rs[firstNotOrdered : topIndex+1])
 		}
 		if firstNotOrdered == 0 {
 			return bucket
@@ -139,15 +142,30 @@ func (rs ReplicaSlice) MoveToFront(i int) {
 	rs[0] = front
 }
 
-// Shuffle randomizes the order of the replicas.
-func (rs ReplicaSlice) Shuffle() {
-	rs.randPerm(0, len(rs)-1, rand.Intn)
-}
+// OptimizeReplicaOrder sorts the replicas in the order in which they're to be
+// used for sending RPCs (meaning in the order in which they'll be probed for
+// the lease).  "Closer" (matching in more attributes) replicas are ordered
+// first. If the current node is a replica, then it'll be the first one.
+//
+// nodeDesc is the descriptor of the current node. It can be nil, in which case
+// information about the current descriptor is not used in optimizing the order.
+//
+// Note that this method is not concerned with any information the node might
+// have about who the lease holder might be. If there is such info (e.g. in a
+// LeaseHolderCache), the caller will probably want to further tweak the head of
+// the ReplicaSlice.
+func (rs ReplicaSlice) OptimizeReplicaOrder(nodeDesc *roachpb.NodeDescriptor) {
+	// If we don't know which node we're on, send the RPCs randomly.
+	if nodeDesc == nil {
+		shuffle.Shuffle(rs)
+		return
+	}
+	// Sort replicas by attribute affinity, which we treat as a stand-in for
+	// proximity (for now).
+	rs.SortByCommonAttributePrefix(nodeDesc.Attrs.Attrs)
 
-func (rs ReplicaSlice) randPerm(startIndex int, topIndex int, intnFn func(int) int) {
-	length := topIndex - startIndex + 1
-	for i := 1; i < length; i++ {
-		j := intnFn(i + 1)
-		rs.Swap(startIndex+i, startIndex+j)
+	// If there is a replica in local node, move it to the front.
+	if i := rs.FindReplicaByNodeID(nodeDesc.NodeID); i > 0 {
+		rs.MoveToFront(i)
 	}
 }

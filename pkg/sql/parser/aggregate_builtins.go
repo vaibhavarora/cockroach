@@ -18,17 +18,16 @@ import (
 	"bytes"
 	"fmt"
 	"math"
-	"strings"
 
 	"gopkg.in/inf.v0"
 
 	"github.com/cockroachdb/cockroach/pkg/util/decimal"
 )
 
-func init() {
+func initAggregateBuiltins() {
 	// Add all aggregates to the Builtins map after a few sanity checks.
 	for k, v := range Aggregates {
-		for _, a := range v {
+		for i, a := range v {
 			if !a.impure {
 				panic(fmt.Sprintf("aggregate functions should all be impure, found %v", a))
 			}
@@ -44,9 +43,16 @@ func init() {
 				panic(fmt.Sprintf("aggregate functions should have WindowFunc constructors, "+
 					"found %v", a))
 			}
+
+			// The aggregate functions are considered "row dependent". This is
+			// because each aggregate function application receives the set of
+			// grouped rows as implicit parameter. It may have a different
+			// value in every group, so it cannot be considered constant in
+			// the context of a data source.
+			v[i].needsRepeatedEvaluation = true
 		}
-		Builtins[strings.ToUpper(k)] = v
-		Builtins[strings.ToLower(k)] = v
+
+		Builtins[k] = v
 	}
 }
 
@@ -73,53 +79,86 @@ type AggregateFunc interface {
 // execution.
 // Exported for use in documentation.
 var Aggregates = map[string][]Builtin{
+	"array_agg": {
+		makeAggBuiltin(TypeInt, TypeIntArray, newIntArrayAggregate,
+			"Aggregates the selected values into an array."),
+		makeAggBuiltin(
+			TypeString, TypeStringArray, newStringArrayAggregate,
+			"Aggregates the selected values into an array."),
+	},
+
 	"avg": {
-		makeAggBuiltin(TypeInt, TypeDecimal, newIntAvgAggregate),
-		makeAggBuiltin(TypeFloat, TypeFloat, newFloatAvgAggregate),
-		makeAggBuiltin(TypeDecimal, TypeDecimal, newDecimalAvgAggregate),
+		makeAggBuiltin(TypeInt, TypeDecimal, newIntAvgAggregate,
+			"Calculates the average of the selected values."),
+		makeAggBuiltin(TypeFloat, TypeFloat, newFloatAvgAggregate,
+			"Calculates the average of the selected values."),
+		makeAggBuiltin(TypeDecimal, TypeDecimal, newDecimalAvgAggregate,
+			"Calculates the average of the selected values."),
 	},
 
 	"bool_and": {
-		makeAggBuiltin(TypeBool, TypeBool, newBoolAndAggregate),
+		makeAggBuiltin(TypeBool, TypeBool, newBoolAndAggregate,
+			"Calculates the boolean value of `AND`ing all selected values."),
 	},
 
 	"bool_or": {
-		makeAggBuiltin(TypeBool, TypeBool, newBoolOrAggregate),
+		makeAggBuiltin(TypeBool, TypeBool, newBoolOrAggregate,
+			"Calculates the boolean value of `OR`ing all selected values."),
 	},
 
 	"concat_agg": {
 		// TODO(knz) When CockroachDB supports STRING_AGG, CONCAT_AGG(X)
 		// should be substituted to STRING_AGG(X, '') and executed as
 		// such (no need for a separate implementation).
-		makeAggBuiltin(TypeString, TypeString, newStringConcatAggregate),
-		makeAggBuiltin(TypeBytes, TypeBytes, newBytesConcatAggregate),
+		makeAggBuiltin(TypeString, TypeString, newStringConcatAggregate,
+			"Concatenates all selected values."),
+		makeAggBuiltin(TypeBytes, TypeBytes, newBytesConcatAggregate,
+			"Concatenates all selected values."),
 	},
 
 	"count": countImpls(),
 
-	"max": makeAggBuiltins(newMaxAggregate, TypeBool, TypeInt, TypeFloat, TypeDecimal, TypeString, TypeBytes, TypeDate, TypeTimestamp, TypeTimestampTZ, TypeInterval),
-	"min": makeAggBuiltins(newMinAggregate, TypeBool, TypeInt, TypeFloat, TypeDecimal, TypeString, TypeBytes, TypeDate, TypeTimestamp, TypeTimestampTZ, TypeInterval),
+	"max": makeAggBuiltins(newMaxAggregate, "Identifies the maximum selected value.",
+		TypeBool, TypeInt, TypeFloat, TypeDecimal, TypeString, TypeBytes,
+		TypeDate, TypeTimestamp, TypeTimestampTZ, TypeInterval),
+	"min": makeAggBuiltins(newMinAggregate, "Identifies the minimum selected value.",
+		TypeBool, TypeInt, TypeFloat, TypeDecimal, TypeString, TypeBytes,
+		TypeDate, TypeTimestamp, TypeTimestampTZ, TypeInterval),
+
+	"sum_int": {
+		makeAggBuiltin(TypeInt, TypeInt, newSmallIntSumAggregate,
+			"Calculates the sum of the selected values."),
+	},
 
 	"sum": {
-		makeAggBuiltin(TypeInt, TypeDecimal, newIntSumAggregate),
-		makeAggBuiltin(TypeFloat, TypeFloat, newFloatSumAggregate),
-		makeAggBuiltin(TypeDecimal, TypeDecimal, newDecimalSumAggregate),
+		makeAggBuiltin(TypeInt, TypeDecimal, newIntSumAggregate,
+			"Calculates the sum of the selected values."),
+		makeAggBuiltin(TypeFloat, TypeFloat, newFloatSumAggregate,
+			"Calculates the sum of the selected values."),
+		makeAggBuiltin(TypeDecimal, TypeDecimal, newDecimalSumAggregate,
+			"Calculates the sum of the selected values."),
 	},
 
 	"variance": {
-		makeAggBuiltin(TypeInt, TypeDecimal, newIntVarianceAggregate),
-		makeAggBuiltin(TypeDecimal, TypeDecimal, newDecimalVarianceAggregate),
-		makeAggBuiltin(TypeFloat, TypeFloat, newFloatVarianceAggregate),
+		makeAggBuiltin(TypeInt, TypeDecimal, newIntVarianceAggregate,
+			"Calculates the variance of the selected values."),
+		makeAggBuiltin(TypeDecimal, TypeDecimal, newDecimalVarianceAggregate,
+			"Calculates the variance of the selected values."),
+		makeAggBuiltin(TypeFloat, TypeFloat, newFloatVarianceAggregate,
+			"Calculates the variance of the selected values."),
 	},
 
 	"stddev": {
-		makeAggBuiltin(TypeInt, TypeDecimal, newIntStddevAggregate),
-		makeAggBuiltin(TypeDecimal, TypeDecimal, newDecimalStddevAggregate),
-		makeAggBuiltin(TypeFloat, TypeFloat, newFloatStddevAggregate),
+		makeAggBuiltin(TypeInt, TypeDecimal, newIntStdDevAggregate,
+			"Calculates the standard deviation of the selected values."),
+		makeAggBuiltin(TypeDecimal, TypeDecimal, newDecimalStdDevAggregate,
+			"Calculates the standard deviation of the selected values."),
+		makeAggBuiltin(TypeFloat, TypeFloat, newFloatStdDevAggregate,
+			"Calculates the standard deviation of the selected values."),
 	},
 }
 
-func makeAggBuiltin(in, ret Type, f func() AggregateFunc) Builtin {
+func makeAggBuiltin(in, ret Type, f func() AggregateFunc, info string) Builtin {
 	return Builtin{
 		// See the comment about aggregate functions in the definitions
 		// of the Builtins array above.
@@ -131,26 +170,30 @@ func makeAggBuiltin(in, ret Type, f func() AggregateFunc) Builtin {
 		WindowFunc: func() WindowFunc {
 			return newAggregateWindow(f())
 		},
+		Info: info,
 	}
 }
 
-func makeAggBuiltins(f func() AggregateFunc, types ...Type) []Builtin {
+func makeAggBuiltins(f func() AggregateFunc, info string, types ...Type) []Builtin {
 	ret := make([]Builtin, len(types))
 	for i := range types {
-		ret[i] = makeAggBuiltin(types[i], types[i], f)
+		ret[i] = makeAggBuiltin(types[i], types[i], f, info)
 	}
 	return ret
 }
 
 func countImpls() []Builtin {
-	types := ArgTypes{TypeBool, TypeInt, TypeFloat, TypeDecimal, TypeString, TypeBytes, TypeDate, TypeTimestamp, TypeTimestampTZ, TypeInterval, TypeTuple}
+	types := ArgTypes{TypeBool, TypeInt, TypeFloat, TypeDecimal, TypeString, TypeBytes,
+		TypeDate, TypeTimestamp, TypeTimestampTZ, TypeInterval, TypeTuple}
 	r := make([]Builtin, len(types))
 	for i := range types {
-		r[i] = makeAggBuiltin(types[i], TypeInt, newCountAggregate)
+		r[i] = makeAggBuiltin(types[i], TypeInt, newCountAggregate,
+			"Calculates the number of selected elements.")
 	}
 	return r
 }
 
+var _ AggregateFunc = &arrayAggregate{}
 var _ AggregateFunc = &avgAggregate{}
 var _ AggregateFunc = &countAggregate{}
 var _ AggregateFunc = &MaxAggregate{}
@@ -158,7 +201,7 @@ var _ AggregateFunc = &MinAggregate{}
 var _ AggregateFunc = &intSumAggregate{}
 var _ AggregateFunc = &decimalSumAggregate{}
 var _ AggregateFunc = &floatSumAggregate{}
-var _ AggregateFunc = &stddevAggregate{}
+var _ AggregateFunc = &stdDevAggregate{}
 var _ AggregateFunc = &intVarianceAggregate{}
 var _ AggregateFunc = &floatVarianceAggregate{}
 var _ AggregateFunc = &decimalVarianceAggregate{}
@@ -174,6 +217,12 @@ type identAggregate struct {
 	val Datum
 }
 
+// IsIdentAggregate returns true for identAggregate.
+func IsIdentAggregate(f AggregateFunc) bool {
+	_, ok := f.(*identAggregate)
+	return ok
+}
+
 // NewIdentAggregate returns an identAggregate (see comment on struct).
 func NewIdentAggregate() AggregateFunc {
 	return &identAggregate{}
@@ -186,7 +235,37 @@ func (a *identAggregate) Add(datum Datum) {
 
 // Result returns the value most recently passed to Add.
 func (a *identAggregate) Result() Datum {
+	// It is significant that identAggregate returns nil, and not DNull,
+	// if no result was known via Add(). See
+	// sql.(*aggregateFuncHolder).Eval() for details.
 	return a.val
+}
+
+type arrayAggregate struct {
+	arr *DArray
+}
+
+func newIntArrayAggregate() AggregateFunc {
+	return &arrayAggregate{arr: NewDArray(TypeInt)}
+}
+
+func newStringArrayAggregate() AggregateFunc {
+	return &arrayAggregate{arr: NewDArray(TypeString)}
+}
+
+// Add accumulates the passed datum into the array.
+func (a *arrayAggregate) Add(datum Datum) {
+	if err := a.arr.Append(datum); err != nil {
+		panic(fmt.Sprintf("error appending to array: %s", err))
+	}
+}
+
+// Result returns an array of all datums passed to Add.
+func (a *arrayAggregate) Result() Datum {
+	if len(a.arr.Array) > 0 {
+		return a.arr
+	}
+	return DNull
 }
 
 type avgAggregate struct {
@@ -403,6 +482,33 @@ func (a *MinAggregate) Result() Datum {
 		return DNull
 	}
 	return a.min
+}
+
+type smallIntSumAggregate struct {
+	sum         int64
+	seenNonNull bool
+}
+
+func newSmallIntSumAggregate() AggregateFunc {
+	return &smallIntSumAggregate{}
+}
+
+// Add adds the value of the passed datum to the sum.
+func (a *smallIntSumAggregate) Add(datum Datum) {
+	if datum == DNull {
+		return
+	}
+
+	a.sum += int64(*datum.(*DInt))
+	a.seenNonNull = true
+}
+
+// Result returns the sum.
+func (a *smallIntSumAggregate) Result() Datum {
+	if !a.seenNonNull {
+		return DNull
+	}
+	return NewDInt(DInt(a.sum))
 }
 
 type intSumAggregate struct {
@@ -624,27 +730,27 @@ func (a *decimalVarianceAggregate) Result() Datum {
 	return dd
 }
 
-type stddevAggregate struct {
+type stdDevAggregate struct {
 	agg AggregateFunc
 }
 
-func newIntStddevAggregate() AggregateFunc {
-	return &stddevAggregate{agg: newIntVarianceAggregate()}
+func newIntStdDevAggregate() AggregateFunc {
+	return &stdDevAggregate{agg: newIntVarianceAggregate()}
 }
-func newFloatStddevAggregate() AggregateFunc {
-	return &stddevAggregate{agg: newFloatVarianceAggregate()}
+func newFloatStdDevAggregate() AggregateFunc {
+	return &stdDevAggregate{agg: newFloatVarianceAggregate()}
 }
-func newDecimalStddevAggregate() AggregateFunc {
-	return &stddevAggregate{agg: newDecimalVarianceAggregate()}
+func newDecimalStdDevAggregate() AggregateFunc {
+	return &stdDevAggregate{agg: newDecimalVarianceAggregate()}
 }
 
 // Add implements the AggregateFunc interface.
-func (a *stddevAggregate) Add(datum Datum) {
+func (a *stdDevAggregate) Add(datum Datum) {
 	a.agg.Add(datum)
 }
 
 // Result computes the square root of the variance.
-func (a *stddevAggregate) Result() Datum {
+func (a *stdDevAggregate) Result() Datum {
 	variance := a.agg.Result()
 	if variance == DNull {
 		return variance
@@ -664,6 +770,8 @@ var _ Visitor = &IsAggregateVisitor{}
 // IsAggregateVisitor checks if walked expressions contain aggregate functions.
 type IsAggregateVisitor struct {
 	Aggregated bool
+	// searchPath is used to search for unqualified function names.
+	searchPath SearchPath
 }
 
 // VisitPre satisfies the Visitor interface.
@@ -675,11 +783,11 @@ func (v *IsAggregateVisitor) VisitPre(expr Expr) (recurse bool, newExpr Expr) {
 			// aggregate function, but it can contain aggregate functions.
 			return true, expr
 		}
-		fn, err := t.Name.Normalize()
+		fd, err := t.Func.Resolve(v.searchPath)
 		if err != nil {
 			return false, expr
 		}
-		if _, ok := Aggregates[strings.ToLower(fn.Function())]; ok {
+		if _, ok := Aggregates[fd.Name]; ok {
 			v.Aggregated = true
 			return false, expr
 		}
@@ -699,8 +807,9 @@ func (v *IsAggregateVisitor) Reset() {
 }
 
 // AggregateInExpr determines if an Expr contains an aggregate function.
-func (p *Parser) AggregateInExpr(expr Expr) bool {
+func (p *Parser) AggregateInExpr(expr Expr, searchPath SearchPath) bool {
 	if expr != nil {
+		p.isAggregateVisitor.searchPath = searchPath
 		defer p.isAggregateVisitor.Reset()
 		WalkExprConst(&p.isAggregateVisitor, expr)
 		if p.isAggregateVisitor.Aggregated {
@@ -711,11 +820,12 @@ func (p *Parser) AggregateInExpr(expr Expr) bool {
 }
 
 // IsAggregate determines if SelectClause contains an aggregate function.
-func (p *Parser) IsAggregate(n *SelectClause) bool {
+func (p *Parser) IsAggregate(n *SelectClause, searchPath SearchPath) bool {
 	if n.Having != nil || len(n.GroupBy) > 0 {
 		return true
 	}
 
+	p.isAggregateVisitor.searchPath = searchPath
 	defer p.isAggregateVisitor.Reset()
 	for _, target := range n.Exprs {
 		WalkExprConst(&p.isAggregateVisitor, target.Expr)
@@ -728,8 +838,8 @@ func (p *Parser) IsAggregate(n *SelectClause) bool {
 
 // AssertNoAggregationOrWindowing checks if the provided expression contains either
 // aggregate functions or window functions, returning an error in either case.
-func (p *Parser) AssertNoAggregationOrWindowing(expr Expr, op string) error {
-	if p.AggregateInExpr(expr) {
+func (p *Parser) AssertNoAggregationOrWindowing(expr Expr, op string, searchPath SearchPath) error {
+	if p.AggregateInExpr(expr, searchPath) {
 		return fmt.Errorf("aggregate functions are not allowed in %s", op)
 	}
 	if p.WindowFuncInExpr(expr) {

@@ -41,9 +41,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/ts"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -78,21 +79,21 @@ func TestStatusLocalStacks(t *testing.T) {
 }
 
 // TestStatusJson verifies that status endpoints return expected Json results.
-// The content type of the responses is always util.JSONContentType.
+// The content type of the responses is always httputil.JSONContentType.
 func TestStatusJson(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
 	ts := s.(*TestServer)
 
-	nodeID := ts.Gossip().GetNodeID()
+	nodeID := ts.Gossip().NodeID.Get()
 	addr, err := ts.Gossip().GetNodeIDAddress(nodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var nodes serverpb.NodesResponse
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if err := getStatusJSONProto(s, "nodes", &nodes); err != nil {
 			t.Fatal(err)
 		}
@@ -172,7 +173,7 @@ func startServer(t *testing.T) *TestServer {
 	// Make sure the node status is available. This is done by forcing stores to
 	// publish their status, synchronizing to the event feed with a canary
 	// event, and then forcing the server to write summaries immediately.
-	if err := ts.node.computePeriodicMetrics(0); err != nil {
+	if err := ts.node.computePeriodicMetrics(context.TODO(), 0); err != nil {
 		t.Fatalf("error publishing store statuses: %s", err)
 	}
 
@@ -195,7 +196,9 @@ func TestStatusLocalLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	log.EnableLogFileOutput(dir)
+	if err := log.EnableLogFileOutput(dir, log.Severity_INFO); err != nil {
+		t.Fatal(err)
+	}
 	defer func() {
 		log.DisableLogFileOutput()
 		if err := os.RemoveAll(dir); err != nil {
@@ -222,9 +225,17 @@ func TestStatusLocalLogs(t *testing.T) {
 	if a, e := len(wrapper.Files), 3; a != e {
 		t.Fatalf("expected %d log files; got %d", e, a)
 	}
-	for i, name := range []string{"log.ERROR", "log.INFO", "log.WARNING"} {
-		if !strings.Contains(wrapper.Files[i].Name, name) {
-			t.Errorf("expected log file name %s to contain %q", wrapper.Files[i].Name, name)
+	for _, fileInfo := range wrapper.Files {
+		fName := fileInfo.Name
+		found := false
+		for _, name := range []string{"ERROR.log", "INFO.log", "WARNING.log"} {
+			if strings.Contains(fName, name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected log file name %s to contain ERROR, INFO or WARNING.", fName)
 		}
 	}
 
@@ -386,7 +397,7 @@ func TestMetricsRecording(t *testing.T) {
 
 	// Verify that metrics for the current timestamp are recorded. This should
 	// be true very quickly.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		now := s.Clock().PhysicalNow()
 		if err := checkTimeSeriesKey(now, "cr.store.livebytes.1"); err != nil {
 			return err
@@ -406,7 +417,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	s := startServer(t)
 	defer s.Stopper().Stop()
 
-	if _, err := getText(s, s.AdminURL()+statusPrefix+"metrics/"+s.Gossip().GetNodeID().String()); err != nil {
+	if _, err := getText(s, s.AdminURL()+statusPrefix+"metrics/"+s.Gossip().NodeID.String()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -497,7 +508,7 @@ func TestSpanStatsResponse(t *testing.T) {
 	}
 
 	url := ts.AdminURL() + statusPrefix + "span"
-	if err := util.PostJSON(httpClient, url, &request, &response); err != nil {
+	if err := httputil.PostJSON(httpClient, url, &request, &response); err != nil {
 		t.Fatal(err)
 	}
 	if a, e := int(response.RangeCount), ExpectedInitialRangeCount(); a != e {

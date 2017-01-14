@@ -27,7 +27,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/acceptance/terrafarm"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
@@ -38,7 +38,7 @@ import (
 //   PKG=./pkg/acceptance \
 //   TESTTIMEOUT=6h \
 //   TESTS=ContinuousLoad_BlockWriter \
-//   TESTFLAGS='-v -remote -key-name google_compute_engine -cwd terraform -nodes 4 -tf.keep-cluster=failed'
+//   TESTFLAGS='-v -remote -key-name azure -cwd terraform/azure -nodes 4 -tf.keep-cluster=failed'
 //
 // Load is generated for the duration specified by TESTTIMEOUT, minus some time
 // required for the orderly teardown of resources created by the test.  Because
@@ -73,8 +73,8 @@ type continuousLoadTest struct {
 func (cl continuousLoadTest) queryCount(f *terrafarm.Farmer) (float64, error) {
 	var client http.Client
 	var resp status.NodeStatus
-	host := f.Nodes()[0]
-	if err := util.GetJSON(client, "http://"+host+":8080/_status/nodes/local", &resp); err != nil {
+	host := f.Hostname(0)
+	if err := httputil.GetJSON(client, "http://"+host+":8080/_status/nodes/local", &resp); err != nil {
 		return 0, err
 	}
 	count, ok := resp.Metrics["sql.query.count"]
@@ -84,36 +84,33 @@ func (cl continuousLoadTest) queryCount(f *terrafarm.Farmer) (float64, error) {
 	return count, nil
 }
 
-func (cl continuousLoadTest) startLoad(f *terrafarm.Farmer) error {
-	if *flagCLTWriters > len(f.Nodes()) {
-		return errors.Errorf("writers (%d) > nodes (%d)", *flagCLTWriters, len(f.Nodes()))
-	}
-
-	// We may have to retry restarting the load generators, because CockroachDB
-	// might have been started too recently to start accepting connections.
-	started := make(map[int]bool)
-	return util.RetryForDuration(10*time.Second, func() error {
-		for i := 0; i < *flagCLTWriters; i++ {
-			if !started[i] {
-				if err := f.Start(i, cl.Process); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	})
-}
-
 // Run performs a continuous load test with the given parameters, checking the
 // health of the cluster regularly. Any failure of a CockroachDB node or load
 // generator constitutes a test failure. The test runs for the duration given
 // by the `test.timeout` flag, minus the time it takes to reliably tear down
 // the test cluster.
-func (cl continuousLoadTest) Run(t *testing.T) {
-	f := farmer(t, cl.Prefix+cl.shortTestTimeout())
-	ctx, err := WithClusterTimeout(context.Background())
-	if err != nil {
-		t.Fatal(err)
+func (cl continuousLoadTest) Run(ctx context.Context, t testing.TB) {
+	s := log.Scope(t, "TestContinousLoad-"+cl.Prefix)
+	defer s.Close(t)
+
+	f := MakeFarmer(t, cl.Prefix+cl.shortTestTimeout(), stopper)
+	// If the timeout flag was set, calculate an appropriate lower timeout by
+	// subtracting expected cluster creation and teardown times to allow for
+	// proper shutdown at the end of the test.
+	if fl := flag.Lookup("test.timeout"); fl != nil {
+		timeout, err := time.ParseDuration(fl.Value.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		// We've empirically observed 6-7 minute teardown times. We set aside a
+		// larger duration to account for outliers and setup time.
+		if setupTeardownDuration := 10 * time.Minute; timeout <= setupTeardownDuration {
+			t.Fatalf("test.timeout must be greater than create/destroy interval %s", setupTeardownDuration)
+		} else {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout-setupTeardownDuration)
+			defer cancel()
+		}
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		log.Infof(ctx, "load test will end at %s", deadline)
@@ -135,12 +132,12 @@ func (cl continuousLoadTest) Run(t *testing.T) {
 	if err := f.Resize(cl.NumNodes); err != nil {
 		t.Fatal(err)
 	}
-	checkGossip(t, f, longWaitTime, hasPeers(cl.NumNodes))
+	CheckGossip(ctx, t, f, longWaitTime, HasPeers(cl.NumNodes))
 	start := timeutil.Now()
-	if err := cl.startLoad(f); err != nil {
+	if err := f.StartLoad(ctx, cl.Process, *flagCLTWriters); err != nil {
 		t.Fatal(err)
 	}
-	cl.assert(t, f)
+	f.Assert(ctx, t)
 
 	// Run load, checking the health of the cluster periodically.
 	const healthCheckInterval = 2 * time.Minute
@@ -153,7 +150,7 @@ func (cl continuousLoadTest) Run(t *testing.T) {
 		case <-healthCheckTimer.C:
 			// Check that all nodes are up and that queries are being processed.
 			healthCheckTimer.Read = true
-			cl.assert(t, f)
+			f.Assert(ctx, t)
 			queryCount, err := cl.queryCount(f)
 			if err != nil {
 				t.Fatal(err)
@@ -171,12 +168,12 @@ func (cl continuousLoadTest) Run(t *testing.T) {
 			log.Infof(ctx, "health check ok %s (%.1f qps)", timeutil.Now().Sub(start), qps)
 		case <-ctx.Done():
 			log.Infof(ctx, "load test finished")
-			cl.assert(t, f)
-			if err := f.Stop(0, cl.Process); err != nil {
+			f.Assert(ctx, t)
+			if err := f.Stop(ctx, 0, cl.Process); err != nil {
 				t.Error(err)
 			}
 			return
-		case <-stopper:
+		case <-stopper.ShouldStop():
 			t.Fatal("interrupted")
 		}
 	}
@@ -198,30 +195,24 @@ func (cl continuousLoadTest) shortTestTimeout() string {
 	return regexp.MustCompile(`([a-z])0[0a-z]+`).ReplaceAllString(timeout.String(), `$1`)
 }
 
-// assert fails the test if CockroachDB or the load generators are down.
-func (cl continuousLoadTest) assert(t *testing.T, f *terrafarm.Farmer) {
-	f.Assert(t)
-	for _, host := range f.Nodes()[0:*flagCLTWriters] {
-		f.AssertState(t, host, cl.Process, "RUNNING")
-	}
-}
-
 func TestContinuousLoad_BlockWriter(t *testing.T) {
+	ctx := context.Background()
 	continuousLoadTest{
 		Prefix:              "bwriter",
 		BenchmarkPrefix:     "BenchmarkBlockWriter",
 		NumNodes:            *flagNodes,
 		Process:             "block_writer",
 		CockroachDiskSizeGB: 200,
-	}.Run(t)
+	}.Run(ctx, t)
 }
 
 func TestContinuousLoad_Photos(t *testing.T) {
+	ctx := context.Background()
 	continuousLoadTest{
 		Prefix:              "photos",
 		BenchmarkPrefix:     "BenchmarkPhotos",
 		NumNodes:            *flagNodes,
 		Process:             "photos",
 		CockroachDiskSizeGB: 200,
-	}.Run(t)
+	}.Run(ctx, t)
 }

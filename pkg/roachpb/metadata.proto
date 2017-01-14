@@ -82,6 +82,7 @@ message StoreCapacity {
   optional int64 capacity = 1 [(gogoproto.nullable) = false];
   optional int64 available = 2 [(gogoproto.nullable) = false];
   optional int32 range_count = 3 [(gogoproto.nullable) = false];
+  optional int32 lease_count = 4 [(gogoproto.nullable) = false];
 }
 
 // NodeDescriptor holds details on node physical/network topology.
@@ -112,15 +113,15 @@ message StoreDeadReplicas {
   repeated ReplicaIdent replicas = 2 [(gogoproto.nullable) = false];
 }
 
-// Locality is an ordered set of key value Tiers that describe a nodes location.
-// The tier keys should be the same across all nodes.
+// Locality is an ordered set of key value Tiers that describe a node's
+// location. The tier keys should be the same across all nodes.
 message Locality {
   option (gogoproto.goproto_stringer) = false;
 
   repeated Tier tiers = 1 [(gogoproto.nullable) = false];
 }
 
-// Tier represents one level of the locality hiearchy.
+// Tier represents one level of the locality hierarchy.
 message Tier {
   option (gogoproto.goproto_stringer) = false;
 

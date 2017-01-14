@@ -17,13 +17,21 @@
 package decimal
 
 import (
+	"flag"
+	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"gopkg.in/inf.v0"
 
 	_ "github.com/cockroachdb/cockroach/pkg/util/log" // for flags
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+)
+
+var (
+	flagDurationLimit = flag.Duration("limit", 0, "function execution time limit; 0 is disabled")
 )
 
 var floatDecimalEqualities = map[float64]*inf.Dec{
@@ -46,7 +54,7 @@ func TestNewDecFromFloat(t *testing.T) {
 
 		var dec inf.Dec
 		if SetFromFloat(&dec, tf); dec.Cmp(td) != 0 {
-			t.Errorf("SetFromFloat(%f) expected to set decimal to %s, but got %s", tf, td, dec)
+			t.Errorf("SetFromFloat(%f) expected to set decimal to %s, but got %s", tf, td, &dec)
 		}
 	}
 }
@@ -76,84 +84,166 @@ type decimalTwoArgsTestCase struct {
 
 func testDecimalSingleArgFunc(
 	t *testing.T,
-	f func(*inf.Dec, *inf.Dec, inf.Scale) *inf.Dec,
+	f func(*inf.Dec, *inf.Dec, inf.Scale) (*inf.Dec, error),
 	s inf.Scale,
 	tests []decimalOneArgTestCase,
 ) {
-	for i, tc := range tests {
-		x, exp := new(inf.Dec), new(inf.Dec)
-		x.SetString(tc.input)
-		exp.SetString(tc.expected)
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("%s = %s", tc.input, tc.expected), func(t *testing.T) {
+			x, exp := new(inf.Dec), new(inf.Dec)
+			x.SetString(tc.input)
+			exp.SetString(tc.expected)
 
-		// Test allocated return value.
-		z := f(nil, x, s)
-		if exp.Cmp(z) != 0 {
-			t.Errorf("%d: expected %s, got %s", i, exp, z)
-		}
+			// Test allocated return value.
+			var z *inf.Dec
+			var err error
+			done := make(chan struct{}, 1)
+			start := timeutil.Now()
+			go func() {
+				z, err = f(nil, x, s)
+				done <- struct{}{}
+			}()
+			var after <-chan time.Time
+			if *flagDurationLimit > 0 {
+				after = time.After(*flagDurationLimit)
+			}
+			select {
+			case <-done:
+				t.Logf("execute duration: %s", timeutil.Since(start))
+			case <-after:
+				t.Fatalf("timedout after %s", *flagDurationLimit)
+			}
+			if err != nil {
+				if tc.expected != err.Error() {
+					t.Errorf("expected error %s, got %s", tc.expected, err)
+				}
+				return
+			}
+			if exp.Cmp(z) != 0 {
+				t.Errorf("expected %s, got %s", exp, z)
+			}
 
-		// Test provided decimal mutation.
-		z.SetString("0.0")
-		f(z, x, s)
-		if exp.Cmp(z) != 0 {
-			t.Errorf("%d: expected %s, got %s", i, exp, z)
-		}
+			// Test provided decimal mutation.
+			z.SetString("0.0")
+			_, _ = f(z, x, s)
+			if exp.Cmp(z) != 0 {
+				t.Errorf("expected %s, got %s", exp, z)
+			}
 
-		// Test same arg mutation.
-		f(x, x, s)
-		if exp.Cmp(x) != 0 {
-			t.Errorf("%d: expected %s, got %s", i, exp, x)
-		}
-		x.SetString(tc.input)
+			// Test same arg mutation.
+			_, _ = f(x, x, s)
+			if exp.Cmp(x) != 0 {
+				t.Errorf("expected %s, got %s", exp, x)
+			}
+			x.SetString(tc.input)
+		})
+	}
+}
+
+func nilErrorSingle(
+	f func(*inf.Dec, *inf.Dec, inf.Scale) *inf.Dec,
+) func(*inf.Dec, *inf.Dec, inf.Scale) (*inf.Dec, error) {
+	return func(a, b *inf.Dec, s inf.Scale) (*inf.Dec, error) {
+		return f(a, b, s), nil
+	}
+}
+
+func nilErrorDouble(
+	f func(*inf.Dec, *inf.Dec, *inf.Dec, inf.Scale) *inf.Dec,
+) func(*inf.Dec, *inf.Dec, *inf.Dec, inf.Scale) (*inf.Dec, error) {
+	return func(a, b, c *inf.Dec, s inf.Scale) (*inf.Dec, error) {
+		return f(a, b, c, s), nil
 	}
 }
 
 func testDecimalDoubleArgFunc(
 	t *testing.T,
-	f func(*inf.Dec, *inf.Dec, *inf.Dec, inf.Scale) *inf.Dec,
+	f func(*inf.Dec, *inf.Dec, *inf.Dec, inf.Scale) (*inf.Dec, error),
 	s inf.Scale,
 	tests []decimalTwoArgsTestCase,
 ) {
-	for i, tc := range tests {
-		x, y, exp := new(inf.Dec), new(inf.Dec), new(inf.Dec)
-		x.SetString(tc.input1)
-		y.SetString(tc.input2)
-		exp.SetString(tc.expected)
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("%s, %s = %s", tc.input1, tc.input2, tc.expected), func(t *testing.T) {
+			x, y, exp := new(inf.Dec), new(inf.Dec), new(inf.Dec)
+			if _, ok := x.SetString(tc.input1); !ok {
+				t.Fatalf("could not set decimal: %s", tc.input1)
+			}
+			if _, ok := y.SetString(tc.input2); !ok {
+				t.Fatalf("could not set decimal: %s", tc.input2)
+			}
 
-		// Test allocated return value.
-		z := f(nil, x, y, s)
-		if exp.Cmp(z) != 0 {
-			t.Errorf("%d: expected %s, got %s", i, exp, z)
-		}
+			// Test allocated return value.
+			var z *inf.Dec
+			var err error
+			done := make(chan struct{}, 1)
+			start := timeutil.Now()
+			go func() {
+				z, err = f(nil, x, y, s)
+				done <- struct{}{}
+			}()
+			var after <-chan time.Time
+			if *flagDurationLimit > 0 {
+				after = time.After(*flagDurationLimit)
+			}
+			select {
+			case <-done:
+				t.Logf("execute duration: %s", timeutil.Since(start))
+			case <-after:
+				t.Fatalf("timedout after %s", *flagDurationLimit)
+			}
+			if err != nil {
+				if tc.expected != err.Error() {
+					t.Errorf("expected error %s, got %s", tc.expected, err)
+				}
+				return
+			}
+			if z == nil {
+				if tc.expected != "nil" {
+					t.Errorf("expected %s, got nil", tc.expected)
+				}
+				return
+			} else if tc.expected == "nil" {
+				t.Errorf("expected nil, got %s", z)
+				return
+			}
+			if _, ok := exp.SetString(tc.expected); !ok {
+				t.Errorf("could not set decimal: %s", tc.expected)
+				return
+			}
+			if exp.Cmp(z) != 0 {
+				t.Errorf("expected %s, got %s", exp, z)
+			}
 
-		// Test provided decimal mutation.
-		z.SetString("0.0")
-		f(z, x, y, s)
-		if exp.Cmp(z) != 0 {
-			t.Errorf("%d: expected %s, got %s", i, exp, z)
-		}
+			// Test provided decimal mutation.
+			z.SetString("0.0")
+			_, _ = f(z, x, y, s)
+			if exp.Cmp(z) != 0 {
+				t.Errorf("expected %s, got %s", exp, z)
+			}
 
-		// Test first arg mutation.
-		f(x, x, y, s)
-		if exp.Cmp(x) != 0 {
-			t.Errorf("%d: expected %s, got %s", i, exp, x)
-		}
-		x.SetString(tc.input1)
-
-		// Test second arg mutation.
-		f(y, x, y, s)
-		if exp.Cmp(y) != 0 {
-			t.Errorf("%d: expected %s, got %s", i, exp, y)
-		}
-		y.SetString(tc.input2)
-
-		// Test both arg mutation, if possible.
-		if tc.input1 == tc.input2 {
-			f(x, x, x, s)
+			// Test first arg mutation.
+			_, _ = f(x, x, y, s)
 			if exp.Cmp(x) != 0 {
-				t.Errorf("%d: expected %s, got %s", i, exp, x)
+				t.Errorf("expected %s, got %s", exp, x)
 			}
 			x.SetString(tc.input1)
-		}
+
+			// Test second arg mutation.
+			_, _ = f(y, x, y, s)
+			if exp.Cmp(y) != 0 {
+				t.Errorf("expected %s, got %s", exp, y)
+			}
+			y.SetString(tc.input2)
+
+			// Test both arg mutation, if possible.
+			if tc.input1 == tc.input2 {
+				_, _ = f(x, x, x, s)
+				if exp.Cmp(x) != 0 {
+					t.Errorf("expected %s, got %s", exp, x)
+				}
+				x.SetString(tc.input1)
+			}
+		})
 	}
 }
 
@@ -171,7 +261,7 @@ func TestDecimalMod(t *testing.T) {
 	modWithScale := func(z, x, y *inf.Dec, s inf.Scale) *inf.Dec {
 		return Mod(z, x, y)
 	}
-	testDecimalDoubleArgFunc(t, modWithScale, 0, tests)
+	testDecimalDoubleArgFunc(t, nilErrorDouble(modWithScale), 0, tests)
 }
 
 func BenchmarkDecimalMod(b *testing.B) {
@@ -199,6 +289,7 @@ func BenchmarkDecimalMod(b *testing.B) {
 
 func TestDecimalSqrt(t *testing.T) {
 	tests := []decimalOneArgTestCase{
+		{"0.00000000001", "0.0000031622776602"},
 		{"0", "0"},
 		{".12345678987654321122763812", "0.3513641841117891"},
 		{"4", "2"},
@@ -208,11 +299,14 @@ func TestDecimalSqrt(t *testing.T) {
 		{"24544.95034", "156.6682812186308502"},
 		{"1234567898765432112.2763812", "1111111110.0000000055243715"},
 	}
-	testDecimalSingleArgFunc(t, Sqrt, 16, tests)
+	testDecimalSingleArgFunc(t, nilErrorSingle(Sqrt), 16, tests)
 }
 
 func TestDecimalSqrtDoubleScale(t *testing.T) {
 	tests := []decimalOneArgTestCase{
+		{"234895738245234059870198705892968191574905861209834710948561902834710985610892374", "15326308696004855684990787370582512173391.71890205964489889707604945584880"},
+		{"0.0000000000000000000000000000000000000000000000000000001", "0.00000000000000000000000000031623"},
+		{"0.00000000001", "0.00000316227766016837933199889354"},
 		{"0", "0"},
 		{".12345678987654321122763812", "0.35136418411178907639479458498081"},
 		{"4", "2"},
@@ -222,7 +316,7 @@ func TestDecimalSqrtDoubleScale(t *testing.T) {
 		{"24544.95034", "156.66828121863085021083671472749063"},
 		{"1234567898765432112.2763812", "1111111110.00000000552437154552437153179097"},
 	}
-	testDecimalSingleArgFunc(t, Sqrt, 32, tests)
+	testDecimalSingleArgFunc(t, nilErrorSingle(Sqrt), 32, tests)
 }
 
 func BenchmarkDecimalSqrt(b *testing.B) {
@@ -255,7 +349,7 @@ func TestDecimalCbrt(t *testing.T) {
 		{"1000", "10.0"},
 		{"1234567898765432112.2763812", "1072765.9821799668569064"},
 	}
-	testDecimalSingleArgFunc(t, Cbrt, 16, tests)
+	testDecimalSingleArgFunc(t, nilErrorSingle(Cbrt), 16, tests)
 }
 
 func TestDecimalCbrtDoubleScale(t *testing.T) {
@@ -273,7 +367,7 @@ func TestDecimalCbrtDoubleScale(t *testing.T) {
 		{"1000", "10.0"},
 		{"1234567898765432112.2763812", "1072765.98217996685690644770246374397146"},
 	}
-	testDecimalSingleArgFunc(t, Cbrt, 32, tests)
+	testDecimalSingleArgFunc(t, nilErrorSingle(Cbrt), 32, tests)
 }
 
 func BenchmarkDecimalCbrt(b *testing.B) {
@@ -299,6 +393,13 @@ func TestDecimalLog(t *testing.T) {
 		{"2", "0.6931471805599453"},
 		{"1234.56789", "7.1184763011977896"},
 		{"1234567898765432112.2763812", "41.6572527032084749"},
+		{"100000000000000000000000000000000", "73.6827229758094619"},
+		{"123450000000000000000000000000000", "73.8933890056125590"},
+		{"1000000000000000000000000000000000", "75.9853080688035076"},
+		{"10000000000000000000000000000000000000000000000", "105.9189142777261015"},
+		{"1000002350000002340000000345354700000000764000009", "110.5240868137114339"},
+		{"40786335175292462000000000000000000", "79.6936551719404616"},
+		{"0.000000000000000000000000000000000000000000000000001", "-117.4318397426763312"},
 	}
 	testDecimalSingleArgFunc(t, Log, 16, tests)
 }
@@ -311,6 +412,11 @@ func TestDecimalLogDoubleScale(t *testing.T) {
 		{"2", "0.69314718055994530941723212145818"},
 		{"1234.56789", "7.11847630119778961310397607454138"},
 		{"1234567898765432112.2763812", "41.65725270320847492372271693721825"},
+		{"100000000000000000000000000000000", "73.68272297580946188857572654989965"},
+		{"123450000000000000000000000000000", "73.89338900561255903040963826675629"},
+		{"1000000000000000000000000000000000", "75.98530806880350757259371800458402"},
+		{"10000000000000000000000000000000000000000000000", "105.91891427772610146482760691548075"},
+		{"1000002350000002340000000345354700000000764000009", "110.52408681371143392718404189196936"},
 	}
 	testDecimalSingleArgFunc(t, Log, 32, tests)
 }
@@ -382,7 +488,10 @@ func BenchmarkDecimalLog(b *testing.B) {
 	z := new(inf.Dec)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Log(z, vals[i%len(vals)], 16)
+		_, err := Log(z, vals[i%len(vals)], 16)
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -404,9 +513,9 @@ func TestDecimalExp(t *testing.T) {
 		{"7.1184763011977896", "1234.5678899999999838"},
 
 		{"41.6572527032084749", "1234567898765432082.9890763978113354"},
-		{"312.345", "4463853675713824294922499817029570039071067102402155066185430427302882199695129254111120181064791178979160372068542599780002019509758173.2401488061929997"},
+		{"312.345", "4463853675713824294922499817029570039069558076531218540354463291830877552758292230013819691405163925852387646041845995193867291432899941.5478729943523921"},
 	}
-	testDecimalSingleArgFunc(t, Exp, 16, tests)
+	testDecimalSingleArgFunc(t, nilErrorSingle(Exp), 16, tests)
 }
 
 func TestDecimalExpDoubleScale(t *testing.T) {
@@ -427,9 +536,9 @@ func TestDecimalExpDoubleScale(t *testing.T) {
 		{"7.1184763011977896", "1234.56788999999998382225190704296197"},
 
 		{"41.6572527032084749", "1234567898765432082.98907639781133543894457806069743"},
-		{"312.345", "4463853675713824294922499817029570039071067102402155066185430427302882199695129254111120181064791178979160372068542599780002019509758173.24014880619299965312338408024449"},
+		{"312.345", "4463853675713824294922499817029570039071067102402155066185430427302882193716789316379333056308014834801825486091800565136966585643914523.82097285541721679194656689025790"},
 	}
-	testDecimalSingleArgFunc(t, Exp, 32, tests)
+	testDecimalSingleArgFunc(t, nilErrorSingle(Exp), 32, tests)
 }
 
 func BenchmarkDecimalExp(b *testing.B) {
@@ -463,6 +572,49 @@ func TestDecimalPow(t *testing.T) {
 		{"-9223372036854775807123.1", "2", "85070591730234615849667701979706147052698553.61"},
 		{"9223372036854775807123.1", "3", "784637716923335095255678472236230098075796571287653754351907705219.391"},
 		{"-9223372036854775807123.1", "3", "-784637716923335095255678472236230098075796571287653754351907705219.391"},
+		{"0", "-1", "zero raised to a negative power is undefined"},
+		{"0", "0", "1"},
+		{"0", "2", "0"},
+		{"-1", "-.1", "a negative number raised to a non-integer power yields a complex result"},
+		{"0.00000458966308373723", "-31962622854859143", "argument too large"},
+		{"0.00000458966", "-123415", "argument too large"},
+		{"2", "-38", "argument too large"},
+		{"10000000000", "500", "argument too large"},
+		{"425644047350.89246", "74.4647211651881", "argument too large"},
+		{"56051.85009165843", "98.23741371063426", "argument too large"},
+		{"2306257620454.719", "49.18687811476825", "argument too large"},
+		{"791018.4038517432", "155.94813858582634", "argument too large"},
+
+		// Test a small number ^ large power to test integerPower slowness. The
+		// first 20 digits or so of the result here are the same as postgres. That
+		// is, this test case isn't being used to test accurracy, just speed. It is
+		// designed to be used with the test flag `-limit 5s`.
+		{
+			"0.5808269481766639",
+			"-5594.351782364144",
+			"1012607524935722361171974431227924446765642091678504492925818123" +
+				"4668717650059503717963128331510125875130132904784980198145614001" +
+				"4913088390916048184487380222714505418328209917740948171831056579" +
+				"0601313521353337383192484521436799422543817328359057086106028640" +
+				"4489386933186347853843232710532927608240564394332451283743151619" +
+				"0352441446867588739203076093935749809881771827853552232380155901" +
+				"2608753698339721603332846765674837667328613288249881636061674462" +
+				"2678837656484038612558150055107863478788424760744372410254298619" +
+				"5250103978593756840639359757794115138467941734572962144047401830" +
+				"6233664962032045359203514861575653569725518057358461399767612022" +
+				"3217904443511713612591208283866337504349112014982102500043997961" +
+				"6310020142702414565410865565749314934958981342824055445040488302" +
+				"6268517164157769499599978010226659152098642354217038219956367209" +
+				"5102059613891029316437264412894207938800254544710963713861512134" +
+				"8563186991442858334128592107106629572766509341401309880002031716" +
+				"4442017088903799586126688213138585003354811246368384319914878071" +
+				"8825244100931081154494567995808086514445337550994395818718728815" +
+				"7837862012565020114769022175395659523500388290278083079692474665" +
+				"9400896667459019900920400617254102172007924917960260845468183721" +
+				"7367695058226906330293588970281829627281578623735547145940282484" +
+				"99120296332436525300556450916462179859643" +
+				".6464995734910913",
+		},
 	}
 	testDecimalDoubleArgFunc(t, Pow, 16, tests)
 }
@@ -482,6 +634,14 @@ func TestDecimalPowDoubleScale(t *testing.T) {
 		{"-9223372036854775807123.1", "2", "85070591730234615849667701979706147052698553.61"},
 		{"9223372036854775807123.1", "3", "784637716923335095255678472236230098075796571287653754351907705219.391"},
 		{"-9223372036854775807123.1", "3", "-784637716923335095255678472236230098075796571287653754351907705219.391"},
+		{"0.00000458966308373723", "-31962622854859143", "argument too large"},
+		{"0.00000458966", "-123415", "argument too large"},
+		{"2", "-38", "0.000000000004"},
+		{"10000000000", "500", "argument too large"},
+		{"425644047350.89246", "74.4647211651881", "argument too large"},
+		{"56051.85009165843", "98.23741371063426", "argument too large"},
+		{"2306257620454.719", "49.18687811476825", "argument too large"},
+		{"791018.4038517432", "155.94813858582634", "argument too large"},
 	}
 	testDecimalDoubleArgFunc(t, Pow, 32, tests)
 }
@@ -502,6 +662,9 @@ func BenchmarkDecimalPow(b *testing.B) {
 	z := new(inf.Dec)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Pow(z, xs[i%len(ys)], ys[i%len(ys)], 16)
+		_, err := Pow(z, xs[i%len(ys)], ys[i%len(ys)], 16)
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 }

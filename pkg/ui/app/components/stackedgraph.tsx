@@ -1,21 +1,14 @@
 import * as React from "react";
 import * as nvd3 from "nvd3";
-import * as d3 from "d3";
 import { createSelector } from "reselect";
-import _ from "lodash";
 
 import { findChildrenOfType } from "../util/find";
-import { NanoToMilli } from "../util/convert";
 import {
-  MetricsDataComponentProps, Axis, AxisProps, Metric, MetricProps, ProcessDataPoints,
+  MetricsDataComponentProps, Axis, AxisProps, InitLineChart, ConfigureLineChart,
+  GraphLineState, mouseEnter, mouseMove, mouseLeave,
 } from "./graphs";
+import { Metric, MetricProps } from "./metric";
 import Visualization from "./visualization";
-
-// Chart margins to match design.
-const CHART_MARGINS: nvd3.Margin = {top: 20, right: 60, bottom: 20, left: 60};
-
-// Maximum number of series we will show in the legend. If there are more we hide the legend.
-const MAX_LEGEND_SERIES: number = 3;
 
 interface StackedAreaGraphProps extends MetricsDataComponentProps {
   title?: string;
@@ -30,9 +23,11 @@ interface StackedAreaGraphProps extends MetricsDataComponentProps {
  * currently only supports a single Y-axis, but multiple metrics can be graphed
  * on the same axis.
  */
-export class StackedAreaGraph extends React.Component<StackedAreaGraphProps, {}> {
+export class StackedAreaGraph extends React.Component<StackedAreaGraphProps, GraphLineState> {
   // The SVG Element in the DOM used to render the graph.
   svgEl: SVGElement;
+
+  state = new GraphLineState();
 
   // A configured NVD3 chart used to render the chart.
   chart: nvd3.StackedAreaChart;
@@ -65,28 +60,9 @@ export class StackedAreaGraph extends React.Component<StackedAreaGraphProps, {}>
     }
 
     this.chart = nvd3.models.stackedAreaChart();
-    this.chart
-      .x((d: Proto2TypeScript.cockroach.ts.tspb.TimeSeriesDatapoint) => new Date(NanoToMilli(d && d.timestamp_nanos.toNumber())))
-      .y((d: Proto2TypeScript.cockroach.ts.tspb.TimeSeriesDatapoint) => d && d.value)
-      .useInteractiveGuideline(true)
-      .showLegend(true)
-      .showYAxis(true)
-      .showXAxis(this.props.xAxis || true)
-      .xScale(d3.time.scale())
-      .margin(CHART_MARGINS);
+    InitLineChart(this.chart);
 
     this.chart.showControls(false);
-
-    this.chart.xAxis
-      .tickFormat((t) => typeof t === "string" ? t : d3.time.format("%H:%M:%S")(t))
-      .showMaxMin(false);
-    this.chart.yAxis
-      .axisLabel(axis.props.label)
-      .showMaxMin(false);
-
-    if (axis.props.format) {
-      this.chart.yAxis.tickFormat(axis.props.format);
-    }
 
     let range = axis.props.range;
     if (range) {
@@ -115,30 +91,7 @@ export class StackedAreaGraph extends React.Component<StackedAreaGraphProps, {}>
         return;
       }
 
-      this.chart.showLegend(_.isBoolean(this.props.legend) ? this.props.legend :
-        metrics.length > 1 && metrics.length <= MAX_LEGEND_SERIES);
-      let formattedData: any[] = [];
-
-      if (this.props.data) {
-        let processed = ProcessDataPoints(metrics, axis, this.props.data, true);
-        formattedData = processed.formattedData;
-        let {yAxisDomain, xAxisDomain } = processed;
-
-        this.chart.yDomain(yAxisDomain.domain());
-
-        // always set the tick values to the lowest axis value, the highest axis
-        // value, and one value in between
-        this.chart.yAxis.tickValues(yAxisDomain.ticks());
-        this.chart.xAxis.tickValues(xAxisDomain.ticks((n) => new Date(NanoToMilli(n))));
-      }
-      try {
-        d3.select(this.svgEl)
-          .datum(formattedData)
-          .transition().duration(500)
-          .call(this.chart);
-      } catch (e) {
-        console.log("Error rendering graph: ", e);
-      }
+      ConfigureLineChart(this.chart, this.svgEl, metrics, axis, this.props.data, this.props.timeInfo, true);
     }
   }
 
@@ -160,13 +113,20 @@ export class StackedAreaGraph extends React.Component<StackedAreaGraphProps, {}>
   }
 
   render() {
-    let { title, subtitle, tooltip } = this.props;
-    return <Visualization title={title} subtitle={subtitle} tooltip={tooltip}>
+    let { title, subtitle, tooltip, data } = this.props;
+    let graphLineClass = "graph-lines__line";
+    if (this.state.mouseIn) {
+      graphLineClass += " graph-lines__line--hidden";
+    }
+
+    let mouseEnterBound = () => mouseEnter(this);
+    let mouseLeaveBound = () => mouseLeave(this);
+
+    return <Visualization title={title} subtitle={subtitle} tooltip={tooltip} loading={!data} >
       <div className="linegraph">
-        <svg className="graph" ref={(svg) => this.svgEl = svg}/>
+        <div className={graphLineClass}></div>
+        <svg className="graph" ref={(svg) => this.svgEl = svg} onMouseMove={mouseMove} onMouseEnter={mouseEnterBound} onMouseLeave={mouseLeaveBound} />
       </div>
     </Visualization>;
   }
 }
-
-export { Axis, Metric } from "./graphs";

@@ -19,9 +19,6 @@ RowIdx Key            Value Disposition
 statement error invalid table name
 ALTER TABLE t RENAME TO t.*
 
-statement error invalid table name
-ALTER TABLE t RENAME TO t[TRUE]
-
 statement ok
 ALTER TABLE t ADD b INT
 
@@ -47,13 +44,15 @@ ALTER TABLE t ADD CONSTRAINT foo UNIQUE (b)
 statement error multiple primary keys for table "t" are not allowed
 ALTER TABLE t ADD CONSTRAINT bar PRIMARY KEY (b)
 
-query TTBITTB colnames
+query TTBITTBB colnames
 SHOW INDEXES FROM t
 ----
-Table  Name     Unique  Seq  Column  Direction  Storing
-t      primary  true    1    a       ASC        false
-t      t_f_idx  false   1    f       ASC        false
-t      foo      true    1    b       ASC        false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+t      primary  true    1    a       ASC        false    false
+t      t_f_idx  false   1    f       ASC        false    false
+t      t_f_idx  false   2    a       ASC        false    true
+t      foo      true    1    b       ASC        false    false
+t      foo      true    2    a       ASC        false    true
 
 query III
 SELECT * FROM t
@@ -157,9 +156,6 @@ ALTER TABLE t DROP IF EXISTS d
 statement error column "a" is referenced by the primary key
 ALTER TABLE t DROP a
 
-statement error column "b" is referenced by existing index "foo"
-ALTER TABLE t DROP b
-
 statement error constraint "bar" does not exist
 ALTER TABLE t DROP CONSTRAINT bar
 
@@ -172,12 +168,13 @@ ALTER TABLE t DROP CONSTRAINT foo
 statement ok
 DROP INDEX t@foo
 
-query TTBITTB colnames
+query TTBITTBB colnames
 SHOW INDEXES FROM t
 ----
-Table  Name     Unique  Seq  Column  Direction  Storing
-t      primary  true    1    a       ASC        false
-t      t_f_idx  false   1    f       ASC        false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+t      primary  true    1    a       ASC        false    false
+t      t_f_idx  false   1    f       ASC        false    false
+t      t_f_idx  false   2    a       ASC        false    true
 
 query ITTT colnames
 EXPLAIN (DEBUG) SELECT * FROM t
@@ -270,15 +267,62 @@ a   d     x     y     z
 31  32    NULL  1.3   1.4
 33  34    2     2.1   2.2
 
-# fix #6463
-statement error column "d" is referenced by existing index "t_d_key"
+statement ok
 ALTER TABLE t DROP COLUMN d
 
 statement ok
-DROP INDEX t@t_d_key
+ALTER TABLE t ADD COLUMN e INT; ALTER TABLE t ADD COLUMN d INT
+
+statement ok
+CREATE VIEW v AS SELECT x, y FROM t WHERE e > 5
+
+statement error cannot drop column "x" because view "v" depends on it
+ALTER TABLE t DROP COLUMN x
+
+statement error cannot drop column "y" because view "v" depends on it
+ALTER TABLE t DROP COLUMN y
+
+statement error cannot drop column "e" because view "v" depends on it
+ALTER TABLE t DROP COLUMN e
 
 statement ok
 ALTER TABLE t DROP COLUMN d
+
+statement ok
+ALTER TABLE t DROP COLUMN e CASCADE
+
+statement ok
+ALTER TABLE t ADD COLUMN e INT
+
+statement ok
+CREATE VIEW v AS SELECT x, y FROM t WHERE e > 5
+
+statement ok
+ALTER TABLE t DROP COLUMN IF EXISTS q
+
+statement error cannot drop column "e" because view "v" depends on it
+ALTER TABLE t DROP COLUMN IF EXISTS e
+
+statement ok
+ALTER TABLE t DROP COLUMN IF EXISTS e CASCADE
+
+statement ok
+ALTER TABLE t ADD COLUMN g INT UNIQUE
+
+statement ok
+CREATE TABLE o (gf INT REFERENCES t (g), h INT, i INT, INDEX ii (i) STORING(h))
+
+statement error "t_g_key" is referenced by foreign key from table "o"
+ALTER TABLE t DROP COLUMN g
+
+statement ok
+ALTER TABLE t DROP COLUMN g CASCADE
+
+statement error column "h" is referenced by existing index "ii"
+ALTER TABLE o DROP COLUMN h
+
+statement ok
+ALTER TABLE o DROP COLUMN h CASCADE
 
 statement error adding a CHECK constraint via ALTER not supported
 ALTER TABLE t ADD f INT CHECK (f>1)
@@ -508,7 +552,7 @@ ALTER INDEX nonexistent@noindex SPLIT AT (42)
 user root
 
 statement ok
-CREATE VIEW privsview AS SELECT * FROM privs
+CREATE VIEW privsview AS SELECT a,b,c FROM privs
 
 statement error pgcode 42809 "privsview" is not a table
 ALTER TABLE privsview ADD d INT

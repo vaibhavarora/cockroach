@@ -18,7 +18,6 @@ package server
 
 import (
 	"fmt"
-	"net"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -60,11 +59,6 @@ const (
 func makeTestConfig() Config {
 	cfg := MakeConfig()
 
-	// MaxOffset is the maximum offset for clocks in the cluster.
-	// This is mostly irrelevant except when testing reads within
-	// uncertainty intervals.
-	cfg.MaxOffset = 50 * time.Millisecond
-
 	// Test servers start in secure mode by default.
 	cfg.Insecure = false
 
@@ -100,16 +94,25 @@ func makeTestConfigFromParams(params base.TestServerArgs) Config {
 	}
 	cfg.Insecure = params.Insecure
 	cfg.SocketFile = params.SocketFile
-	if params.MetricsSampleInterval != time.Duration(0) {
+	cfg.RetryOptions = params.RetryOptions
+	if params.MetricsSampleInterval != 0 {
 		cfg.MetricsSampleInterval = params.MetricsSampleInterval
 	}
-	if params.MaxOffset != time.Duration(0) {
-		cfg.MaxOffset = params.MaxOffset
+	if params.RaftTickInterval != 0 {
+		cfg.RaftTickInterval = params.RaftTickInterval
 	}
-	if params.ScanInterval != time.Duration(0) {
+	if params.RaftElectionTimeoutTicks != 0 {
+		cfg.RaftElectionTimeoutTicks = params.RaftElectionTimeoutTicks
+	}
+	if knobs := params.Knobs.Store; knobs != nil {
+		if mo := knobs.(*storage.StoreTestingKnobs).MaxOffset; mo != 0 {
+			cfg.MaxOffset = mo
+		}
+	}
+	if params.ScanInterval != 0 {
 		cfg.ScanInterval = params.ScanInterval
 	}
-	if params.ScanMaxIdleTime != time.Duration(0) {
+	if params.ScanMaxIdleTime != 0 {
 		cfg.ScanMaxIdleTime = params.ScanMaxIdleTime
 	}
 	if params.SSLCA != "" {
@@ -120,6 +123,9 @@ func makeTestConfigFromParams(params base.TestServerArgs) Config {
 	}
 	if params.SSLCertKey != "" {
 		cfg.SSLCertKey = params.SSLCertKey
+	}
+	if params.TimeSeriesQueryWorkerMax != 0 {
+		cfg.TimeSeriesServerConfig.QueryWorkerMax = params.TimeSeriesQueryWorkerMax
 	}
 	if params.DisableEventLog {
 		cfg.EventLogEnabled = false
@@ -137,6 +143,34 @@ func makeTestConfigFromParams(params base.TestServerArgs) Config {
 		cfg.AdvertiseAddr = util.TestAddr.String()
 		cfg.HTTPAddr = util.TestAddr.String()
 	}
+	if params.Addr != "" {
+		cfg.Addr = params.Addr
+		cfg.AdvertiseAddr = params.Addr
+	}
+
+	// Ensure we have the correct number of engines. Add in-memory ones where
+	// needed. There must be at least one store/engine.
+	if len(params.StoreSpecs) == 0 {
+		params.StoreSpecs = []base.StoreSpec{base.DefaultTestStoreSpec}
+	}
+	// Validate the store specs.
+	for _, storeSpec := range params.StoreSpecs {
+		if storeSpec.InMemory {
+			if storeSpec.SizePercent > 0 {
+				panic(fmt.Sprintf("test server does not yet support in memory stores based on percentage of total memory: %s", storeSpec))
+			}
+		} else {
+			// TODO(bram): This will require some cleanup of on disk files.
+			panic(fmt.Sprintf("test server does not yet support on disk stores: %s", storeSpec))
+		}
+	}
+	// Copy over the store specs.
+	cfg.Stores = base.StoreSpecList{Specs: params.StoreSpecs}
+	if cfg.TestingKnobs.Store == nil {
+		cfg.TestingKnobs.Store = &storage.StoreTestingKnobs{}
+	}
+	cfg.TestingKnobs.Store.(*storage.StoreTestingKnobs).SkipMinSizeCheck = true
+
 	return cfg
 }
 
@@ -233,32 +267,12 @@ func (ts *TestServer) Start(params base.TestServerArgs) error {
 		return err
 	}
 
-	// Ensure we have the correct number of engines. Add in-memory ones where
-	// needed. There must be at least one store/engine.
-	if len(params.StoreSpecs) == 0 {
-		params.StoreSpecs = []base.StoreSpec{base.DefaultTestStoreSpec}
-	}
-	for _, storeSpec := range params.StoreSpecs {
-		if storeSpec.InMemory {
-			if storeSpec.SizePercent > 0 {
-				panic(fmt.Sprintf("test server does not yet support in memory stores based on percentage of total memory: %s", storeSpec))
-			}
-			ts.Cfg.Engines = append(ts.Cfg.Engines, engine.NewInMem(
-				roachpb.Attributes{},
-				storeSpec.SizeInBytes,
-				params.Stopper,
-			))
-		} else {
-			// TODO(bram): This will require some cleanup of on disk files.
-			panic(fmt.Sprintf("test server does not yet support on disk stores: %s", storeSpec))
-		}
-	}
-
 	var err error
 	ts.Server, err = NewServer(*ts.Cfg, params.Stopper)
 	if err != nil {
 		return err
 	}
+
 	// Our context must be shared with our server.
 	ts.Cfg = &ts.Server.cfg
 
@@ -320,21 +334,14 @@ func (ts *TestServer) Stores() *storage.Stores {
 	return ts.node.stores
 }
 
+// Engines returns the TestServer's engines.
+func (ts *TestServer) Engines() []engine.Engine {
+	return ts.engines
+}
+
 // ServingAddr returns the server's address. Should be used by clients.
 func (ts *TestServer) ServingAddr() string {
 	return ts.cfg.AdvertiseAddr
-}
-
-// ServingHost returns the host portion of the rpc server's address.
-func (ts *TestServer) ServingHost() (string, error) {
-	h, _, err := net.SplitHostPort(ts.ServingAddr())
-	return h, err
-}
-
-// ServingPort returns the port portion of the rpc server's address.
-func (ts *TestServer) ServingPort() (string, error) {
-	_, p, err := net.SplitHostPort(ts.ServingAddr())
-	return p, err
 }
 
 // WriteSummaries implements TestServerInterface.
@@ -409,8 +416,12 @@ func (ts *TestServer) DistSender() *kv.DistSender {
 	return ts.distSender
 }
 
-// GetFirstStoreID is a utility function returning the StoreID of the first
-// store on this node.
+// DistSQLServer is part of TestServerInterface.
+func (ts *TestServer) DistSQLServer() interface{} {
+	return ts.distSQLServer
+}
+
+// GetFirstStoreID is part of TestServerInterface.
 func (ts *TestServer) GetFirstStoreID() roachpb.StoreID {
 	firstStoreID := roachpb.StoreID(-1)
 	err := ts.Stores().VisitStores(func(s *storage.Store) error {
@@ -423,6 +434,76 @@ func (ts *TestServer) GetFirstStoreID() roachpb.StoreID {
 		panic(err)
 	}
 	return firstStoreID
+}
+
+// LookupRange returns the descriptor of the range containing key.
+func (ts *TestServer) LookupRange(key roachpb.Key) (roachpb.RangeDescriptor, error) {
+	rangeLookupReq := roachpb.RangeLookupRequest{
+		Span: roachpb.Span{
+			Key: keys.RangeMetaKey(keys.MustAddr(key)),
+		},
+		MaxRanges: 1,
+	}
+	resp, pErr := client.SendWrapped(context.Background(), ts.DistSender(), &rangeLookupReq)
+	if pErr != nil {
+		return roachpb.RangeDescriptor{}, errors.Errorf(
+			"%q: lookup range unexpected error: %s", key, pErr)
+	}
+	return resp.(*roachpb.RangeLookupResponse).Ranges[0], nil
+}
+
+// SplitRange splits the range containing splitKey.
+// The right range created by the split starts at the split key and extends to the
+// original range's end key.
+// Returns the new descriptors of the left and right ranges.
+//
+// splitKey must correspond to a SQL table key (it must end with a family ID /
+// col ID).
+func (ts *TestServer) SplitRange(
+	splitKey roachpb.Key,
+) (roachpb.RangeDescriptor, roachpb.RangeDescriptor, error) {
+	splitRKey, err := keys.Addr(splitKey)
+	if err != nil {
+		return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{}, err
+	}
+	origRangeDesc, err := ts.LookupRange(splitKey)
+	if err != nil {
+		return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{}, err
+	}
+	if origRangeDesc.StartKey.Equal(splitRKey) {
+		return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{},
+			errors.Errorf(
+				"cannot split range %+v at start key %q", origRangeDesc, splitKey)
+	}
+	splitReq := roachpb.AdminSplitRequest{
+		Span: roachpb.Span{
+			Key: splitKey,
+		},
+		SplitKey: splitKey,
+	}
+	_, pErr := client.SendWrapped(context.Background(), ts.DistSender(), &splitReq)
+	if pErr != nil {
+		return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{},
+			errors.Errorf(
+				"%q: split unexpected error: %s", splitReq.SplitKey, pErr)
+	}
+
+	var leftRangeDesc, rightRangeDesc roachpb.RangeDescriptor
+	if err := ts.DB().GetProto(context.TODO(),
+		keys.RangeDescriptorKey(origRangeDesc.StartKey), &leftRangeDesc); err != nil {
+		return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{},
+			errors.Wrap(err, "could not look up left-hand side descriptor")
+	}
+	// The split point might not be exactly the one we requested (it can be
+	// adjusted slightly so we don't split in the middle of SQL rows). Update it
+	// to the real point.
+	splitRKey = leftRangeDesc.EndKey
+	if err := ts.DB().GetProto(context.TODO(),
+		keys.RangeDescriptorKey(splitRKey), &rightRangeDesc); err != nil {
+		return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{},
+			errors.Wrap(err, "could not look up right-hand side descriptor")
+	}
+	return leftRangeDesc, rightRangeDesc, nil
 }
 
 type testServerFactoryImpl struct{}

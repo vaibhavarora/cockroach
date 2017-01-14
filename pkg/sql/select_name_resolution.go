@@ -38,7 +38,14 @@ type nameResolutionVisitor struct {
 	err        error
 	sources    multiSourceInfo
 	colOffsets []int
-	ivarHelper parser.IndexedVarHelper
+	iVarHelper parser.IndexedVarHelper
+	searchPath parser.SearchPath
+
+	// foundDependentVars is set to true during the analysis if an
+	// expression was found which can change values between rows of the
+	// same data source, for example IndexedVars and calls to the
+	// random() function.
+	foundDependentVars bool
 }
 
 var _ parser.Visitor = &nameResolutionVisitor{}
@@ -49,10 +56,24 @@ func (v *nameResolutionVisitor) VisitPre(expr parser.Expr) (recurse bool, newNod
 	}
 
 	switch t := expr.(type) {
+	case parser.UnqualifiedStar:
+		v.foundDependentVars = true
+	case *parser.AllColumnsSelector:
+		v.foundDependentVars = true
+
 	case *parser.IndexedVar:
+		// If the indexed var is a standalone ordinal reference, ensure it
+		// becomes a fully bound indexed var.
+		if err := v.iVarHelper.BindIfUnbound(t); err != nil {
+			v.err = err
+			return false, expr
+		}
+
 		// We allow resolving IndexedVars on expressions that have already been resolved by this
 		// resolver. This is used in some cases when adding render targets for grouping or sorting.
-		v.ivarHelper.AssertSameContainer(t)
+		v.iVarHelper.AssertSameContainer(t)
+
+		v.foundDependentVars = true
 		return true, expr
 
 	case parser.UnresolvedName:
@@ -69,10 +90,27 @@ func (v *nameResolutionVisitor) VisitPre(expr parser.Expr) (recurse bool, newNod
 			v.err = err
 			return false, expr
 		}
-		ivar := v.ivarHelper.IndexedVar(v.colOffsets[srcIdx] + colIdx)
+		ivar := v.iVarHelper.IndexedVar(v.colOffsets[srcIdx] + colIdx)
+		v.foundDependentVars = true
 		return true, ivar
 
 	case *parser.FuncExpr:
+		fd, err := t.Func.Resolve(v.searchPath)
+		if err != nil {
+			v.err = err
+			return false, expr
+		}
+
+		if fd.HasOverloadsNeedingRepeatedEvaluation {
+			// TODO(knz): this property should really be an attribute of the
+			// individual overloads. By looking at the name-level property
+			// indicator, we are marking a function as row-dependent as
+			// soon as one overload is, even if the particular overload
+			// that would be selected by type checking for this FuncExpr
+			// is constant. This could be more fine-grained.
+			v.foundDependentVars = true
+		}
+
 		// Check for invalid use of *, which, if it is an argument, is the only argument.
 		if len(t.Exprs) != 1 {
 			break
@@ -88,13 +126,7 @@ func (v *nameResolutionVisitor) VisitPre(expr parser.Expr) (recurse bool, newNod
 		// Save back to avoid re-doing the work later.
 		t.Exprs[0] = vn
 
-		fn, err := t.Name.Normalize()
-		if err != nil {
-			v.err = err
-			return false, expr
-		}
-
-		if strings.EqualFold(fn.Function(), "count") {
+		if strings.EqualFold(fd.Name, "count") {
 			// Special case handling for COUNT(*). This is a special construct to
 			// count the number of rows; in this case * does NOT refer to a set of
 			// columns. A * is invalid elsewhere (and will be caught by TypeCheck()).
@@ -116,7 +148,8 @@ func (v *nameResolutionVisitor) VisitPre(expr parser.Expr) (recurse bool, newNod
 
 			t = t.CopyNode()
 			t.Exprs[0] = parser.StarDatumInstance
-			return false, t
+
+			return true, t
 		}
 		return true, t
 
@@ -130,24 +163,29 @@ func (v *nameResolutionVisitor) VisitPre(expr parser.Expr) (recurse bool, newNod
 
 func (*nameResolutionVisitor) VisitPost(expr parser.Expr) parser.Expr { return expr }
 
-func (s *selectNode) resolveNames(expr parser.Expr) (parser.Expr, error) {
+func (s *renderNode) resolveNames(expr parser.Expr) (parser.Expr, bool, error) {
 	return s.planner.resolveNames(expr, s.sourceInfo, s.ivarHelper)
 }
 
 // resolveNames walks the provided expression and resolves all names
-// using the tableInfo and ivarHelper.
+// using the tableInfo and iVarHelper.
+// If anything that looks like a column reference (indexed vars, star,
+// etc) is encountered, or a function that may change value for every
+// row in a table, the 2nd return value is true.
 func (p *planner) resolveNames(
 	expr parser.Expr, sources multiSourceInfo, ivarHelper parser.IndexedVarHelper,
-) (parser.Expr, error) {
+) (parser.Expr, bool, error) {
 	if expr == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 	v := &p.nameResolutionVisitor
 	*v = nameResolutionVisitor{
-		err:        nil,
-		sources:    sources,
-		colOffsets: make([]int, len(sources)),
-		ivarHelper: ivarHelper,
+		err:                nil,
+		sources:            sources,
+		colOffsets:         make([]int, len(sources)),
+		iVarHelper:         ivarHelper,
+		searchPath:         p.session.SearchPath,
+		foundDependentVars: false,
 	}
 	colOffset := 0
 	for i, s := range sources {
@@ -156,5 +194,5 @@ func (p *planner) resolveNames(
 	}
 
 	expr, _ = parser.WalkExpr(v, expr)
-	return expr, v.err
+	return expr, v.foundDependentVars, v.err
 }

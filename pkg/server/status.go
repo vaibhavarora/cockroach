@@ -44,7 +44,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -122,7 +122,7 @@ func (s *statusServer) RegisterGateway(
 func (s *statusServer) parseNodeID(nodeIDParam string) (roachpb.NodeID, bool, error) {
 	// No parameter provided or set to local.
 	if len(nodeIDParam) == 0 || localRE.MatchString(nodeIDParam) {
-		return s.gossip.GetNodeID(), true, nil
+		return s.gossip.NodeID.Get(), true, nil
 	}
 
 	id, err := strconv.ParseInt(nodeIDParam, 10, 64)
@@ -130,7 +130,7 @@ func (s *statusServer) parseNodeID(nodeIDParam string) (roachpb.NodeID, bool, er
 		return 0, false, fmt.Errorf("node id could not be parsed: %s", err)
 	}
 	nodeID := roachpb.NodeID(id)
-	return nodeID, nodeID == s.gossip.GetNodeID(), nil
+	return nodeID, nodeID == s.gossip.NodeID.Get(), nil
 }
 
 func (s *statusServer) dialNode(nodeID roachpb.NodeID) (serverpb.StatusClient, error) {
@@ -177,10 +177,10 @@ func (s *statusServer) Details(
 	}
 	if local {
 		resp := &serverpb.DetailsResponse{
-			NodeID:    s.gossip.GetNodeID(),
+			NodeID:    s.gossip.NodeID.Get(),
 			BuildInfo: build.GetInfo(),
 		}
-		if addr, err := s.gossip.GetNodeIDAddress(s.gossip.GetNodeID()); err == nil {
+		if addr, err := s.gossip.GetNodeIDAddress(s.gossip.NodeID.Get()); err == nil {
 			resp.Address = *addr
 		}
 		return resp, nil
@@ -547,7 +547,7 @@ func (s *statusServer) RaftDebug(
 }
 
 func (s *statusServer) handleVars(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set(util.ContentTypeHeader, util.PlaintextContentType)
+	w.Header().Set(httputil.ContentTypeHeader, httputil.PlaintextContentType)
 	err := s.metricSource.PrintAsText(w)
 	if err != nil {
 		log.Error(r.Context(), err)

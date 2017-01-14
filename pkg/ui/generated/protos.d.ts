@@ -799,6 +799,15 @@ getRangeCount?() : number;
 
 
 
+lease_count?: number;
+		
+
+getLeaseCount?() : number;
+		setLeaseCount?(leaseCount : number): void;
+		
+
+
+
 }
 
 	export interface StoreCapacityMessage extends StoreCapacity {
@@ -1717,15 +1726,6 @@ getStart?() : util.hlc.Timestamp;
 
 
 
-start_stasis?: util.hlc.Timestamp;
-		
-
-getStartStasis?() : util.hlc.Timestamp;
-		setStartStasis?(startStasis : util.hlc.Timestamp): void;
-		
-
-
-
 expiration?: util.hlc.Timestamp;
 		
 
@@ -1740,6 +1740,33 @@ replica?: ReplicaDescriptor;
 
 getReplica?() : ReplicaDescriptor;
 		setReplica?(replica : ReplicaDescriptor): void;
+		
+
+
+
+deprecated_start_stasis?: util.hlc.Timestamp;
+		
+
+getDeprecatedStartStasis?() : util.hlc.Timestamp;
+		setDeprecatedStartStasis?(deprecatedStartStasis : util.hlc.Timestamp): void;
+		
+
+
+
+proposed_ts?: util.hlc.Timestamp;
+		
+
+getProposedTs?() : util.hlc.Timestamp;
+		setProposedTs?(proposedTs : util.hlc.Timestamp): void;
+		
+
+
+
+epoch?: Long;
+		
+
+getEpoch?() : Long;
+		setEpoch?(epoch : Long): void;
 		
 
 
@@ -3620,6 +3647,15 @@ storing?: boolean;
 
 getStoring?() : boolean;
 		setStoring?(storing : boolean): void;
+		
+
+
+
+implicit?: boolean;
+		
+
+getImplicit?() : boolean;
+		setImplicit?(implicit : boolean): void;
 		
 
 
@@ -7566,6 +7602,8 @@ declare module Proto2TypeScript.raftpb {
 		MsgTimeoutNow = 14,
 		MsgReadIndex = 15,
 		MsgReadIndexResp = 16,
+		MsgPreVote = 17,
+		MsgPreVoteResp = 18,
 		
 }
 }

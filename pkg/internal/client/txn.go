@@ -49,6 +49,8 @@ type Txn struct {
 	// systemConfigTrigger is set to true when modifying keys from the SystemConfig
 	// span. This sets the SystemConfigTrigger on EndTransactionRequest.
 	systemConfigTrigger bool
+	// commitTriggers are run upon successful commit.
+	commitTriggers []func()
 	// The txn has to be committed by this deadline. A nil value indicates no
 	// deadline.
 	deadline *hlc.Timestamp
@@ -154,7 +156,7 @@ func (txn *Txn) NewBatch() *Batch {
 }
 
 // Get retrieves the value for a key, returning the retrieved key/value or an
-// error.
+// error. It is not considered an error for the key to not exist.
 //
 //   r, err := db.Get("a")
 //   // string(r.Key) == "a"
@@ -167,7 +169,7 @@ func (txn *Txn) Get(key interface{}) (KeyValue, error) {
 }
 
 // GetProto retrieves the value for a key and decodes the result as a proto
-// message.
+// message. If the key doesn't exist, the proto will simply be reset.
 //
 // key can be either a byte slice or a string.
 func (txn *Txn) GetProto(key interface{}, msg proto.Message) error {
@@ -192,6 +194,8 @@ func (txn *Txn) Put(key, value interface{}) error {
 // to expValue. To conditionally set a value only if there is no existing entry
 // pass nil for expValue. Note that this must be an interface{}(nil), not a
 // typed nil value (e.g. []byte(nil)).
+//
+// Returns an error if the existing value is not equal to expValue.
 //
 // key can be either a byte slice or a string. value can be any key type, a
 // proto.Message or any Go primitive type (bool, int, etc).
@@ -313,6 +317,9 @@ func (txn *Txn) commit() error {
 	err := txn.sendEndTxnReq(true /* commit */, txn.deadline)
 	if err == nil {
 		txn.finalized = true
+		for _, t := range txn.commitTriggers {
+			t()
+		}
 	}
 	return err
 }
@@ -396,6 +403,12 @@ func (txn *Txn) Rollback() error {
 	err := txn.sendEndTxnReq(false /* commit */, nil)
 	txn.finalized = true
 	return err
+}
+
+// AddCommitTrigger adds a closure to be executed on successful commit
+// of the transaction.
+func (txn *Txn) AddCommitTrigger(trigger func()) {
+	txn.commitTriggers = append(txn.commitTriggers, trigger)
 }
 
 func (txn *Txn) sendEndTxnReq(commit bool, deadline *hlc.Timestamp) error {
@@ -542,6 +555,8 @@ func (txn *Txn) Exec(opt TxnExecOptions, fn func(txn *Txn, opt *TxnExecOptions) 
 				r.Reset()
 			}
 		}
+		txn.commitTriggers = nil
+
 		log.VEventf(txn.Context, 2, "automatically retrying transaction: %s because of error: %s",
 			txn.DebugName(), err)
 	}

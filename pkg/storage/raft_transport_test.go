@@ -22,11 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/context"
-
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/gogo/protobuf/proto"
 	"github.com/pkg/errors"
+	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -34,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
@@ -74,12 +74,22 @@ func (s channelServer) HandleRaftRequest(
 	return nil
 }
 
-func (s channelServer) HandleRaftResponse(ctx context.Context, resp *storage.RaftMessageResponse) {
+func (s channelServer) HandleRaftResponse(
+	ctx context.Context, resp *storage.RaftMessageResponse,
+) error {
+	// Mimic the logic in (*Store).HandleRaftResponse without requiring an
+	// entire Store object to be pulled into these tests.
+	if val, ok := resp.Union.GetValue().(*roachpb.Error); ok {
+		if err, ok := val.GetDetail().(*roachpb.StoreNotFoundError); ok {
+			return err
+		}
+	}
 	log.Fatalf(ctx, "unexpected raft response: %s", resp)
+	return nil
 }
 
 func (s channelServer) HandleSnapshot(
-	header *storage.SnapshotRequest_Header, stream storage.MultiRaft_RaftSnapshotServer,
+	header *storage.SnapshotRequest_Header, stream storage.SnapshotResponseStream,
 ) error {
 	panic("unexpected HandleSnapshot")
 }
@@ -102,12 +112,15 @@ func newRaftTransportTestContext(t testing.TB) *raftTransportTestContext {
 		transports: map[roachpb.NodeID]*storage.RaftTransport{},
 	}
 	rttc.nodeRPCContext = rpc.NewContext(
-		log.AmbientContext{}, testutils.NewNodeTestBaseContext(), nil, rttc.stopper,
+		log.AmbientContext{},
+		testutils.NewNodeTestBaseContext(),
+		hlc.NewClock(hlc.UnixNano, time.Nanosecond),
+		rttc.stopper,
 	)
 	server := rpc.NewServer(rttc.nodeRPCContext) // never started
-	rttc.gossip = gossip.New(
-		log.AmbientContext{}, rttc.nodeRPCContext, server, nil, rttc.stopper, metric.NewRegistry())
-	rttc.gossip.SetNodeID(1)
+	rttc.gossip = gossip.NewTest(
+		1, rttc.nodeRPCContext, server, nil, rttc.stopper, metric.NewRegistry(),
+	)
 	return rttc
 }
 
@@ -119,7 +132,7 @@ func (rttc *raftTransportTestContext) Stop() {
 // before they can be used in other methods of
 // raftTransportTestContext. The node will be gossiped immediately.
 func (rttc *raftTransportTestContext) AddNode(nodeID roachpb.NodeID) *storage.RaftTransport {
-	transport, addr := rttc.AddNodeWithoutGossip(nodeID)
+	transport, addr := rttc.AddNodeWithoutGossip(nodeID, util.TestAddr, rttc.stopper)
 	rttc.GossipNode(nodeID, addr)
 	return transport
 }
@@ -129,15 +142,19 @@ func (rttc *raftTransportTestContext) AddNode(nodeID roachpb.NodeID) *storage.Ra
 // raftTransportTestContext. Unless you are testing the effects of
 // delaying gossip, use AddNode instead.
 func (rttc *raftTransportTestContext) AddNodeWithoutGossip(
-	nodeID roachpb.NodeID,
+	nodeID roachpb.NodeID, addr net.Addr, stopper *stop.Stopper,
 ) (*storage.RaftTransport, net.Addr) {
 	grpcServer := rpc.NewServer(rttc.nodeRPCContext)
-	ln, err := netutil.ListenAndServeGRPC(rttc.stopper, grpcServer, util.TestAddr)
+	ln, err := netutil.ListenAndServeGRPC(stopper, grpcServer, addr)
 	if err != nil {
 		rttc.t.Fatal(err)
 	}
-	transport := storage.NewRaftTransport(context.TODO(), storage.GossipAddressResolver(rttc.gossip),
-		grpcServer, rttc.nodeRPCContext)
+	transport := storage.NewRaftTransport(
+		log.AmbientContext{},
+		storage.GossipAddressResolver(rttc.gossip),
+		grpcServer,
+		rttc.nodeRPCContext,
+	)
 	rttc.transports[nodeID] = transport
 	return transport, ln.Addr()
 }
@@ -148,6 +165,7 @@ func (rttc *raftTransportTestContext) AddNodeWithoutGossip(
 func (rttc *raftTransportTestContext) GossipNode(nodeID roachpb.NodeID, addr net.Addr) {
 	if err := rttc.gossip.AddInfoProto(gossip.MakeNodeIDKey(nodeID),
 		&roachpb.NodeDescriptor{
+			NodeID:  nodeID,
 			Address: util.MakeUnresolvedAddr(addr.Network(), addr.String()),
 		},
 		time.Hour); err != nil {
@@ -390,7 +408,7 @@ func TestRaftTransportCircuitBreaker(t *testing.T) {
 		StoreID:   2,
 		ReplicaID: 2,
 	}
-	_, serverAddr := rttc.AddNodeWithoutGossip(serverReplica.NodeID)
+	_, serverAddr := rttc.AddNodeWithoutGossip(serverReplica.NodeID, util.TestAddr, rttc.stopper)
 	serverChannel := rttc.ListenStore(serverReplica.NodeID, serverReplica.StoreID)
 
 	clientReplica := roachpb.ReplicaDescriptor{
@@ -408,7 +426,7 @@ func TestRaftTransportCircuitBreaker(t *testing.T) {
 
 	// However, sending repeated messages should begin dropping once
 	// the circuit breaker does trip.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if rttc.Send(clientReplica, serverReplica, 1, raftpb.Message{Commit: 1}) {
 			return errors.Errorf("expected circuit breaker to trip")
 		}
@@ -421,7 +439,7 @@ func TestRaftTransportCircuitBreaker(t *testing.T) {
 	// Keep sending commit=2 until breaker resets and we receive the
 	// first instance. It's possible an earlier message for commit=1
 	// snuck in.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if !rttc.Send(clientReplica, serverReplica, 1, raftpb.Message{Commit: 2}) {
 			clientTransport.GetCircuitBreaker(serverReplica.NodeID).Reset()
 		}
@@ -479,4 +497,91 @@ func TestRaftTransportIndependentRanges(t *testing.T) {
 			t.Fatalf("timeout waiting for message %d", i)
 		}
 	}
+}
+
+// TestReopenConnection verifies that if a raft response indicates that the
+// expected store isn't present on the node, that the connection gets
+// terminated and reopened before retrying, to ensure that the transport
+// doesn't get stuck in an endless retry loop against the wrong node.
+func TestReopenConnection(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	rttc := newRaftTransportTestContext(t)
+	defer rttc.Stop()
+
+	// Use a special stopper for the initial server so that we can fully stop it
+	// (releasing its bound network address) before the rest of the test pieces.
+	serverStopper := stop.NewStopper()
+	serverReplica := roachpb.ReplicaDescriptor{
+		NodeID:    2,
+		StoreID:   2,
+		ReplicaID: 2,
+	}
+	serverTransport, serverAddr :=
+		rttc.AddNodeWithoutGossip(serverReplica.NodeID, util.TestAddr, serverStopper)
+	rttc.GossipNode(serverReplica.NodeID, serverAddr)
+	rttc.ListenStore(serverReplica.NodeID, serverReplica.StoreID)
+
+	clientReplica := roachpb.ReplicaDescriptor{
+		NodeID:    1,
+		StoreID:   1,
+		ReplicaID: 1,
+	}
+	rttc.AddNode(clientReplica.NodeID)
+	rttc.ListenStore(clientReplica.NodeID, clientReplica.StoreID)
+
+	// Take down the old server and start a new one at the same address.
+	serverTransport.Stop(serverReplica.StoreID)
+	serverStopper.Stop()
+
+	replacementReplica := roachpb.ReplicaDescriptor{
+		NodeID:    3,
+		StoreID:   3,
+		ReplicaID: 3,
+	}
+	rttc.AddNodeWithoutGossip(replacementReplica.NodeID, serverAddr, rttc.stopper)
+	replacementChannel := rttc.ListenStore(replacementReplica.NodeID, replacementReplica.StoreID)
+
+	// Try sending a message to the old server's store (at the address its
+	// replacement is now running at) before its replacement has been gossiped.
+	// We just want to ensure that doing so doesn't deadlock the client transport.
+	// Successive attempts should instead trip the circuit breaker.
+	if !rttc.Send(clientReplica, serverReplica, 1, raftpb.Message{Commit: 1}) {
+		t.Errorf("unexpectedly failed sending first message to recently downed node")
+	}
+	testutils.SucceedsSoon(t, func() error {
+		if rttc.Send(clientReplica, serverReplica, 1, raftpb.Message{Commit: 1}) {
+			return errors.Errorf("expected circuit breaker to trip")
+		}
+		return nil
+	})
+
+	// Then, to ensure the client hasn't been deadlocked, add the replacement node
+	// to the gossip network and send it a request.
+	rttc.GossipNode(replacementReplica.NodeID, serverAddr)
+
+	// Sending messages to the old store should still be safe.
+	testutils.SucceedsSoon(t, func() error {
+		if rttc.Send(clientReplica, serverReplica, 1, raftpb.Message{Commit: 1}) {
+			return errors.Errorf("expected circuit breaker to trip")
+		}
+		return nil
+	})
+
+	// Keep sending commit=2 until breaker resets and we receive the
+	// first instance. It's possible an earlier message for commit=1
+	// snuck in.
+	testutils.SucceedsSoon(t, func() error {
+		if !rttc.Send(clientReplica, replacementReplica, 1, raftpb.Message{Commit: 2}) {
+			t.Error("unexpectedly failed sending to replacement replica")
+		}
+		select {
+		case req := <-replacementChannel.ch:
+			if req.Message.Commit == 2 {
+				return nil
+			}
+			return errors.Errorf("expected message commit=2, got %+v", req)
+		default:
+		}
+		return errors.Errorf("expected message commit=2, got nothing")
+	})
 }

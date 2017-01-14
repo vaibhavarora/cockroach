@@ -20,14 +20,14 @@
 ORG_ROOT       := .
 REPO_ROOT      := $(ORG_ROOT)/cockroach
 PKG_ROOT       := $(REPO_ROOT)/pkg
-GITHUB_ROOT    := $(ORG_ROOT)/..
+GITHUB_ROOT    := $(REPO_ROOT)/vendor/github.com
 GOGOPROTO_ROOT := $(GITHUB_ROOT)/gogo/protobuf
 PROTOBUF_ROOT  := $(GOGOPROTO_ROOT)/protobuf
 
 NATIVE_ROOT := $(PKG_ROOT)/storage/engine/rocksdb
 
 # Ensure we have an unambiguous GOPATH
-GOPATH := $(realpath $(GITHUB_ROOT)/../..)
+GOPATH := $(realpath $(ORG_ROOT)/../../..)
 #                                   ^  ^~ GOPATH
 #                                   |~ GOPATH/src
 
@@ -38,6 +38,7 @@ PROTOC_PLUGIN   := $(GOPATH_BIN)/protoc-gen-$(PLUGIN_SUFFIX)
 GOGOPROTO_PROTO := $(GOGOPROTO_ROOT)/gogoproto/gogo.proto
 
 COREOS_PATH := $(GITHUB_ROOT)/coreos
+COREOS_RAFT_PROTOS := $(addprefix $(COREOS_PATH)/etcd/raft/, $(sort $(shell git -C $(COREOS_PATH)/etcd/raft ls-files --exclude-standard --cached --others -- '*.proto')))
 
 GRPC_GATEWAY_PACKAGE := github.com/grpc-ecosystem/grpc-gateway
 GRPC_GATEWAY_GOOGLEAPIS_PACKAGE := $(GRPC_GATEWAY_PACKAGE)/third_party/googleapis
@@ -53,17 +54,25 @@ GW_TS_PROTOS := $(PKG_ROOT)/ts/tspb/timeseries.proto
 GW_PROTOS  := $(GW_SERVER_PROTOS) $(GW_TS_PROTOS)
 GW_SOURCES := $(GW_PROTOS:%.proto=%.pb.gw.go)
 
-GO_PROTOS := $(addprefix $(REPO_ROOT)/, $(sort $(shell cd $(REPO_ROOT) && git ls-files --exclude-standard --cached --others -- '*.proto')))
+GO_PROTOS := $(addprefix $(REPO_ROOT)/, $(sort $(shell git -C $(REPO_ROOT) ls-files --exclude-standard --cached --others -- '*.proto')))
 GO_SOURCES := $(GO_PROTOS:%.proto=%.pb.go)
 
 UI_SOURCES := $(PKG_ROOT)/ui/app/js/protos.js $(PKG_ROOT)/ui/generated/protos.json $(PKG_ROOT)/ui/generated/protos.d.ts
 
-CPP_PROTOS := $(filter %/roachpb/metadata.proto %/roachpb/data.proto %/roachpb/internal.proto %/engine/enginepb/mvcc.proto %/hlc/timestamp.proto %/unresolved_addr.proto,$(GO_PROTOS))
+CPP_PROTOS := $(filter %/roachpb/metadata.proto %/roachpb/data.proto %/roachpb/internal.proto %/engine/enginepb/mvcc.proto %/engine/enginepb/rocksdb.proto %/hlc/timestamp.proto %/unresolved_addr.proto,$(GO_PROTOS))
 CPP_HEADERS := $(subst ./,$(NATIVE_ROOT)/,$(CPP_PROTOS:%.proto=%.pb.h))
 CPP_SOURCES := $(subst ./,$(NATIVE_ROOT)/,$(CPP_PROTOS:%.proto=%.pb.cc))
 
 .PHONY: protos
 protos: $(GO_SOURCES) $(UI_SOURCES) $(CPP_HEADERS) $(CPP_SOURCES) $(ENGINE_CPP_HEADERS) $(ENGINE_CPP_SOURCES) $(GW_SOURCES)
+
+$(PROTOC): goinstall
+
+.PHONY: goinstall
+goinstall:
+	go install $(REPO_ROOT)/pkg/cmd/protoc-gen-gogoroach
+	go install $(REPO_ROOT)/vendor/github.com/cockroachdb/c-protobuf/cmd/protoc
+	go install $(REPO_ROOT)/vendor/github.com/grpc-ecosystem/grpc-gateway/protoc-gen-grpc-gateway
 
 REPO_NAME := cockroachdb
 IMPORT_PREFIX := github.com/$(REPO_NAME)/
@@ -84,19 +93,18 @@ $(GW_SOURCES) : $(GW_SERVER_PROTOS) $(GW_TS_PROTOS) $(GO_PROTOS) $(GOGOPROTO_PRO
 	$(PROTOC) -I.:$(GOGOPROTO_ROOT):$(PROTOBUF_ROOT):$(COREOS_PATH):$(GRPC_GATEWAY_GOOGLEAPIS_PATH) --grpc-gateway_out=logtostderr=true:. $(GW_SERVER_PROTOS)
 	$(PROTOC) -I.:$(GOGOPROTO_ROOT):$(PROTOBUF_ROOT):$(COREOS_PATH):$(GRPC_GATEWAY_GOOGLEAPIS_PATH) --grpc-gateway_out=logtostderr=true:. $(GW_TS_PROTOS)
 
-$(REPO_ROOT)/build/npm.installed: $(REPO_ROOT)/build/package.json
-	rm -rf $(REPO_ROOT)/build/node_modules
-	cd $(REPO_ROOT)/build && npm install --no-progress
+$(REPO_ROOT)/build/yarn.installed: $(REPO_ROOT)/build/package.json
+	cd $(REPO_ROOT)/build && yarn install
 	touch $@
 
 PBJS_ARGS = --path $(ORG_ROOT) --path $(GOGOPROTO_ROOT) --path $(COREOS_PATH) --path $(GRPC_GATEWAY_GOOGLEAPIS_PATH) $(GW_PROTOS)
 
-$(PKG_ROOT)/ui/app/js/protos.js: $(REPO_ROOT)/build/npm.installed $(GO_PROTOS)
+$(PKG_ROOT)/ui/app/js/protos.js: $(REPO_ROOT)/build/yarn.installed $(GO_PROTOS) $(COREOS_RAFT_PROTOS)
 	# Add comment recognized by reviewable.
 	echo '// GENERATED FILE DO NOT EDIT' > $@
 	$(REPO_ROOT)/build/node_modules/.bin/pbjs -t commonjs $(PBJS_ARGS) >> $@
 
-$(PKG_ROOT)/ui/generated/protos.json: $(REPO_ROOT)/build/npm.installed $(GO_PROTOS)
+$(PKG_ROOT)/ui/generated/protos.json: $(REPO_ROOT)/build/yarn.installed $(GO_PROTOS) $(COREOS_RAFT_PROTOS)
 	$(REPO_ROOT)/build/node_modules/.bin/pbjs $(PBJS_ARGS) > $@
 
 $(PKG_ROOT)/ui/generated/protos.d.ts: $(PKG_ROOT)/ui/generated/protos.json

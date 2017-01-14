@@ -122,6 +122,15 @@ func (t *TableName) String() string { return AsString(t) }
 // NormalizeTableName implements the TableNameReference interface.
 func (t *TableName) NormalizeTableName() (*TableName, error) { return t, nil }
 
+// NormalizedTableName normalize DatabaseName and TableName to lowercase
+// and performs Unicode Normalization.
+func (t *TableName) NormalizedTableName() TableName {
+	return TableName{
+		DatabaseName: Name(t.DatabaseName.Normalize()),
+		TableName:    Name(t.TableName.Normalize()),
+	}
+}
+
 // Table retrieves the unqualified table name.
 func (t *TableName) Table() string {
 	return string(t.TableName)
@@ -224,15 +233,18 @@ func (t TableNameReferences) Format(buf *bytes.Buffer, f FmtFlags) {
 // TableNameWithIndex represents a "table@index", used in statements that
 // specifically refer to an index.
 type TableNameWithIndex struct {
-	Table NormalizableTableName
-	Index Name
+	Table       NormalizableTableName
+	Index       Name
+	SearchTable bool
 }
 
 // Format implements the NodeFormatter interface.
 func (n *TableNameWithIndex) Format(buf *bytes.Buffer, f FmtFlags) {
 	FormatNode(buf, f, n.Table)
-	buf.WriteByte('@')
-	FormatNode(buf, f, n.Index)
+	if !n.SearchTable {
+		buf.WriteByte('@')
+		FormatNode(buf, f, n.Index)
+	}
 }
 
 // TableNameWithIndexList is a list of indexes.

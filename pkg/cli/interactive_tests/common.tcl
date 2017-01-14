@@ -26,13 +26,25 @@ proc eexpect {text} {
     }
 }
 
+# Convenience function that sends Ctrl+C to the monitored process.
+proc interrupt {} {
+    send "\003"
+    sleep 0.4
+}
+
+# Tests that wish to concatenate a marker with the first line of
+# output need to exclude messages about the env. var
+# PROPOSER_EVALUATED_KV as this may be emitted before the logging
+# flags are handled.
+set silence_prop_eval_kv "2>&1 | grep -v 'running with experimental support for proposer-evaluated KV'"
+
 # Convenience functions to start/shutdown the server.
 # Preserves the invariant that the server's PID is saved
 # in `server_pid`.
 proc start_server {argv} {
-    system "$argv start & echo \$! >server_pid"
+    system "$argv start & echo \$! > server_pid"
     sleep 1
 }
 proc stop_server {argv} {
-    system "set -e; if kill -CONT `cat server_pid`; then $argv quit  || true & sleep 1; kill -9 `cat server_pid` || true; else $argv quit || true; fi"
+    system "set -e; if kill -CONT `cat server_pid`; then $argv quit || true & sleep 1; kill -9 `cat server_pid` || true; else $argv quit || true; fi"
 }

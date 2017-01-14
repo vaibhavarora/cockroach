@@ -18,7 +18,11 @@ package sqlutils
 
 import (
 	gosql "database/sql"
+	"fmt"
+	"reflect"
 	"testing"
+
+	"github.com/cockroachdb/cockroach/pkg/util/caller"
 )
 
 // SQLRunner wraps a testing.TB and *gosql.DB connection and provides
@@ -80,4 +84,50 @@ func (r *Row) Scan(dest ...interface{}) {
 // QueryRow is a wrapper around gosql.QueryRow that kills the test on error.
 func (sr *SQLRunner) QueryRow(query string, args ...interface{}) *Row {
 	return &Row{sr.TB, sr.DB.QueryRow(query, args...)}
+}
+
+// QueryStr runs a Query and converts the result to a string matrix; nulls are
+// represented as "NULL". Empty results are represented by an empty (but
+// non-nil) slice. Kills the test on errors.
+func (sr *SQLRunner) QueryStr(query string, args ...interface{}) [][]string {
+	rows := sr.Query(query)
+	cols, err := rows.Columns()
+	if err != nil {
+		sr.Fatal(err)
+	}
+	vals := make([]interface{}, len(cols))
+	for i := range vals {
+		vals[i] = new(interface{})
+	}
+	res := [][]string{}
+	for rows.Next() {
+		if err := rows.Scan(vals...); err != nil {
+			sr.Fatal(err)
+		}
+		row := make([]string, len(vals))
+		for j, v := range vals {
+			if val := *v.(*interface{}); val != nil {
+				switch t := val.(type) {
+				case []byte:
+					row[j] = string(t)
+				default:
+					row[j] = fmt.Sprint(val)
+				}
+			} else {
+				row[j] = "NULL"
+			}
+		}
+		res = append(res, row)
+	}
+	return res
+}
+
+// CheckQueryResults checks that the rows returned by a query match the expected
+// response.
+func (sr *SQLRunner) CheckQueryResults(query string, expected [][]string) {
+	res := sr.QueryStr(query)
+	if !reflect.DeepEqual(res, expected) {
+		file, line, _ := caller.Lookup(1)
+		sr.Errorf("%s:%d query '%s': expected:\n%v\ngot:%v\n", file, line, query, expected, res)
+	}
 }

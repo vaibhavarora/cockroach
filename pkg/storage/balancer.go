@@ -19,16 +19,22 @@ package storage
 import (
 	"bytes"
 	"fmt"
-	"math"
 
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
-const allocatorRandomCount = 10
+// The number of random candidates to select from a larger list of possible
+// candidates. Because the allocator heuristics are being run on every node it
+// is actually not desirable to set this value higher. Doing so can lead to
+// situations where the allocator determistically selects the "best" node for a
+// decision and all of the nodes pile on allocations to that node. See "power
+// of two random choices":
+// https://brooker.co.za/blog/2012/01/17/two-random.html and
+// https://www.eecs.harvard.edu/~michaelm/postscripts/mythesis.pdf.
+const allocatorRandomCount = 2
 
 type nodeIDSet map[roachpb.NodeID]struct{}
 
@@ -87,24 +93,36 @@ func (rcb rangeCountBalancer) selectGood(sl StoreList, excluded nodeIDSet) *roac
 	return good
 }
 
-func (rangeCountBalancer) selectBad(sl StoreList) *roachpb.StoreDescriptor {
-	var worst *roachpb.StoreDescriptor
-	for i := range sl.stores {
-		candidate := &sl.stores[i]
-		if worst == nil {
-			worst = candidate
-			continue
+func (rcb rangeCountBalancer) selectBad(sl StoreList) *roachpb.StoreDescriptor {
+	var bad *roachpb.StoreDescriptor
+	if len(sl.stores) > 0 {
+		// Find the list of removal candidates that are on stores that have more
+		// than the average numbers of ranges.
+		candidates := make([]*roachpb.StoreDescriptor, 0, len(sl.stores))
+		for i := range sl.stores {
+			candidate := &sl.stores[i]
+			if rebalanceFromConvergesOnMean(sl, *candidate) {
+				candidates = append(candidates, candidate)
+			}
 		}
-		if candidate.Capacity.RangeCount > worst.Capacity.RangeCount {
-			worst = candidate
+
+		rcb.rand.Lock()
+		if len(candidates) > 0 {
+			// Randomly choose a store from one of the above average range count
+			// candidates.
+			bad = candidates[rcb.rand.Intn(len(candidates))]
+		} else {
+			// Fallback to choosing a random store to remove from.
+			bad = &sl.stores[rcb.rand.Intn(len(sl.stores))]
 		}
+		rcb.rand.Unlock()
 	}
 
 	if log.V(2) {
 		log.Infof(context.TODO(), "selected bad: mean=%.1f %s",
-			sl.candidateCount.mean, formatCandidates(worst, sl.stores))
+			sl.candidateCount.mean, formatCandidates(bad, sl.stores))
 	}
-	return worst
+	return bad
 }
 
 // improve returns a candidate StoreDescriptor to rebalance a replica to. The
@@ -124,7 +142,7 @@ func (rcb rangeCountBalancer) improve(sl StoreList, excluded nodeIDSet) *roachpb
 
 	// Adding a replica to the candidate must make its range count converge on the
 	// mean range count.
-	rebalanceConvergesOnMean := float64(candidate.Capacity.RangeCount) < sl.candidateCount.mean-0.5
+	rebalanceConvergesOnMean := rebalanceToConvergesOnMean(sl, *candidate)
 	if !rebalanceConvergesOnMean {
 		if log.V(2) {
 			log.Infof(context.TODO(), "not rebalancing: %s wouldn't converge on the mean %.1f",
@@ -138,53 +156,6 @@ func (rcb rangeCountBalancer) improve(sl StoreList, excluded nodeIDSet) *roachpb
 			sl.candidateCount.mean, formatCandidates(candidate, sl.stores))
 	}
 	return candidate
-}
-
-// RebalanceThreshold is the minimum ratio of a store's range surplus to the
-// mean range count that permits rebalances away from that store.
-var RebalanceThreshold = envutil.EnvOrDefaultFloat("COCKROACH_REBALANCE_THRESHOLD", 0.05)
-
-func (rangeCountBalancer) shouldRebalance(store roachpb.StoreDescriptor, sl StoreList) bool {
-	// TODO(peter,bram,cuong): The FractionUsed check seems suspicious. When a
-	// node becomes fuller than maxFractionUsedThreshold we will always select it
-	// for rebalancing. This is currently utilized by tests.
-	maxCapacityUsed := store.Capacity.FractionUsed() >= maxFractionUsedThreshold
-
-	// Rebalance if we're above the rebalance target, which is
-	// mean*(1+RebalanceThreshold).
-	target := int32(math.Ceil(sl.candidateCount.mean * (1 + RebalanceThreshold)))
-	rangeCountAboveTarget := store.Capacity.RangeCount > target
-
-	// Rebalance if the candidate store has a range count above the mean, and
-	// there exists another store that is underfull: its range count is smaller
-	// than mean*(1-RebalanceThreshold).
-	var rebalanceToUnderfullStore bool
-	if float64(store.Capacity.RangeCount) > sl.candidateCount.mean {
-		underfullThreshold := int32(math.Floor(sl.candidateCount.mean * (1 - RebalanceThreshold)))
-		for _, desc := range sl.stores {
-			if desc.Capacity.RangeCount < underfullThreshold {
-				rebalanceToUnderfullStore = true
-				break
-			}
-		}
-	}
-
-	// Require that moving a replica from the given store makes its range count
-	// converge on the mean range count. This only affects clusters with a
-	// small number of ranges.
-	rebalanceConvergesOnMean := float64(store.Capacity.RangeCount) > sl.candidateCount.mean+0.5
-
-	shouldRebalance :=
-		(maxCapacityUsed || rangeCountAboveTarget || rebalanceToUnderfullStore) && rebalanceConvergesOnMean
-	if log.V(2) {
-		log.Infof(context.TODO(),
-			"%d: should-rebalance=%t: fraction-used=%.2f range-count=%d "+
-				"(mean=%.1f, target=%d, fraction-used=%t, above-target=%t, underfull=%t, converges=%t)",
-			store.StoreID, shouldRebalance, store.Capacity.FractionUsed(),
-			store.Capacity.RangeCount, sl.candidateCount.mean, target,
-			maxCapacityUsed, rangeCountAboveTarget, rebalanceToUnderfullStore, rebalanceConvergesOnMean)
-	}
-	return shouldRebalance
 }
 
 // selectRandom chooses up to count random store descriptors from the given
@@ -215,4 +186,12 @@ func selectRandom(
 		}
 	}
 	return descs
+}
+
+func rebalanceFromConvergesOnMean(sl StoreList, candidate roachpb.StoreDescriptor) bool {
+	return float64(candidate.Capacity.RangeCount) > sl.candidateCount.mean+0.5
+}
+
+func rebalanceToConvergesOnMean(sl StoreList, candidate roachpb.StoreDescriptor) bool {
+	return float64(candidate.Capacity.RangeCount) < sl.candidateCount.mean-0.5
 }

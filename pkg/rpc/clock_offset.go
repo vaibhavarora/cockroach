@@ -25,24 +25,24 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/montanaflynn/stats"
 	"github.com/pkg/errors"
 )
 
 // RemoteClockMetrics is the collection of metrics for the clock monitor.
 type RemoteClockMetrics struct {
-	ClusterOffsetLowerBound *metric.Gauge
-	ClusterOffsetUpperBound *metric.Gauge
+	ClockOffsetMeanNanos   *metric.Gauge
+	ClockOffsetStdDevNanos *metric.Gauge
 }
 
 var (
-	metaClusterOffsetLowerBound = metric.Metadata{Name: "clock-offset.lower-bound-nanos"}
-	metaClusterOffsetUpperBound = metric.Metadata{Name: "clock-offset.upper-bound-nanos"}
+	metaClockOffsetMeanNanos   = metric.Metadata{Name: "clock-offset.meannanos"}
+	metaClockOffsetStdDevNanos = metric.Metadata{Name: "clock-offset.stddevnanos"}
 )
 
 // RemoteClockMonitor keeps track of the most recent measurements of remote
 // offsets from this node to connected nodes.
 type RemoteClockMonitor struct {
-	ctx       context.Context
 	clock     *hlc.Clock
 	offsetTTL time.Duration
 
@@ -55,18 +55,15 @@ type RemoteClockMonitor struct {
 }
 
 // newRemoteClockMonitor returns a monitor with the given server clock.
-func newRemoteClockMonitor(
-	ctx context.Context, clock *hlc.Clock, offsetTTL time.Duration,
-) *RemoteClockMonitor {
+func newRemoteClockMonitor(clock *hlc.Clock, offsetTTL time.Duration) *RemoteClockMonitor {
 	r := RemoteClockMonitor{
-		ctx:       ctx,
 		clock:     clock,
 		offsetTTL: offsetTTL,
 	}
 	r.mu.offsets = make(map[string]RemoteOffset)
 	r.metrics = RemoteClockMetrics{
-		ClusterOffsetLowerBound: metric.NewGauge(metaClusterOffsetLowerBound),
-		ClusterOffsetUpperBound: metric.NewGauge(metaClusterOffsetUpperBound),
+		ClockOffsetMeanNanos:   metric.NewGauge(metaClockOffsetMeanNanos),
+		ClockOffsetStdDevNanos: metric.NewGauge(metaClockOffsetStdDevNanos),
 	}
 	return &r
 }
@@ -84,7 +81,7 @@ func (r *RemoteClockMonitor) Metrics() *RemoteClockMetrics {
 // 2. The old offset for addr was measured long enough ago to be considered
 // stale.
 // 3. The new offset's error is smaller than the old offset's error.
-func (r *RemoteClockMonitor) UpdateOffset(addr string, offset RemoteOffset) {
+func (r *RemoteClockMonitor) UpdateOffset(ctx context.Context, addr string, offset RemoteOffset) {
 	emptyOffset := offset == RemoteOffset{}
 
 	r.mu.Lock()
@@ -113,7 +110,7 @@ func (r *RemoteClockMonitor) UpdateOffset(addr string, offset RemoteOffset) {
 	}
 
 	if log.V(2) {
-		log.Infof(r.ctx, "update offset: %s %v", addr, r.mu.offsets[addr])
+		log.Infof(ctx, "update offset: %s %v", addr, r.mu.offsets[addr])
 	}
 }
 
@@ -122,7 +119,7 @@ func (r *RemoteClockMonitor) UpdateOffset(addr string, offset RemoteOffset) {
 // than half the known offsets are healthy, and an error otherwise. A non-nil
 // return indicates that this node's clock is unreliable, and that the node
 // should terminate.
-func (r *RemoteClockMonitor) VerifyClockOffset() error {
+func (r *RemoteClockMonitor) VerifyClockOffset(ctx context.Context) error {
 	// By the contract of the hlc, if the value is 0, then safety checking
 	// of the max offset is disabled. However we may still want to
 	// propagate the information to a status node.
@@ -132,23 +129,39 @@ func (r *RemoteClockMonitor) VerifyClockOffset() error {
 		healthyOffsetCount := 0
 
 		r.mu.Lock()
+		// Each measurement is recorded as its minimum and maximum value.
+		offsets := make(stats.Float64Data, 0, 2*len(r.mu.offsets))
 		for addr, offset := range r.mu.offsets {
 			if offset.isStale(r.offsetTTL, now) {
 				delete(r.mu.offsets, addr)
 				continue
 			}
-			if offset.isHealthy(r.ctx, maxOffset) {
+			offsets = append(offsets, float64(offset.Offset+offset.Uncertainty))
+			offsets = append(offsets, float64(offset.Offset-offset.Uncertainty))
+			if offset.isHealthy(ctx, maxOffset) {
 				healthyOffsetCount++
 			}
 		}
 		numClocks := len(r.mu.offsets)
 		r.mu.Unlock()
 
+		mean, err := offsets.Mean()
+		if err != nil && err != stats.EmptyInput {
+			return err
+		}
+		r.metrics.ClockOffsetMeanNanos.Update(int64(mean))
+
+		stdDev, err := offsets.StandardDeviation()
+		if err != nil && err != stats.EmptyInput {
+			return err
+		}
+		r.metrics.ClockOffsetStdDevNanos.Update(int64(stdDev))
+
 		if numClocks > 0 && healthyOffsetCount <= numClocks/2 {
 			return errors.Errorf("fewer than half the known nodes are within the maximum offset of %s (%d of %d)", maxOffset, healthyOffsetCount, numClocks)
 		}
 		if log.V(1) {
-			log.Infof(r.ctx, "%d of %d nodes are within the maximum offset of %s", healthyOffsetCount, numClocks, maxOffset)
+			log.Infof(ctx, "%d of %d nodes are within the maximum offset of %s", healthyOffsetCount, numClocks, maxOffset)
 		}
 	}
 
@@ -156,18 +169,21 @@ func (r *RemoteClockMonitor) VerifyClockOffset() error {
 }
 
 func (r RemoteOffset) isHealthy(ctx context.Context, maxOffset time.Duration) bool {
+	// Tolerate up to 80% of the maximum offset.
+	toleratedOffset := maxOffset * 4 / 5
+
 	// Offset may be negative, but Uncertainty is always positive.
 	absOffset := r.Offset
 	if absOffset < 0 {
 		absOffset = -absOffset
 	}
 	switch {
-	case time.Duration(absOffset-r.Uncertainty)*time.Nanosecond > maxOffset:
+	case time.Duration(absOffset-r.Uncertainty)*time.Nanosecond > toleratedOffset:
 		// The minimum possible true offset exceeds the maximum offset; definitely
 		// unhealthy.
 		return false
 
-	case time.Duration(absOffset+r.Uncertainty)*time.Nanosecond < maxOffset:
+	case time.Duration(absOffset+r.Uncertainty)*time.Nanosecond < toleratedOffset:
 		// The maximum possible true offset does not exceed the maximum offset;
 		// definitely healthy.
 		return true
@@ -177,7 +193,7 @@ func (r RemoteOffset) isHealthy(ctx context.Context, maxOffset time.Duration) bo
 		// health is ambiguous. For now, we err on the side of not spuriously
 		// killing nodes.
 		if log.V(1) {
-			log.Infof(ctx, "uncertain remote offset %s for maximum offset %s, treating as healthy", r, maxOffset)
+			log.Infof(ctx, "uncertain remote offset %s for maximum tolerated offset %s, treating as healthy", r, toleratedOffset)
 		}
 		return true
 	}

@@ -49,13 +49,13 @@ func (e *RetryableTxnError) Error() string {
 
 var _ error = &RetryableTxnError{}
 
-// ResponseWithError is a tuple of a BatchResponse and an error. It is used to
-// pass around a BatchResponse with its associated error where that
-// entanglement is necessary (e.g. channels, methods that need to return
-// another error in addition to this one).
-type ResponseWithError struct {
-	Reply *BatchResponse
-	Err   *Error
+// NewRetryableTxnError creates a shim RetryableTxnError that
+// reports the given cause when converted to String(). This can be
+// used to fake/force a retry at the SQL layer.
+func NewRetryableTxnError(cause string) *RetryableTxnError {
+	return &RetryableTxnError{
+		message: cause,
+	}
 }
 
 // ErrorUnexpectedlySet creates a string to panic with when a response (typically
@@ -226,6 +226,18 @@ func (e *Error) GetTxn() *Transaction {
 	return e.UnexposedTxn
 }
 
+// UpdateTxn updates the txn.
+func (e *Error) UpdateTxn(o *Transaction) {
+	if e == nil {
+		return
+	}
+	if e.UnexposedTxn == nil {
+		e.UnexposedTxn = o
+	} else {
+		e.UnexposedTxn.Update(o)
+	}
+}
+
 // SetErrorIndex sets the index of the error.
 func (e *Error) SetErrorIndex(index int32) {
 	e.Index = &ErrPosition{Index: index}
@@ -246,7 +258,16 @@ func (e *NotLeaseHolderError) Error() string {
 }
 
 func (e *NotLeaseHolderError) message(_ *Error) string {
-	return fmt.Sprintf("range %d: replica %s not lease holder; %s is", e.RangeID, e.Replica, e.LeaseHolder)
+	const prefix = "[NotLeaseHolderError] "
+	if e.CustomMsg != "" {
+		return prefix + e.CustomMsg
+	}
+	if e.LeaseHolder == nil {
+		return fmt.Sprintf("%srange %d: replica %s not lease holder; lease holder unknown", prefix, e.RangeID, e.Replica)
+	} else if e.Lease != nil {
+		return fmt.Sprintf("%srange %d: replica %s not lease holder; current lease is %s", prefix, e.RangeID, e.Replica, e.Lease)
+	}
+	return fmt.Sprintf("%srange %d: replica %s not lease holder; replica %s is", prefix, e.RangeID, e.Replica, *e.LeaseHolder)
 }
 
 var _ ErrorDetailInterface = &NotLeaseHolderError{}
@@ -335,6 +356,22 @@ func (e *RangeFrozenError) message(_ *Error) string {
 }
 
 var _ ErrorDetailInterface = &RangeFrozenError{}
+
+// NewAmbiguousResultError initializes a new AmbiguousResultError with
+// an explanatory message.
+func NewAmbiguousResultError(msg string) *AmbiguousResultError {
+	return &AmbiguousResultError{Message: msg}
+}
+
+func (e *AmbiguousResultError) Error() string {
+	return e.message(nil)
+}
+
+func (e *AmbiguousResultError) message(_ *Error) string {
+	return fmt.Sprintf("result is ambiguous (%s)", e.Message)
+}
+
+var _ ErrorDetailInterface = &AmbiguousResultError{}
 
 func (e *TransactionAbortedError) Error() string {
 	return "txn aborted"
@@ -535,6 +572,13 @@ func (e *ReplicaCorruptionError) message(_ *Error) string {
 
 var _ ErrorDetailInterface = &ReplicaCorruptionError{}
 
+// NewReplicaTooOldError initializes a new ReplicaTooOldError.
+func NewReplicaTooOldError(replicaID ReplicaID) *ReplicaTooOldError {
+	return &ReplicaTooOldError{
+		ReplicaID: replicaID,
+	}
+}
+
 func (e *ReplicaTooOldError) Error() string {
 	return e.message(nil)
 }
@@ -544,3 +588,20 @@ func (*ReplicaTooOldError) message(_ *Error) string {
 }
 
 var _ ErrorDetailInterface = &ReplicaTooOldError{}
+
+// NewStoreNotFoundError initializes a new StoreNotFoundError.
+func NewStoreNotFoundError(storeID StoreID) *StoreNotFoundError {
+	return &StoreNotFoundError{
+		StoreID: storeID,
+	}
+}
+
+func (e *StoreNotFoundError) Error() string {
+	return e.message(nil)
+}
+
+func (e *StoreNotFoundError) message(_ *Error) string {
+	return fmt.Sprintf("store %d was not found", e.StoreID)
+}
+
+var _ ErrorDetailInterface = &StoreNotFoundError{}

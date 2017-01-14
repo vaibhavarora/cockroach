@@ -197,6 +197,7 @@ func selectIndex(
 	// the scanNode.
 	c := candidates[0]
 	s.index = c.index
+	s.specifiedIndex = nil
 	s.isSecondaryIndex = (c.index != &s.desc.PrimaryIndex)
 	s.spans = makeSpans(c.constraints, c.desc, c.index)
 	if len(s.spans) == 0 {
@@ -651,11 +652,11 @@ func (v *indexInfo) makeIndexConstraints(andExprs parser.TypedExprs) (indexConst
 							c.TypedLeft(),
 							c.TypedRight(),
 						)
-					} else if c.Right.(parser.Datum).HasNext() {
+					} else if nextRightVal, hasNext := c.Right.(parser.Datum).Next(); hasNext {
 						*startExpr = parser.NewTypedComparisonExpr(
 							parser.GE,
 							c.TypedLeft(),
-							c.Right.(parser.Datum).Next(),
+							nextRightVal,
 						)
 					} else {
 						*startExpr = c
@@ -671,11 +672,11 @@ func (v *indexInfo) makeIndexConstraints(andExprs parser.TypedExprs) (indexConst
 							c.TypedLeft(),
 							c.TypedRight(),
 						)
-					} else if c.Right.(parser.Datum).HasPrev() {
+					} else if prevRightVal, hasPrev := c.Right.(parser.Datum).Prev(); hasPrev {
 						*endExpr = parser.NewTypedComparisonExpr(
 							parser.LE,
 							c.TypedLeft(),
-							c.Right.(parser.Datum).Prev(),
+							prevRightVal,
 						)
 					} else {
 						*endExpr = c
@@ -947,8 +948,10 @@ func encodeEndConstraintDescending(
 }
 
 // Encodes datum at the end of key, using direction `dir` for the encoding.
-// The key is a span end key, which is exclusive, but `val` needs to
-// be inclusive. So if datum is the last end constraint, we transform it accordingly.
+// It takes in an inclusive key and returns an inclusive key if
+// isLastEndConstraint is not set, and an exclusive key otherwise (the idea is
+// that, for inclusive constraints, the value for the last column in the
+// constraint needs to be adapted to an exclusive span.EndKey).
 func encodeInclusiveEndValue(
 	key roachpb.Key, datum parser.Datum, dir encoding.Direction, isLastEndConstraint bool,
 ) roachpb.Key {
@@ -961,16 +964,26 @@ func encodeInclusiveEndValue(
 	needExclusiveKey := false
 	if isLastEndConstraint {
 		if dir == encoding.Ascending {
-			if datum.IsMax() || !datum.HasNext() {
+			if datum.IsMax() {
 				needExclusiveKey = true
 			} else {
-				datum = datum.Next()
+				nextVal, hasNext := datum.Next()
+				if !hasNext {
+					needExclusiveKey = true
+				} else {
+					datum = nextVal
+				}
 			}
 		} else {
-			if datum.IsMin() || !datum.HasPrev() {
+			if datum.IsMin() {
 				needExclusiveKey = true
 			} else {
-				datum = datum.Prev()
+				prevVal, hasPrev := datum.Prev()
+				if !hasPrev {
+					needExclusiveKey = true
+				} else {
+					datum = prevVal
+				}
 			}
 		}
 	}
@@ -1332,7 +1345,8 @@ func (oic orIndexConstraints) exactPrefix() int {
 		// Compare the exact values of this constraint, keep the matching
 		// prefix.
 		for i, d := range datums {
-			if !(d.ResolvedType().Equal(iDatums[i].ResolvedType()) && d.Compare(iDatums[i]) == 0) {
+			if !(d.ResolvedType().Equivalent(iDatums[i].ResolvedType()) &&
+				d.Compare(iDatums[i]) == 0) {
 				datums = datums[:i]
 				break
 			}

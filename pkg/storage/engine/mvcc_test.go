@@ -26,32 +26,31 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
-
-	"golang.org/x/net/context"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
+	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils/zerofields"
 	"github.com/cockroachdb/cockroach/pkg/util/caller"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
 // Constants for system-reserved keys in the KV map.
 var (
-	txn1ID = uuid.NewV4()
-	txn2ID = uuid.NewV4()
+	txn1ID = uuid.MakeV4()
+	txn2ID = uuid.MakeV4()
 
 	keyMin       = roachpb.KeyMin
 	keyMax       = roachpb.KeyMax
@@ -61,13 +60,13 @@ var (
 	testKey4     = roachpb.Key("/db4")
 	testKey5     = roachpb.Key("/db5")
 	testKey6     = roachpb.Key("/db6")
-	txn1         = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: txn1ID, Epoch: 1, Timestamp: makeTS(0, 1)}}
-	txn1Commit   = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: txn1ID, Epoch: 1, Timestamp: makeTS(0, 1)}, Status: roachpb.COMMITTED}
-	txn1Abort    = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: txn1ID, Epoch: 1}, Status: roachpb.ABORTED}
-	txn1e2       = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: txn1ID, Epoch: 2, Timestamp: makeTS(0, 1)}}
-	txn1e2Commit = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: txn1ID, Epoch: 2, Timestamp: makeTS(0, 1)}, Status: roachpb.COMMITTED}
-	txn2         = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: txn2ID, Timestamp: makeTS(0, 1)}}
-	txn2Commit   = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: txn2ID, Timestamp: makeTS(0, 1)}, Status: roachpb.COMMITTED}
+	txn1         = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: &txn1ID, Epoch: 1, Timestamp: makeTS(0, 1)}}
+	txn1Commit   = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: &txn1ID, Epoch: 1, Timestamp: makeTS(0, 1)}, Status: roachpb.COMMITTED}
+	txn1Abort    = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: &txn1ID, Epoch: 1}, Status: roachpb.ABORTED}
+	txn1e2       = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: &txn1ID, Epoch: 2, Timestamp: makeTS(0, 1)}}
+	txn1e2Commit = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: &txn1ID, Epoch: 2, Timestamp: makeTS(0, 1)}, Status: roachpb.COMMITTED}
+	txn2         = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: &txn2ID, Timestamp: makeTS(0, 1)}}
+	txn2Commit   = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{Key: roachpb.Key("a"), ID: &txn2ID, Timestamp: makeTS(0, 1)}, Status: roachpb.COMMITTED}
 	value1       = roachpb.MakeValueFromString("testValue1")
 	value2       = roachpb.MakeValueFromString("testValue2")
 	value3       = roachpb.MakeValueFromString("testValue3")
@@ -85,8 +84,8 @@ var (
 
 // createTestEngine returns a new in-memory engine with 1MB of storage
 // capacity.
-func createTestEngine(stopper *stop.Stopper) Engine {
-	return NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+func createTestEngine() Engine {
+	return NewInMem(roachpb.Attributes{}, 1<<20)
 }
 
 // makeTxn creates a new transaction using the specified base
@@ -129,7 +128,7 @@ func TestMVCCStatsAddSubAgeTo(t *testing.T) {
 		SysCount:          1,
 		LastUpdateNanos:   1,
 	}
-	if err := util.NoZeroField(&goldMS); err != nil {
+	if err := zerofields.NoZeroField(&goldMS); err != nil {
 		t.Fatal(err) // prevent rot as fields are added
 	}
 
@@ -266,9 +265,8 @@ func TestMVCCKeys(t *testing.T) {
 
 func TestMVCCEmptyKey(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if _, _, err := MVCCGet(context.Background(), engine, roachpb.Key{}, makeTS(0, 1), true, nil); err == nil {
 		t.Error("expected empty key error")
@@ -289,9 +287,8 @@ func TestMVCCEmptyKey(t *testing.T) {
 
 func TestMVCCGetNotExist(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	value, _, err := MVCCGet(context.Background(), engine, testKey1, makeTS(0, 1), true, nil)
 	if err != nil {
@@ -304,9 +301,8 @@ func TestMVCCGetNotExist(t *testing.T) {
 
 func TestMVCCPutWithTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -326,9 +322,8 @@ func TestMVCCPutWithTxn(t *testing.T) {
 
 func TestMVCCPutWithoutTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, nil)
 	if err != nil {
@@ -351,9 +346,8 @@ func TestMVCCPutWithoutTxn(t *testing.T) {
 // older timestamp comes after a put operation of a newer timestamp.
 func TestMVCCPutOutOfOrder(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(2, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -395,9 +389,8 @@ func TestMVCCPutOutOfOrder(t *testing.T) {
 // incrementing a non-existent key by 0 will create the value.
 func TestMVCCIncrement(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	newVal, err := MVCCIncrement(context.Background(), engine, nil, testKey1, makeTS(0, 1), nil, 0)
 	if err != nil {
@@ -426,9 +419,8 @@ func TestMVCCIncrement(t *testing.T) {
 // TestMVCCIncrementTxn verifies increment behavior within a txn.
 func TestMVCCIncrementTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	txn := *txn1
 	for i := 1; i <= 2; i++ {
@@ -448,9 +440,8 @@ func TestMVCCIncrementTxn(t *testing.T) {
 // read with the newer timestamp and a write too old error is returned.
 func TestMVCCIncrementOldTimestamp(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Write an integer value.
 	val := roachpb.Value{}
@@ -482,9 +473,8 @@ func TestMVCCIncrementOldTimestamp(t *testing.T) {
 
 func TestMVCCUpdateExistingKey(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, nil)
 	if err != nil {
@@ -527,9 +517,8 @@ func TestMVCCUpdateExistingKey(t *testing.T) {
 
 func TestMVCCUpdateExistingKeyOldVersion(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 1), value1, nil); err != nil {
 		t.Fatal(err)
@@ -546,9 +535,8 @@ func TestMVCCUpdateExistingKeyOldVersion(t *testing.T) {
 
 func TestMVCCUpdateExistingKeyInTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	txn := *txn1
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, &txn); err != nil {
@@ -563,9 +551,8 @@ func TestMVCCUpdateExistingKeyInTxn(t *testing.T) {
 
 func TestMVCCUpdateExistingKeyDiffTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -590,9 +577,8 @@ func TestMVCCGetNoMoreOldVersion(t *testing.T) {
 	//
 	// If we search for a<T=2>, the scan should not return "b".
 
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(3, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -615,11 +601,11 @@ func TestMVCCGetNoMoreOldVersion(t *testing.T) {
 // timestamp, but older than the transaction's MaxTimestamp.
 func TestMVCCGetUncertainty(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
-	txn := &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{ID: uuid.NewV4(), Timestamp: makeTS(5, 0)}, MaxTimestamp: makeTS(10, 0)}
+	u := uuid.MakeV4()
+	txn := &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{ID: &u, Timestamp: makeTS(5, 0)}, MaxTimestamp: makeTS(10, 0)}
 	// Put a value from the past.
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -681,9 +667,8 @@ func TestMVCCGetUncertainty(t *testing.T) {
 
 func TestMVCCGetAndDelete(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -728,9 +713,8 @@ func TestMVCCGetAndDelete(t *testing.T) {
 // tombstone with its timestamp in order to push the write's timestamp.
 func TestMVCCWriteWithOlderTimestampAfterDeletionOfNonexistentKey(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCDelete(
 		context.Background(), engine, nil, testKey1, makeTS(3, 0), nil,
@@ -774,9 +758,8 @@ func TestMVCCWriteWithOlderTimestampAfterDeletionOfNonexistentKey(t *testing.T) 
 
 func TestMVCCInlineWithTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Put an inline value.
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, hlc.ZeroTimestamp, value1, nil); err != nil {
@@ -806,9 +789,8 @@ func TestMVCCInlineWithTxn(t *testing.T) {
 
 func TestMVCCDeleteMissingKey(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCDelete(context.Background(), engine, nil, testKey1, makeTS(1, 0), nil); err != nil {
 		t.Fatal(err)
@@ -821,9 +803,8 @@ func TestMVCCDeleteMissingKey(t *testing.T) {
 
 func TestMVCCGetAndDeleteInTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	txn := *txn1
 	txn.Sequence++
@@ -860,9 +841,8 @@ func TestMVCCGetAndDeleteInTxn(t *testing.T) {
 
 func TestMVCCGetWriteIntentError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -885,9 +865,8 @@ func mkVal(s string, ts hlc.Timestamp) roachpb.Value {
 
 func TestMVCCScanWriteIntentError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	ts := []hlc.Timestamp{makeTS(0, 1), makeTS(0, 2), makeTS(0, 3), makeTS(0, 4), makeTS(0, 5), makeTS(0, 6)}
 
@@ -997,9 +976,8 @@ func TestMVCCScanWriteIntentError(t *testing.T) {
 // consistent set to false.
 func TestMVCCGetInconsistent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Put two values to key 1, the latest with a txn.
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
@@ -1048,9 +1026,8 @@ func TestMVCCGetInconsistent(t *testing.T) {
 // consistent set to false.
 func TestMVCCGetProtoInconsistent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	bytes1, err := protoutil.Marshal(&value1)
 	if err != nil {
@@ -1143,9 +1120,8 @@ func TestMVCCGetProtoInconsistent(t *testing.T) {
 
 func TestMVCCScan(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -1231,9 +1207,8 @@ func TestMVCCScan(t *testing.T) {
 
 func TestMVCCScanMaxNum(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -1275,9 +1250,8 @@ func TestMVCCScanMaxNum(t *testing.T) {
 
 func TestMVCCScanWithKeyPrefix(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Let's say you have:
 	// a
@@ -1321,9 +1295,8 @@ func TestMVCCScanWithKeyPrefix(t *testing.T) {
 
 func TestMVCCScanInTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -1359,9 +1332,8 @@ func TestMVCCScanInTxn(t *testing.T) {
 // verifies that the scan sees only the committed versions.
 func TestMVCCScanInconsistent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// A scan with consistent=false should fail in a txn.
 	if _, _, _, err := MVCCScan(context.Background(), engine, keyMin, keyMax, math.MaxInt64, makeTS(1, 0), false, txn1); err == nil {
@@ -1433,9 +1405,8 @@ func TestMVCCScanInconsistent(t *testing.T) {
 
 func TestMVCCDeleteRange(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -1559,9 +1530,8 @@ func TestMVCCDeleteRange(t *testing.T) {
 
 func TestMVCCDeleteRangeReturnKeys(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -1703,9 +1673,8 @@ func TestMVCCDeleteRangeReturnKeys(t *testing.T) {
 
 func TestMVCCDeleteRangeFailed(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	txn := *txn1
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
@@ -1735,9 +1704,8 @@ func TestMVCCDeleteRangeFailed(t *testing.T) {
 
 func TestMVCCDeleteRangeConcurrentTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -1761,9 +1729,8 @@ func TestMVCCDeleteRangeConcurrentTxn(t *testing.T) {
 // DeleteRange are visible to the same transaction at a higher epoch.
 func TestMVCCUncommittedDeleteRangeVisible(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(
 		context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil,
@@ -1803,9 +1770,8 @@ func TestMVCCUncommittedDeleteRangeVisible(t *testing.T) {
 
 func TestMVCCDeleteRangeInline(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Make five inline values (zero timestamp).
 	for i, kv := range []struct {
@@ -1904,11 +1870,10 @@ func TestMVCCDeleteRangeInline(t *testing.T) {
 
 func TestMVCCConditionalPut(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
-	clock := hlc.NewClock(hlc.NewManualClock(0).UnixNano)
+	clock := hlc.NewClock(hlc.NewManualClock(123).UnixNano, time.Nanosecond)
 
 	err := MVCCConditionalPut(context.Background(), engine, nil, testKey1, clock.Now(), value1, &value2, nil)
 	if err == nil {
@@ -1999,11 +1964,10 @@ func TestMVCCConditionalPut(t *testing.T) {
 
 func TestMVCCConditionalPutWithTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
-	clock := hlc.NewClock(hlc.NewManualClock(0).UnixNano)
+	clock := hlc.NewClock(hlc.NewManualClock(123).UnixNano, time.Nanosecond)
 
 	// Write value1.
 	txn := *txn1
@@ -2025,7 +1989,7 @@ func TestMVCCConditionalPutWithTxn(t *testing.T) {
 	// Commit value3.
 	txnCommit := txn
 	txnCommit.Status = roachpb.COMMITTED
-	txnCommit.Timestamp = makeTS(1, 0)
+	txnCommit.Timestamp = clock.Now().Add(1, 0)
 	if err := MVCCResolveWriteIntent(context.Background(), engine, nil, roachpb.Intent{Span: roachpb.Span{Key: testKey1}, Status: txnCommit.Status, Txn: txnCommit.TxnMeta}); err != nil {
 		t.Fatal(err)
 	}
@@ -2042,9 +2006,8 @@ func TestMVCCConditionalPutWithTxn(t *testing.T) {
 
 func TestMVCCInitPut(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	err := MVCCInitPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, nil)
 	if err != nil {
@@ -2097,11 +2060,10 @@ func TestMVCCInitPut(t *testing.T) {
 
 func TestMVCCInitPutWithTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
-	clock := hlc.NewClock(hlc.NewManualClock(0).UnixNano)
+	clock := hlc.NewClock(hlc.NewManualClock(123).UnixNano, time.Nanosecond)
 
 	txn := *txn1
 	txn.Sequence++
@@ -2129,7 +2091,7 @@ func TestMVCCInitPutWithTxn(t *testing.T) {
 	// Commit value3.
 	txnCommit := txn
 	txnCommit.Status = roachpb.COMMITTED
-	txnCommit.Timestamp = makeTS(1, 0)
+	txnCommit.Timestamp = clock.Now().Add(1, 0)
 	if err := MVCCResolveWriteIntent(context.Background(), engine, nil,
 		roachpb.Intent{
 			Span:   roachpb.Span{Key: testKey1},
@@ -2161,9 +2123,8 @@ func TestMVCCInitPutWithTxn(t *testing.T) {
 // should use the value at the specified timestamp.
 func TestMVCCConditionalPutWriteTooOld(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Write value1 @t=10ns.
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(10, 0), value1, nil); err != nil {
@@ -2194,9 +2155,8 @@ func TestMVCCConditionalPutWriteTooOld(t *testing.T) {
 // TestMVCCConditionalPutWriteTooOld for more details.
 func TestMVCCIncrementWriteTooOld(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Start with an increment.
 	if val, err := MVCCIncrement(context.Background(), engine, nil, testKey1, makeTS(10, 0), nil, 1); val != 1 || err != nil {
@@ -2224,9 +2184,8 @@ func TestMVCCIncrementWriteTooOld(t *testing.T) {
 // end) in descending order of keys.
 func TestMVCCReverseScan(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil); err != nil {
 		t.Fatal(err)
@@ -2288,9 +2247,8 @@ func TestMVCCReverseScan(t *testing.T) {
 
 func TestMVCCResolveTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -2328,9 +2286,8 @@ func TestMVCCResolveTxn(t *testing.T) {
 // than the committing transaction aborts the intent.
 func TestMVCCResolveNewerIntent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Write first value.
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, txn1Commit.Timestamp, value1, nil); err != nil {
@@ -2359,9 +2316,8 @@ func TestMVCCResolveNewerIntent(t *testing.T) {
 
 func TestMVCCResolveIntentTxnTimestampMismatch(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	txn := txn1.Clone()
 	tsEarly := txn.Timestamp
@@ -2418,9 +2374,8 @@ func TestMVCCResolveIntentTxnTimestampMismatch(t *testing.T) {
 // WriteTooOldError if that timestamp isn't recent.
 func TestMVCCConditionalPutOldTimestamp(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value1, nil)
 	if err != nil {
@@ -2459,9 +2414,8 @@ func TestMVCCConditionalPutOldTimestamp(t *testing.T) {
 
 func TestMVCCAbortTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -2488,9 +2442,8 @@ func TestMVCCAbortTxn(t *testing.T) {
 
 func TestMVCCAbortTxnWithPreviousVersion(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, nil); err != nil {
 		t.Fatal(err)
@@ -2527,9 +2480,8 @@ func TestMVCCAbortTxnWithPreviousVersion(t *testing.T) {
 
 func TestMVCCWriteWithDiffTimestampsAndEpochs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Start with epoch 1.
 	txn := *txn1
@@ -2615,9 +2567,8 @@ func TestMVCCWriteWithDiffTimestampsAndEpochs(t *testing.T) {
 // transaction epochs are not visible.
 func TestMVCCReadWithDiffEpochs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Write initial value without a txn.
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, nil); err != nil {
@@ -2660,9 +2611,8 @@ func TestMVCCReadWithDiffEpochs(t *testing.T) {
 // reads using epoch 1 to verify that the read will fail.
 func TestMVCCReadWithOldEpoch(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(1, 0), value2, txn1e2); err != nil {
 		t.Fatal(err)
@@ -2679,9 +2629,8 @@ func TestMVCCReadWithOldEpoch(t *testing.T) {
 // index.
 func TestMVCCWriteWithSequenceAndBatchIndex(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	testCases := []struct {
 		sequence   int32
@@ -2729,9 +2678,8 @@ func TestMVCCWriteWithSequenceAndBatchIndex(t *testing.T) {
 // to pushed txn.
 func TestMVCCReadWithPushedTimestamp(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Start with epoch 1.
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
@@ -2751,9 +2699,8 @@ func TestMVCCReadWithPushedTimestamp(t *testing.T) {
 
 func TestMVCCResolveWithDiffEpochs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -2788,9 +2735,8 @@ func TestMVCCResolveWithDiffEpochs(t *testing.T) {
 
 func TestMVCCResolveWithUpdatedTimestamp(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -2831,9 +2777,8 @@ func TestMVCCResolveWithUpdatedTimestamp(t *testing.T) {
 
 func TestMVCCResolveWithPushedTimestamp(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -2874,9 +2819,8 @@ func TestMVCCResolveWithPushedTimestamp(t *testing.T) {
 
 func TestMVCCResolveTxnNoOps(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Resolve a non existent key; noop.
 	if err := MVCCResolveWriteIntent(context.Background(), engine, nil, roachpb.Intent{Span: roachpb.Span{Key: testKey1}, Status: txn1Commit.Status, Txn: txn1Commit.TxnMeta}); err != nil {
@@ -2905,9 +2849,8 @@ func TestMVCCResolveTxnNoOps(t *testing.T) {
 
 func TestMVCCResolveTxnRange(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1); err != nil {
 		t.Fatal(err)
@@ -3005,9 +2948,8 @@ func TestValidSplitKeys(t *testing.T) {
 func TestFindSplitKey(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	rangeID := roachpb.RangeID(1)
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	ms := &enginepb.MVCCStats{}
 	// Generate a series of KeyValues, each containing targetLength
@@ -3143,9 +3085,8 @@ func TestFindValidSplitKeys(t *testing.T) {
 	}
 
 	for i, test := range testCases {
-		stopper := stop.NewStopper()
-		defer stopper.Stop()
-		engine := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+		engine := createTestEngine()
+		defer engine.Close()
 
 		ms := &enginepb.MVCCStats{}
 		val := roachpb.MakeValueFromString(strings.Repeat("X", 10))
@@ -3237,9 +3178,8 @@ func TestFindBalancedSplitKeys(t *testing.T) {
 	}
 
 	for i, test := range testCases {
-		stopper := stop.NewStopper()
-		defer stopper.Stop()
-		engine := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+		engine := createTestEngine()
+		defer engine.Close()
 
 		ms := &enginepb.MVCCStats{}
 		var expKey roachpb.Key
@@ -3330,9 +3270,8 @@ func verifyStats(debug string, ms, expMS *enginepb.MVCCStats, t *testing.T) {
 // mvcc stats at each step.
 func TestMVCCStatsBasic(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	ms := &enginepb.MVCCStats{}
 
@@ -3368,7 +3307,8 @@ func TestMVCCStatsBasic(t *testing.T) {
 	}
 
 	// Delete the value using a transaction.
-	txn := &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{ID: uuid.NewV4(), Timestamp: makeTS(1*1E9, 0)}}
+	u := uuid.MakeV4()
+	txn := &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{ID: &u, Timestamp: makeTS(1*1E9, 0)}}
 	ts2 := makeTS(2*1E9, 0)
 	if err := MVCCDelete(context.Background(), engine, ms, key, ts2, txn); err != nil {
 		t.Fatal(err)
@@ -3524,7 +3464,7 @@ func TestMVCCStatsBasic(t *testing.T) {
 	verifyStats("after overwrite", ms, &expMS5, t)
 
 	// Write a transaction record which is a system-local key.
-	txnKey := keys.TransactionKey(txn.Key, txn.ID)
+	txnKey := keys.TransactionKey(txn.Key, *txn.ID)
 	txnVal := roachpb.MakeValueFromString("txn-data")
 	if err := MVCCPut(context.Background(), engine, ms, txnKey, hlc.ZeroTimestamp, txnVal, nil); err != nil {
 		t.Fatal(err)
@@ -3545,9 +3485,8 @@ func TestMVCCStatsWithRandomRuns(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	rng, seed := randutil.NewPseudoRand()
 	log.Infof(context.Background(), "using pseudo random number generator with seed %d", seed)
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	ms := &enginepb.MVCCStats{}
 
@@ -3571,7 +3510,8 @@ func TestMVCCStatsWithRandomRuns(t *testing.T) {
 
 		var txn *roachpb.Transaction
 		if rng.Int31n(2) == 0 { // create a txn with 50% prob
-			txn = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{ID: uuid.NewV4(), Timestamp: ts}}
+			u := uuid.MakeV4()
+			txn = &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{ID: &u, Timestamp: ts}}
 		}
 		// With 25% probability, put a new value; otherwise, delete an earlier
 		// key. Because an earlier step in this process may have itself been
@@ -3653,9 +3593,8 @@ func TestMVCCStatsWithRandomRuns(t *testing.T) {
 // stats.
 func TestMVCCGarbageCollect(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	ms := &enginepb.MVCCStats{}
 
@@ -3756,9 +3695,8 @@ func TestMVCCGarbageCollect(t *testing.T) {
 
 func TestMVCCComputeStatsError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Write a MVCC metadata key where the value is not an encoded MVCCMetadata
 	// protobuf.
@@ -3779,9 +3717,8 @@ func TestMVCCComputeStatsError(t *testing.T) {
 // a key cannot be GC'd if it's not deleted.
 func TestMVCCGarbageCollectNonDeleted(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	s := "string"
 	ts1 := makeTS(1E9, 0)
@@ -3795,7 +3732,7 @@ func TestMVCCGarbageCollectNonDeleted(t *testing.T) {
 		vals     []roachpb.Value
 		expError string
 	}{
-		{roachpb.Key("a"), []roachpb.Value{val1, val2}, `request to GC non-deleted, latest value ok "a"`},
+		{roachpb.Key("a"), []roachpb.Value{val1, val2}, `request to GC non-deleted, latest value of "a"`},
 		{roachpb.Key("inline"), []roachpb.Value{valInline}, ""},
 	}
 
@@ -3811,14 +3748,8 @@ func TestMVCCGarbageCollectNonDeleted(t *testing.T) {
 			{Key: test.key, Timestamp: ts2},
 		}
 		err := MVCCGarbageCollect(context.Background(), engine, nil, keys, ts2)
-		if test.expError == "" {
-			if err != nil {
-				t.Fatalf("expected no error garbage collecting a non-deleted inline live value, found %v", err)
-			}
-		} else {
-			if testutils.IsError(err, test.expError) {
-				t.Fatalf("expected error %q when garbage collecting a non-deleted live value, found %v", test.expError, err)
-			}
+		if !testutils.IsError(err, test.expError) {
+			t.Fatalf("expected error %q when garbage collecting a non-deleted live value, found %v", test.expError, err)
 		}
 	}
 
@@ -3827,9 +3758,8 @@ func TestMVCCGarbageCollectNonDeleted(t *testing.T) {
 // TestMVCCGarbageCollectIntent verifies that an intent cannot be GC'd.
 func TestMVCCGarbageCollectIntent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	bytes := []byte("value")
 	ts1 := makeTS(1E9, 0)
@@ -3841,7 +3771,8 @@ func TestMVCCGarbageCollectIntent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	txn := &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{ID: uuid.NewV4(), Timestamp: ts2}}
+	u := uuid.MakeV4()
+	txn := &roachpb.Transaction{TxnMeta: enginepb.TxnMeta{ID: &u, Timestamp: ts2}}
 	if err := MVCCDelete(context.Background(), engine, nil, key, ts2, txn); err != nil {
 		t.Fatal(err)
 	}
@@ -3858,9 +3789,8 @@ func TestMVCCGarbageCollectIntent(t *testing.T) {
 // leaves the intent untouched.
 func TestResolveIntentWithLowerEpoch(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Lay down an intent with a high epoch.
 	if err := MVCCPut(context.Background(), engine, nil, testKey1, makeTS(0, 1), value1, txn1e2); err != nil {
@@ -3887,9 +3817,8 @@ func TestResolveIntentWithLowerEpoch(t *testing.T) {
 // series data does not result in a different final result than a "full merge".
 func TestMVCCTimeSeriesPartialMerge(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	// Perform the same sequence of merges on two different keys. For
 	// one of them, insert some compactions which cause partial merges
@@ -3968,9 +3897,8 @@ func TestWillOverflow(t *testing.T) {
 
 // BenchmarkMVCCStats set MVCCStats values.
 func BenchmarkMVCCStats(b *testing.B) {
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-	rocksdb := NewInMem(roachpb.Attributes{Attrs: []string{"ssd"}}, testCacheSize, stopper)
+	rocksdb := NewInMem(roachpb.Attributes{Attrs: []string{"ssd"}}, testCacheSize)
+	defer rocksdb.Close()
 
 	ms := enginepb.MVCCStats{
 		LiveBytes:       1,

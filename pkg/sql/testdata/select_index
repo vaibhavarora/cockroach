@@ -130,10 +130,10 @@ query ITTT
 EXPLAIN (DEBUG) SELECT * FROM t WHERE a > 1 AND b > 'b'
 ----
 
-query ITT
+query ITTT
 EXPLAIN SELECT * FROM t WHERE a > 1 AND a < 2
 ----
-0 empty -
+0 empty
 
 query ITTT
 EXPLAIN (DEBUG) SELECT * FROM t WHERE a = 1 AND 'a' < b AND 'c' > b
@@ -217,10 +217,10 @@ EXPLAIN (DEBUG) SELECT * FROM t@ab WHERE a + 1 = 4
 ----
 0 /t/ab/3/4 NULL ROW
 
-query ITT
+query ITTT
 EXPLAIN SELECT * FROM t WHERE a = 1 AND false
 ----
-0 empty -
+0 empty
 
 # Make sure that mixed type comparison operations are not used
 # for selecting indexes.
@@ -251,53 +251,71 @@ SELECT b FROM t WHERE c > 4.0 AND a < 4
 ----
 4
 
-query ITT
+query ITTT
 EXPLAIN SELECT a FROM t WHERE c > 1
 ----
-0 scan t@bc -
+0  scan
+0        table  t@bc
+0        spans  ALL
 
-query ITT
+query ITTT
 EXPLAIN SELECT a FROM t WHERE c < 1 AND b < 5
 ----
-0 scan t@bc /#-/4/1
+0  scan
+0        table  t@bc
+0        spans  /#-/4/1
 
-query ITT
+query ITTT
 EXPLAIN SELECT a FROM t WHERE c > 1.0
 ----
-0 scan t@bc -
+0  scan
+0        table  t@bc
+0        spans  ALL
 
-query ITT
+query ITTT
 EXPLAIN SELECT a FROM t WHERE c < 1.0
 ----
-0 scan t@bc -
+0  scan
+0        table  t@bc
+0        spans  ALL
 
-query ITT
+query ITTT
 EXPLAIN SELECT a FROM t WHERE c > 1.0 AND b < 5
 ----
-0 scan t@bc /#-/5
+0  scan
+0        table  t@bc
+0        spans  /#-/5
 
-query ITT
+query ITTT
 EXPLAIN SELECT a FROM t WHERE b < 5.0 AND c < 1
 ----
-0 scan t@bc /#-/4/1
+0  scan
+0        table  t@bc
+0        spans  /#-/4/1
 
-query ITT
+query ITTT
 EXPLAIN SELECT a FROM t WHERE (b, c) = (5, 1)
 ----
-0 scan t@bc /5/1-/5/2
+0  scan
+0        table  t@bc
+0        spans  /5/1-/5/2
 
-query ITT
+query ITTT
 EXPLAIN SELECT a FROM t WHERE (b, c) = (5.0, 1)
 ----
-0 scan t@bc /5/1-/5/2
+0  scan
+0        table  t@bc
+0        spans  /5/1-/5/2
 
 query error tuples \(b, c\), \(5.1, 1\) are not the same type: expected 5.1 to be of type int, found type decimal
 EXPLAIN SELECT a FROM t WHERE (b, c) = (5.1, 1)
 
-query ITT
+query ITTT
 EXPLAIN SELECT a FROM t WHERE b IN (5.0, 1)
 ----
-0 scan t@b_desc /-6-/-5 /-2-/-1
+0  scan
+0        table  t@b_desc
+0        spans  /-6-/-5 /-2-/-1
 
 statement ok
 CREATE TABLE abcd (
@@ -311,12 +329,44 @@ CREATE TABLE abcd (
 
 # Verify that we prefer the index where more columns are constrained, even if it
 # has more keys per row.
-query ITT
+query ITTT
 EXPLAIN SELECT b FROM abcd WHERE (a, b) = (1, 4)
 ----
-0 scan abcd@abcd /1/4-/1/5
+0  scan
+0        table  abcd@abcd
+0        spans  /1/4-/1/5
 
-query ITT
+query ITTT
 EXPLAIN SELECT b FROM abcd WHERE (a, b) IN ((1, 4), (2, 9))
 ----
-0 scan abcd@abcd /1/4-/1/5 /2/9-/2/10
+0  scan
+0        table  abcd@abcd
+0        spans  /1/4-/1/5 /2/9-/2/10
+
+statement ok
+CREATE TABLE ab (
+  s STRING,
+  i INT
+); INSERT INTO ab VALUES ('a', 1), ('b', 1), ('c', 1);
+
+query IT
+SELECT i, s FROM ab WHERE (i, s) < (1, 'c')
+----
+1 a
+1 b
+
+statement ok
+CREATE INDEX baz ON ab (i, s)
+
+query IT
+SELECT i, s FROM ab@baz WHERE (i, s) < (1, 'c')
+----
+1 a
+1 b
+
+query ITTT
+EXPLAIN SELECT i, s FROM ab@baz WHERE (i, s) < (1, 'c')
+----
+0  scan
+0        table  ab@baz
+0        spans  /#-/1/"c"

@@ -21,43 +21,49 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/coreos/etcd/raft"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/coreos/etcd/raft"
-	"github.com/pkg/errors"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
-func TestGetBehindIndex(t *testing.T) {
+func TestGetQuorumIndex(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	testCases := []struct {
-		progress []uint64
-		commit   uint64
-		expected uint64
+		progress             []uint64
+		pendingSnapshotIndex uint64
+		expected             uint64
 	}{
 		// Basic cases.
-		{[]uint64{1}, 1, 1},
-		{[]uint64{1, 2}, 2, 1},
-		{[]uint64{2, 3, 4}, 4, 2},
-		{[]uint64{1, 2, 3, 4, 5}, 3, 1},
-		// sorting.
-		{[]uint64{5, 4, 3, 2, 1}, 3, 1},
+		{[]uint64{1}, 0, 1},
+		{[]uint64{2}, 1, 1},
+		{[]uint64{1, 2}, 0, 1},
+		{[]uint64{2, 3}, 1, 2},
+		{[]uint64{1, 2, 3}, 0, 2},
+		{[]uint64{2, 3, 4}, 1, 2},
+		{[]uint64{1, 2, 3, 4}, 0, 2},
+		{[]uint64{2, 3, 4, 5}, 1, 3},
+		{[]uint64{1, 2, 3, 4, 5}, 0, 3},
+		{[]uint64{2, 3, 4, 5, 6}, 1, 3},
+		// Sorting.
+		{[]uint64{5, 4, 3, 2, 1}, 0, 3},
 	}
 	for i, c := range testCases {
 		status := &raft.Status{
 			Progress: make(map[uint64]raft.Progress),
 		}
-		status.Commit = c.commit
 		for j, v := range c.progress {
 			status.Progress[uint64(j)] = raft.Progress{Match: v}
 		}
-		out := getBehindIndex(status)
-		if !reflect.DeepEqual(c.expected, out) {
-			t.Errorf("%d: getBehindIndex(...) expected %d, but got %d", i, c.expected, out)
+		quorumMatchedIndex := getQuorumIndex(status, c.pendingSnapshotIndex)
+		if c.expected != quorumMatchedIndex {
+			t.Fatalf("%d: expected %d, but got %d", i, c.expected, quorumMatchedIndex)
 		}
 	}
 }
@@ -69,32 +75,32 @@ func TestComputeTruncatableIndex(t *testing.T) {
 
 	testCases := []struct {
 		progress        []uint64
-		commit          uint64
 		raftLogSize     int64
 		firstIndex      uint64
 		pendingSnapshot uint64
 		expected        uint64
 	}{
-		{[]uint64{1, 2}, 1, 100, 1, 0, 1},
-		{[]uint64{1, 5, 5}, 5, 100, 1, 0, 1},
-		{[]uint64{1, 5, 5}, 5, 100, 2, 0, 2},
-		{[]uint64{5, 5, 5}, 5, 100, 2, 0, 5},
-		{[]uint64{5, 5, 5}, 5, 100, 2, 1, 2},
-		{[]uint64{5, 5, 5}, 5, 100, 2, 3, 3},
-		{[]uint64{1, 2, 3, 4}, 3, 100, 1, 0, 1},
-		{[]uint64{1, 2, 3, 4}, 3, 100, 2, 0, 2},
+		{[]uint64{1, 2}, 100, 1, 0, 1},
+		{[]uint64{1, 5, 5}, 100, 1, 0, 1},
+		{[]uint64{1, 5, 5}, 100, 2, 0, 2},
+		{[]uint64{5, 5, 5}, 100, 2, 0, 5},
+		{[]uint64{5, 5, 5}, 100, 2, 1, 2},
+		{[]uint64{5, 5, 5}, 100, 2, 3, 3},
+		{[]uint64{1, 2, 3, 4}, 100, 1, 0, 1},
+		{[]uint64{1, 2, 3, 4}, 100, 2, 0, 2},
 		// If over targetSize, should truncate to quorum committed index.
-		{[]uint64{1, 2, 3, 4}, 3, 2000, 1, 0, 3},
-		{[]uint64{1, 2, 3, 4}, 3, 2000, 2, 0, 3},
-		{[]uint64{1, 2, 3, 4}, 3, 2000, 3, 0, 3},
-		// Never truncate past raftStatus.Commit.
-		{[]uint64{4, 5, 6}, 3, 100, 4, 0, 3},
+		{[]uint64{1, 3, 3, 4}, 2000, 1, 0, 3},
+		{[]uint64{1, 3, 3, 4}, 2000, 2, 0, 3},
+		{[]uint64{1, 3, 3, 4}, 2000, 3, 0, 3},
+		// The pending snapshot index affects the quorum commit index.
+		{[]uint64{4}, 2000, 1, 1, 1},
+		// Never truncate past the quorum commit index.
+		{[]uint64{3, 3, 6}, 100, 4, 0, 3},
 	}
 	for i, c := range testCases {
 		status := &raft.Status{
 			Progress: make(map[uint64]raft.Progress),
 		}
-		status.Commit = c.commit
 		for j, v := range c.progress {
 			status.Progress[uint64(j)] = raft.Progress{Match: v}
 		}
@@ -109,8 +115,9 @@ func TestComputeTruncatableIndex(t *testing.T) {
 // removed.
 func TestGetTruncatableIndexes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	store, _, stopper := createTestStore(t)
+	stopper := stop.NewStopper()
 	defer stopper.Stop()
+	store, _ := createTestStore(t, stopper)
 	store.SetRaftLogQueueActive(false)
 
 	r, err := store.GetReplica(1)
@@ -171,7 +178,7 @@ func TestGetTruncatableIndexes(t *testing.T) {
 	// There can be a delay from when the truncation command is issued and the
 	// indexes updating.
 	var cFirst, cTruncatable, cOldest uint64
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		var err error
 		cFirst, cTruncatable, cOldest, err = getIndexes()
 		if err != nil {
@@ -222,8 +229,9 @@ func TestProactiveRaftLogTruncate(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	t.Skip("#9772")
 
-	store, _, stopper := createTestStore(t)
+	stopper := stop.NewStopper()
 	defer stopper.Stop()
+	store, _ := createTestStore(t, stopper)
 
 	store.SetReplicaScannerActive(false)
 

@@ -83,7 +83,7 @@ func TestDB_Get(t *testing.T) {
 
 	result, err := db.Get(context.TODO(), "aa")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	checkResult(t, []byte(""), result.ValueBytes())
 }
@@ -95,11 +95,11 @@ func TestDB_Put(t *testing.T) {
 	ctx := context.TODO()
 
 	if err := db.Put(context.TODO(), "aa", "1"); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	result, err := db.Get(ctx, "aa")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	checkResult(t, []byte("1"), result.ValueBytes())
 }
@@ -111,41 +111,41 @@ func TestDB_CPut(t *testing.T) {
 	ctx := context.TODO()
 
 	if err := db.Put(ctx, "aa", "1"); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	if err := db.CPut(ctx, "aa", "2", "1"); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	result, err := db.Get(ctx, "aa")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	checkResult(t, []byte("2"), result.ValueBytes())
 
 	if err = db.CPut(ctx, "aa", "3", "1"); err == nil {
-		panic("expected error from conditional put")
+		t.Fatal("expected error from conditional put")
 	}
 	result, err = db.Get(ctx, "aa")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	checkResult(t, []byte("2"), result.ValueBytes())
 
 	if err = db.CPut(ctx, "bb", "4", "1"); err == nil {
-		panic("expected error from conditional put")
+		t.Fatal("expected error from conditional put")
 	}
 	result, err = db.Get(ctx, "bb")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	checkResult(t, []byte(""), result.ValueBytes())
 
 	if err = db.CPut(ctx, "bb", "4", nil); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	result, err = db.Get(ctx, "bb")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	checkResult(t, []byte("4"), result.ValueBytes())
 }
@@ -157,17 +157,17 @@ func TestDB_InitPut(t *testing.T) {
 	ctx := context.TODO()
 
 	if err := db.InitPut(ctx, "aa", "1"); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	if err := db.InitPut(ctx, "aa", "1"); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	if err := db.InitPut(ctx, "aa", "2"); err == nil {
-		panic("expected error from init put")
+		t.Fatal("expected error from init put")
 	}
 	result, err := db.Get(ctx, "aa")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	checkResult(t, []byte("1"), result.ValueBytes())
 }
@@ -179,11 +179,11 @@ func TestDB_Inc(t *testing.T) {
 	ctx := context.TODO()
 
 	if _, err := db.Inc(ctx, "aa", 100); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	result, err := db.Get(ctx, "aa")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	checkIntResult(t, 100, result.ValueInt())
 }
@@ -197,7 +197,7 @@ func TestBatch(t *testing.T) {
 	b.Get("aa")
 	b.Put("bb", "2")
 	if err := db.Run(context.TODO(), b); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 
 	expected := map[string][]byte{
@@ -217,11 +217,11 @@ func TestDB_Scan(t *testing.T) {
 	b.Put("ab", "2")
 	b.Put("bb", "3")
 	if err := db.Run(context.TODO(), b); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	rows, err := db.Scan(context.TODO(), "a", "b", 100)
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	expected := map[string][]byte{
 		"aa": []byte("1"),
@@ -242,11 +242,11 @@ func TestDB_ReverseScan(t *testing.T) {
 	b.Put("ab", "2")
 	b.Put("bb", "3")
 	if err := db.Run(context.TODO(), b); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	rows, err := db.ReverseScan(context.TODO(), "ab", "c", 100)
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	expected := map[string][]byte{
 		"bb": []byte("3"),
@@ -267,14 +267,14 @@ func TestDB_Del(t *testing.T) {
 	b.Put("ab", "2")
 	b.Put("ac", "3")
 	if err := db.Run(context.TODO(), b); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	if err := db.Del(context.TODO(), "ab"); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	rows, err := db.Scan(context.TODO(), "a", "b", 100)
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	expected := map[string][]byte{
 		"aa": []byte("1"),
@@ -296,14 +296,14 @@ func TestTxn_Commit(t *testing.T) {
 		return txn.CommitInBatch(b)
 	})
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 
 	b := &client.Batch{}
 	b.Get("aa")
 	b.Get("ab")
 	if err := db.Run(context.TODO(), b); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	expected := map[string][]byte{
 		"aa": []byte("1"),
@@ -319,11 +319,11 @@ func TestDB_Put_insecure(t *testing.T) {
 	ctx := context.TODO()
 
 	if err := db.Put(context.TODO(), "aa", "1"); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	result, err := db.Get(ctx, "aa")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	checkResult(t, []byte("1"), result.ValueBytes())
 }
@@ -361,40 +361,41 @@ func TestCommonMethods(t *testing.T) {
 		// request with the information that this particular Get must be
 		// unmarshaled, which didn't seem worth doing as we're not using
 		// Batch.GetProto at the moment.
-		key{dbType, "GetProto"}:                {},
-		key{txnType, "GetProto"}:               {},
-		key{batchType, "CheckConsistency"}:     {},
-		key{batchType, "AddRawRequest"}:        {},
-		key{batchType, "PutInline"}:            {},
-		key{batchType, "RawResponse"}:          {},
-		key{batchType, "MustPErr"}:             {},
-		key{dbType, "AdminMerge"}:              {},
-		key{dbType, "AdminSplit"}:              {},
-		key{dbType, "AdminTransferLease"}:      {},
-		key{dbType, "CheckConsistency"}:        {},
-		key{dbType, "Run"}:                     {},
-		key{dbType, "Txn"}:                     {},
-		key{dbType, "GetSender"}:               {},
-		key{dbType, "PutInline"}:               {},
-		key{txnType, "Commit"}:                 {},
-		key{txnType, "CommitInBatch"}:          {},
-		key{txnType, "CommitOrCleanup"}:        {},
-		key{txnType, "Rollback"}:               {},
-		key{txnType, "CleanupOnError"}:         {},
-		key{txnType, "DebugName"}:              {},
-		key{txnType, "InternalSetPriority"}:    {},
-		key{txnType, "IsFinalized"}:            {},
-		key{txnType, "NewBatch"}:               {},
-		key{txnType, "Exec"}:                   {},
-		key{txnType, "GetDeadline"}:            {},
-		key{txnType, "ResetDeadline"}:          {},
-		key{txnType, "Run"}:                    {},
-		key{txnType, "SetDebugName"}:           {},
-		key{txnType, "SetIsolation"}:           {},
-		key{txnType, "SetUserPriority"}:        {},
-		key{txnType, "SetSystemConfigTrigger"}: {},
-		key{txnType, "SystemConfigTrigger"}:    {},
-		key{txnType, "UpdateDeadlineMaybe"}:    {},
+		{dbType, "GetProto"}:                {},
+		{txnType, "GetProto"}:               {},
+		{batchType, "CheckConsistency"}:     {},
+		{batchType, "AddRawRequest"}:        {},
+		{batchType, "PutInline"}:            {},
+		{batchType, "RawResponse"}:          {},
+		{batchType, "MustPErr"}:             {},
+		{dbType, "AdminMerge"}:              {},
+		{dbType, "AdminSplit"}:              {},
+		{dbType, "AdminTransferLease"}:      {},
+		{dbType, "CheckConsistency"}:        {},
+		{dbType, "Run"}:                     {},
+		{dbType, "Txn"}:                     {},
+		{dbType, "GetSender"}:               {},
+		{dbType, "PutInline"}:               {},
+		{txnType, "Commit"}:                 {},
+		{txnType, "CommitInBatch"}:          {},
+		{txnType, "CommitOrCleanup"}:        {},
+		{txnType, "Rollback"}:               {},
+		{txnType, "CleanupOnError"}:         {},
+		{txnType, "DebugName"}:              {},
+		{txnType, "InternalSetPriority"}:    {},
+		{txnType, "IsFinalized"}:            {},
+		{txnType, "NewBatch"}:               {},
+		{txnType, "Exec"}:                   {},
+		{txnType, "GetDeadline"}:            {},
+		{txnType, "ResetDeadline"}:          {},
+		{txnType, "Run"}:                    {},
+		{txnType, "SetDebugName"}:           {},
+		{txnType, "SetIsolation"}:           {},
+		{txnType, "SetUserPriority"}:        {},
+		{txnType, "SetSystemConfigTrigger"}: {},
+		{txnType, "SystemConfigTrigger"}:    {},
+		{txnType, "UpdateDeadlineMaybe"}:    {},
+		{txnType, "AddCommitTrigger"}:       {},
 	}
 
 	for b := range omittedChecks {

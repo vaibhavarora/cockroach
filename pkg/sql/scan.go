@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/pkg/errors"
 )
 
 // A scanNode handles scanning over the key/value pairs for a table and
@@ -48,8 +49,15 @@ type scanNode struct {
 	// Contains values for the current row. There is a 1-1 correspondence
 	// between resultColumns and values in row.
 	row parser.DTuple
-	// For each column in resultColumns, indicates if the value is needed (used
-	// as an optimization when the upper layer doesn't need all values).
+	// For each column in resultColumns, indicates if the value is
+	// needed (used as an optimization when the upper layer doesn't need
+	// all values).
+	// TODO(radu/knz): currently the optimization always loads the
+	// entire row from KV and only skips unnecessary decodes to
+	// Datum. Investigate whether performance is to be gained (e.g. for
+	// tables with wide rows) by reading only certain columns from KV
+	// using point lookups instead of a single range lookup for the
+	// entire row.
 	valNeededForCol []bool
 
 	// Map used to get the index for columns in cols.
@@ -75,7 +83,7 @@ type scanNode struct {
 	limitHint          int64
 	limitSoft          bool
 	disableBatchLimits bool
-
+	scanVisibility     scanVisibility
 	// This struct must be allocated on the heap and its location stay
 	// stable after construction because it implements
 	// IndexedVarContainer and the IndexedVar objects in sub-expressions
@@ -133,18 +141,9 @@ func (n *scanNode) disableBatchLimit() {
 	n.limitSoft = false
 }
 
-func (n *scanNode) expandPlan() error {
-	return n.p.expandSubqueryPlans(n.filter)
-}
-
 func (n *scanNode) Start() error {
-	err := n.fetcher.Init(&n.desc, n.colIdxMap, n.index, n.reverse, n.isSecondaryIndex, n.cols,
+	return n.fetcher.Init(&n.desc, n.colIdxMap, n.index, n.reverse, n.isSecondaryIndex, n.cols,
 		n.valNeededForCol)
-	if err != nil {
-		return err
-	}
-
-	return n.p.startSubqueryPlans(n.filter)
 }
 
 func (n *scanNode) Close() {}
@@ -177,25 +176,33 @@ func (n *scanNode) debugNext() (bool, error) {
 	// In debug mode, we output a set of debug values for each key.
 	n.debugVals.rowIdx = n.rowIndex
 	var err error
-	n.debugVals.key, n.debugVals.value, n.row, err = n.fetcher.NextKeyDebug()
+	var encRow sqlbase.EncDatumRow
+	n.debugVals.key, n.debugVals.value, encRow, err = n.fetcher.NextKeyDebug()
 	if err != nil || n.debugVals.key == "" {
 		return false, err
 	}
-
-	if n.row != nil {
-		passesFilter, err := sqlbase.RunFilter(n.filter, &n.p.evalCtx)
-		if err != nil {
-			return false, err
-		}
-		if passesFilter {
-			n.debugVals.output = debugValueRow
-		} else {
-			n.debugVals.output = debugValueFiltered
-		}
-		n.rowIndex++
-	} else {
+	if encRow == nil {
+		n.row = nil
 		n.debugVals.output = debugValuePartial
+		return true, nil
 	}
+	tuple := make(parser.DTuple, len(encRow))
+	var da sqlbase.DatumAlloc
+
+	if err := sqlbase.EncDatumRowToDTuple(tuple, encRow, &da); err != nil {
+		return false, errors.Errorf("Could not decode row: %v", err)
+	}
+	n.row = tuple
+	passesFilter, err := sqlbase.RunFilter(n.filter, &n.p.evalCtx)
+	if err != nil {
+		return false, err
+	}
+	if passesFilter {
+		n.debugVals.output = debugValueRow
+	} else {
+		n.debugVals.output = debugValueFiltered
+	}
+	n.rowIndex++
 	return true, nil
 }
 
@@ -214,7 +221,7 @@ func (n *scanNode) Next() (bool, error) {
 	// We fetch one row at a time until we find one that passes the filter.
 	for {
 		var err error
-		n.row, err = n.fetcher.NextRow()
+		n.row, err = n.fetcher.NextRowDecoded()
 		if err != nil || n.row == nil {
 			return false, err
 		}
@@ -228,37 +235,6 @@ func (n *scanNode) Next() (bool, error) {
 	}
 }
 
-func (n *scanNode) ExplainPlan(_ bool) (name, description string, children []planNode) {
-	if n.reverse {
-		name = "revscan"
-	} else {
-		name = "scan"
-	}
-	var desc bytes.Buffer
-	fmt.Fprintf(&desc, "%s@%s", n.desc.Name, n.index.Name)
-	spans := sqlbase.PrettySpans(n.spans, 2)
-	if spans != "" {
-		fmt.Fprintf(&desc, " %s", spans)
-	}
-	if n.limitHint > 0 && !n.limitSoft {
-		if n.limitHint == 1 {
-			desc.WriteString(" (max 1 row)")
-		} else {
-			fmt.Fprintf(&desc, " (max %d rows)", n.limitHint)
-		}
-	}
-
-	subplans := n.p.collectSubqueryPlans(n.filter, nil)
-
-	return name, desc.String(), subplans
-}
-
-func (n *scanNode) ExplainTypes(regTypes func(string, string)) {
-	if n.filter != nil {
-		regTypes("filter", parser.AsStringWithFlags(n.filter, parser.FmtShowTypes))
-	}
-}
-
 // Initializes a scanNode with a table descriptor.
 func (n *scanNode) initTable(
 	p *planner,
@@ -268,17 +244,19 @@ func (n *scanNode) initTable(
 ) error {
 	n.desc = *desc
 
-	if err := p.checkPrivilege(&n.desc, privilege.SELECT); err != nil {
-		return err
+	if !p.skipSelectPrivilegeChecks {
+		if err := p.checkPrivilege(&n.desc, privilege.SELECT); err != nil {
+			return err
+		}
 	}
 
 	if indexHints != nil && indexHints.Index != "" {
-		indexName := sqlbase.NormalizeName(indexHints.Index)
-		if indexName == sqlbase.ReNormalizeName(n.desc.PrimaryIndex.Name) {
+		indexName := indexHints.Index.Normalize()
+		if indexName == parser.ReNormalizeName(n.desc.PrimaryIndex.Name) {
 			n.specifiedIndex = &n.desc.PrimaryIndex
 		} else {
 			for i := range n.desc.Indexes {
-				if indexName == sqlbase.ReNormalizeName(n.desc.Indexes[i].Name) {
+				if indexName == parser.ReNormalizeName(n.desc.Indexes[i].Name) {
 					n.specifiedIndex = &n.desc.Indexes[i]
 					break
 				}
@@ -293,17 +271,9 @@ func (n *scanNode) initTable(
 	return nil
 }
 
-// setNeededColumns sets the flags indicating which columns are needed by the upper layer.
-func (n *scanNode) setNeededColumns(needed []bool) {
-	if len(needed) != len(n.valNeededForCol) {
-		panic(fmt.Sprintf("invalid setNeededColumns argument (len %d instead of %d): %v",
-			len(needed), len(n.valNeededForCol), needed))
-	}
-	copy(n.valNeededForCol, needed)
-}
-
 // Initializes the column structures.
 func (n *scanNode) initDescDefaults(scanVisibility scanVisibility) {
+	n.scanVisibility = scanVisibility
 	n.index = &n.desc.PrimaryIndex
 	n.cols = make([]sqlbase.ColumnDescriptor, 0, len(n.desc.Columns)+len(n.desc.Mutations))
 	switch scanVisibility {
@@ -313,7 +283,11 @@ func (n *scanNode) initDescDefaults(scanVisibility scanVisibility) {
 		n.cols = append(n.cols, n.desc.Columns...)
 		for _, mutation := range n.desc.Mutations {
 			if c := mutation.GetColumn(); c != nil {
-				n.cols = append(n.cols, *c)
+				col := *c
+				// Even if the column is non-nullable it can be null in the
+				// middle of a schema change.
+				col.Nullable = true
+				n.cols = append(n.cols, col)
 			}
 		}
 	}

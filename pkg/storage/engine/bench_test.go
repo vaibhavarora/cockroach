@@ -35,10 +35,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/termie/go-shutil"
 )
+
+const overhead = 48 // Per key/value overhead (empirically determined)
 
 // readAllFiles reads all of the files matching pattern thus ensuring they are
 // in the OS buffer cache.
@@ -57,7 +58,7 @@ func readAllFiles(pattern string) {
 	}
 }
 
-type engineMaker func(testing.TB, string) (Engine, *stop.Stopper)
+type engineMaker func(testing.TB, string) Engine
 
 // setupMVCCData writes up to numVersions values at each of numKeys
 // keys. The number of versions written for each key is chosen
@@ -76,7 +77,7 @@ type engineMaker func(testing.TB, string) (Engine, *stop.Stopper)
 // is also returned).
 func setupMVCCData(
 	emk engineMaker, numVersions, numKeys, valueBytes int, b *testing.B,
-) (Engine, string, *stop.Stopper) {
+) (Engine, string) {
 	loc := fmt.Sprintf("mvcc_data_%d_%d_%d", numVersions, numKeys, valueBytes)
 
 	exists := true
@@ -84,11 +85,11 @@ func setupMVCCData(
 		exists = false
 	}
 
-	eng, stopper := emk(b, loc)
+	eng := emk(b, loc)
 
 	if exists {
 		readAllFiles(filepath.Join(loc, "*"))
-		return eng, loc, stopper
+		return eng, loc
 	}
 
 	log.Infof(context.Background(), "creating mvcc data: %s", loc)
@@ -150,7 +151,7 @@ func setupMVCCData(
 		b.Fatal(err)
 	}
 
-	return eng, loc, stopper
+	return eng, loc
 }
 
 // runMVCCScan first creates test data (and resets the benchmarking
@@ -164,8 +165,8 @@ func runMVCCScan(emk engineMaker, numRows, numVersions, valueSize int, b *testin
 	// datasets all fit in cache and the cache is pre-warmed.
 	const numKeys = 100000
 
-	eng, _, stopper := setupMVCCData(emk, numVersions, numKeys, valueSize, b)
-	defer stopper.Stop()
+	eng, _ := setupMVCCData(emk, numVersions, numKeys, valueSize, b)
+	defer eng.Close()
 
 	b.SetBytes(int64(numRows * valueSize))
 	b.ResetTimer()
@@ -192,14 +193,13 @@ func runMVCCScan(emk engineMaker, numRows, numVersions, valueSize int, b *testin
 // runMVCCGet first creates test data (and resets the benchmarking
 // timer). It then performs b.N MVCCGets.
 func runMVCCGet(emk engineMaker, numVersions, valueSize int, b *testing.B) {
-	const overhead = 48          // Per key/value overhead (empirically determined)
 	const targetSize = 512 << 20 // 512 MB
 	// Adjust the number of keys so that each test has approximately the same
 	// amount of data.
 	numKeys := targetSize / ((overhead + valueSize) * (1 + (numVersions-1)/2))
 
-	eng, _, stopper := setupMVCCData(emk, numVersions, numKeys, valueSize, b)
-	defer stopper.Stop()
+	eng, _ := setupMVCCData(emk, numVersions, numKeys, valueSize, b)
+	defer eng.Close()
 
 	b.SetBytes(int64(valueSize))
 	b.ResetTimer()
@@ -230,8 +230,8 @@ func runMVCCPut(emk engineMaker, valueSize int, b *testing.B) {
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
-	eng, stopper := emk(b, fmt.Sprintf("put_%d", valueSize))
-	defer stopper.Stop()
+	eng := emk(b, fmt.Sprintf("put_%d", valueSize))
+	defer eng.Close()
 
 	b.SetBytes(int64(valueSize))
 	b.ResetTimer()
@@ -252,8 +252,8 @@ func runMVCCBlindPut(emk engineMaker, valueSize int, b *testing.B) {
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
-	eng, stopper := emk(b, fmt.Sprintf("put_%d", valueSize))
-	defer stopper.Stop()
+	eng := emk(b, fmt.Sprintf("put_%d", valueSize))
+	defer eng.Close()
 
 	b.SetBytes(int64(valueSize))
 	b.ResetTimer()
@@ -274,8 +274,8 @@ func runMVCCConditionalPut(emk engineMaker, valueSize int, createFirst bool, b *
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
-	eng, stopper := emk(b, fmt.Sprintf("cput_%d", valueSize))
-	defer stopper.Stop()
+	eng := emk(b, fmt.Sprintf("cput_%d", valueSize))
+	defer eng.Close()
 
 	b.SetBytes(int64(valueSize))
 	var expected *roachpb.Value
@@ -308,8 +308,8 @@ func runMVCCBlindConditionalPut(emk engineMaker, valueSize int, b *testing.B) {
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
-	eng, stopper := emk(b, fmt.Sprintf("cput_%d", valueSize))
-	defer stopper.Stop()
+	eng := emk(b, fmt.Sprintf("cput_%d", valueSize))
+	defer eng.Close()
 
 	b.SetBytes(int64(valueSize))
 	b.ResetTimer()
@@ -330,9 +330,8 @@ func runMVCCBatchPut(emk engineMaker, valueSize, batchSize int, b *testing.B) {
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
-	stopper := stop.NewStopper()
-	eng, stopper := emk(b, fmt.Sprintf("batch_put_%d_%d", valueSize, batchSize))
-	defer stopper.Stop()
+	eng := emk(b, fmt.Sprintf("batch_put_%d_%d", valueSize, batchSize))
+	defer eng.Close()
 
 	b.SetBytes(int64(valueSize))
 	b.ResetTimer()
@@ -388,9 +387,8 @@ func runMVCCBatchTimeSeries(emk engineMaker, batchSize int, b *testing.B) {
 		b.Fatal(err)
 	}
 
-	stopper := stop.NewStopper()
-	eng, stopper := emk(b, fmt.Sprintf("batch_merge_%d", batchSize))
-	defer stopper.Stop()
+	eng := emk(b, fmt.Sprintf("batch_merge_%d", batchSize))
+	defer eng.Close()
 
 	b.ResetTimer()
 
@@ -416,8 +414,8 @@ func runMVCCBatchTimeSeries(emk engineMaker, batchSize int, b *testing.B) {
 
 // runMVCCMerge merges value into numKeys separate keys.
 func runMVCCMerge(emk engineMaker, value *roachpb.Value, numKeys int, b *testing.B) {
-	eng, stopper := emk(b, fmt.Sprintf("merge_%d", numKeys))
-	defer stopper.Stop()
+	eng := emk(b, fmt.Sprintf("merge_%d", numKeys))
+	defer eng.Close()
 
 	// Precompute keys so we don't waste time formatting them at each iteration.
 	keys := make([]roachpb.Key, numKeys)
@@ -473,10 +471,9 @@ func BenchmarkMVCCMergeTimeSeries_RocksDB(b *testing.B) {
 func runMVCCDeleteRange(emk engineMaker, valueBytes int, b *testing.B) {
 	// 512 KB ranges so the benchmark doesn't take forever
 	const rangeBytes = 512 * 1024
-	const overhead = 48 // Per key/value overhead (empirically determined)
 	numKeys := rangeBytes / (overhead + valueBytes)
-	_, dir, stopper := setupMVCCData(emk, 1, numKeys, valueBytes, b)
-	stopper.Stop()
+	eng, dir := setupMVCCData(emk, 1, numKeys, valueBytes, b)
+	defer eng.Close()
 
 	b.SetBytes(rangeBytes)
 	b.StopTimer()
@@ -490,7 +487,7 @@ func runMVCCDeleteRange(emk engineMaker, valueBytes int, b *testing.B) {
 		if err := shutil.CopyTree(dir, locDirty, nil); err != nil {
 			b.Fatal(err)
 		}
-		dupEng, stopper := emk(b, locDirty)
+		dupEng := emk(b, locDirty)
 
 		b.StartTimer()
 		_, _, _, err := MVCCDeleteRange(context.Background(), dupEng,
@@ -501,17 +498,16 @@ func runMVCCDeleteRange(emk engineMaker, valueBytes int, b *testing.B) {
 		}
 		b.StopTimer()
 
-		stopper.Stop()
+		dupEng.Close()
 	}
 }
 
 // runMVCCComputeStats benchmarks computing MVCC stats on a 64MB range of data.
 func runMVCCComputeStats(emk engineMaker, valueBytes int, b *testing.B) {
 	const rangeBytes = 64 * 1024 * 1024
-	const overhead = 48 // Per key/value overhead (empirically determined)
 	numKeys := rangeBytes / (overhead + valueBytes)
-	eng, _, stopper := setupMVCCData(emk, 1, numKeys, valueBytes, b)
-	defer stopper.Stop()
+	eng, _ := setupMVCCData(emk, 1, numKeys, valueBytes, b)
+	defer eng.Close()
 
 	b.SetBytes(rangeBytes)
 	b.ResetTimer()
@@ -531,9 +527,52 @@ func runMVCCComputeStats(emk engineMaker, valueBytes int, b *testing.B) {
 	log.Infof(context.Background(), "live_bytes: %d", stats.LiveBytes)
 }
 
+func runBatchApplyBatchRepr(
+	emk engineMaker, writeOnly bool, valueSize, batchSize int, b *testing.B,
+) {
+	rng, _ := randutil.NewPseudoRand()
+	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
+	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
+
+	eng := emk(b, fmt.Sprintf("batch_apply_batch_repr_%d_%d", valueSize, batchSize))
+	defer eng.Close()
+
+	var repr []byte
+	{
+		batch := eng.NewBatch()
+		for i := 0; i < batchSize; i++ {
+			key := roachpb.Key(encoding.EncodeUvarintAscending(keyBuf[:4], uint64(i)))
+			ts := makeTS(timeutil.Now().UnixNano(), 0)
+			if err := MVCCPut(context.Background(), batch, nil, key, ts, value, nil); err != nil {
+				b.Fatal(err)
+			}
+		}
+		repr = batch.Repr()
+		batch.Close()
+	}
+
+	b.SetBytes(int64(len(repr)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		var batch Batch
+		if writeOnly {
+			batch = eng.NewWriteOnlyBatch()
+		} else {
+			batch = eng.NewBatch()
+		}
+		if err := batch.ApplyBatchRepr(repr); err != nil {
+			b.Fatal(err)
+		}
+		batch.Close()
+	}
+
+	b.StopTimer()
+}
+
 func BenchmarkMVCCPutDelete_RocksDB(b *testing.B) {
-	rocksdb, stopper := setupMVCCInMemRocksDB(b, "put_delete")
-	defer stopper.Stop()
+	rocksdb := setupMVCCInMemRocksDB(b, "put_delete")
+	defer rocksdb.Close()
 
 	r := rand.New(rand.NewSource(int64(timeutil.Now().UnixNano())))
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(r, 10))
@@ -552,5 +591,42 @@ func BenchmarkMVCCPutDelete_RocksDB(b *testing.B) {
 		if err := MVCCDelete(context.Background(), rocksdb, nil, key, zeroTS, nil /* txn */); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func BenchmarkClearRange_RocksDB(b *testing.B) {
+	const rangeBytes = 64 << 20
+	const valueBytes = 92
+	numKeys := rangeBytes / (overhead + valueBytes)
+	eng, dir := setupMVCCData(setupMVCCRocksDB, 1, numKeys, valueBytes, b)
+	defer eng.Close()
+
+	b.SetBytes(rangeBytes)
+	b.StopTimer()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		locDirty := dir + "_dirty"
+		if err := os.RemoveAll(locDirty); err != nil {
+			b.Fatal(err)
+		}
+		if err := shutil.CopyTree(dir, locDirty, nil); err != nil {
+			b.Fatal(err)
+		}
+		dupEng := setupMVCCRocksDB(b, locDirty)
+
+		b.StartTimer()
+		iter := dupEng.NewIterator(false)
+		batch := dupEng.NewWriteOnlyBatch()
+		if err := batch.ClearRange(iter, NilKey, MVCCKeyMax); err != nil {
+			b.Fatal(err)
+		}
+		iter.Close()
+		if err := batch.Commit(); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+
+		dupEng.Close()
 	}
 }

@@ -30,10 +30,9 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/context"
-
 	"github.com/gogo/protobuf/proto"
 	"github.com/pkg/errors"
+	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/config"
@@ -44,7 +43,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -234,8 +233,9 @@ func TestAdminAPIDatabases(t *testing.T) {
 	// Test databases endpoint.
 	const testdb = "test"
 	session := sql.NewSession(
-		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil)
-	defer session.Finish()
+		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil, &sql.MemoryMetrics{})
+	session.StartUnlimitedMonitor()
+	defer session.Finish(ts.sqlExecutor)
 	query := "CREATE DATABASE " + testdb
 	createRes := ts.sqlExecutor.ExecuteStatements(session, query, nil)
 	defer createRes.Close()
@@ -249,7 +249,7 @@ func TestAdminAPIDatabases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedDBs := []string{"information_schema", "pg_catalog", "system", testdb}
+	expectedDBs := []string{"system", testdb}
 	if a, e := len(resp.Databases), len(expectedDBs); a != e {
 		t.Fatalf("length of result %d != expected %d", a, e)
 	}
@@ -276,23 +276,32 @@ func TestAdminAPIDatabases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if a, e := len(details.Grants), 2; a != e {
+	if a, e := len(details.Grants), 3; a != e {
 		t.Fatalf("# of grants %d != expected %d", a, e)
 	}
 
+	userGrants := make(map[string][]string)
 	for _, grant := range details.Grants {
 		switch grant.User {
-		case security.RootUser:
-			if !reflect.DeepEqual(grant.Privileges, []string{"ALL"}) {
-				t.Fatalf("privileges %v != expected %v", details.Grants[0].Privileges, privileges)
-			}
-		case testuser:
-			sort.Strings(grant.Privileges)
-			if !reflect.DeepEqual(grant.Privileges, privileges) {
-				t.Fatalf("privileges %v != expected %v", grant.Privileges, privileges)
-			}
+		case security.RootUser, testuser:
+			userGrants[grant.User] = append(userGrants[grant.User], grant.Privileges...)
 		default:
 			t.Fatalf("unknown grant to user %s", grant.User)
+		}
+	}
+	for u, p := range userGrants {
+		switch u {
+		case security.RootUser:
+			if !reflect.DeepEqual(p, []string{"ALL"}) {
+				t.Fatalf("privileges %v != expected %v", p, privileges)
+			}
+		case testuser:
+			sort.Strings(p)
+			if !reflect.DeepEqual(p, privileges) {
+				t.Fatalf("privileges %v != expected %v", p, privileges)
+			}
+		default:
+			t.Fatalf("unknown grant to user %s", u)
 		}
 	}
 
@@ -313,6 +322,17 @@ func TestAdminAPIDatabaseDoesNotExist(t *testing.T) {
 
 	const errPattern = "database.+does not exist"
 	if err := getAdminJSONProto(s, "databases/I_DO_NOT_EXIST", nil); !testutils.IsError(err, errPattern) {
+		t.Fatalf("unexpected error: %v\nexpected: %s", err, errPattern)
+	}
+}
+
+func TestAdminAPIDatabaseVirtual(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop()
+
+	const errPattern = `\\"information_schema\\" is a virtual schema`
+	if err := getAdminJSONProto(s, "databases/information_schema", nil); !testutils.IsError(err, errPattern) {
 		t.Fatalf("unexpected error: %v\nexpected: %s", err, errPattern)
 	}
 }
@@ -346,6 +366,19 @@ func TestAdminAPITableDoesNotExist(t *testing.T) {
 	const tableErrPattern = `table \\"system.` + fakename + `\\" does not exist`
 	if err := getAdminJSONProto(s, badTablePath, nil); !testutils.IsError(err, tableErrPattern) {
 		t.Fatalf("unexpected error: %v\nexpected: %s", err, tableErrPattern)
+	}
+}
+
+func TestAdminAPITableVirtual(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop()
+
+	const virtual = "information_schema"
+	const badDBPath = "databases/" + virtual + "/tables/tables"
+	const dbErrPattern = `\\"` + virtual + `\\" is a virtual schema`
+	if err := getAdminJSONProto(s, badDBPath, nil); !testutils.IsError(err, dbErrPattern) {
+		t.Fatalf("unexpected error: %v\nexpected: %s", err, dbErrPattern)
 	}
 }
 
@@ -385,8 +418,9 @@ func testAdminAPITableDetailsInner(t *testing.T, dbName, tblName string) {
 	defer span.Finish()
 
 	session := sql.NewSession(
-		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil)
-	defer session.Finish()
+		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil, &sql.MemoryMetrics{})
+	session.StartUnlimitedMonitor()
+	defer session.Finish(ts.sqlExecutor)
 	setupQueries := []string{
 		fmt.Sprintf("CREATE DATABASE %s", escDBName),
 		fmt.Sprintf(`CREATE TABLE %s.%s (
@@ -421,7 +455,6 @@ func testAdminAPITableDetailsInner(t *testing.T, dbName, tblName string) {
 		{Name: "nulls_not_allowed", Type: "INT", Nullable: false, DefaultValue: "1000"},
 		{Name: "default2", Type: "INT", Nullable: true, DefaultValue: "2"},
 		{Name: "string_default", Type: "STRING", Nullable: true, DefaultValue: "'default_string'"},
-		{Name: "rowid", Type: "INT", Nullable: false, DefaultValue: "unique_rowid()"},
 	}
 	testutils.SortStructs(expColumns, "Name")
 	testutils.SortStructs(resp.Columns, "Name")
@@ -438,7 +471,9 @@ func testAdminAPITableDetailsInner(t *testing.T, dbName, tblName string) {
 	// Verify grants.
 	expGrants := []serverpb.TableDetailsResponse_Grant{
 		{User: security.RootUser, Privileges: []string{"ALL"}},
-		{User: "app", Privileges: []string{"DELETE", "SELECT", "UPDATE"}},
+		{User: "app", Privileges: []string{"DELETE"}},
+		{User: "app", Privileges: []string{"SELECT"}},
+		{User: "app", Privileges: []string{"UPDATE"}},
 		{User: "readonly", Privileges: []string{"SELECT"}},
 	}
 	testutils.SortStructs(expGrants, "User")
@@ -458,10 +493,11 @@ func testAdminAPITableDetailsInner(t *testing.T, dbName, tblName string) {
 	// Verify indexes.
 	expIndexes := []serverpb.TableDetailsResponse_Index{
 		{Name: "primary", Column: "rowid", Direction: "ASC", Unique: true, Seq: 1},
+		{Name: "descIdx", Column: "rowid", Direction: "ASC", Unique: false, Seq: 2, Implicit: true},
 		{Name: "descIdx", Column: "default2", Direction: "DESC", Unique: false, Seq: 1},
 	}
-	testutils.SortStructs(expIndexes, "Column")
-	testutils.SortStructs(resp.Indexes, "Column")
+	testutils.SortStructs(expIndexes, "Name", "Seq")
+	testutils.SortStructs(resp.Indexes, "Name", "Seq")
 	for i, a := range resp.Indexes {
 		e := expIndexes[i]
 		if a.String() != e.String() {
@@ -508,86 +544,6 @@ func testAdminAPITableDetailsInner(t *testing.T, dbName, tblName string) {
 	}
 }
 
-func TestAdminAPITableDetailsForVirtualSchema(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop()
-	ts := s.(*TestServer)
-
-	// Perform API call.
-	var resp serverpb.TableDetailsResponse
-	if err := getAdminJSONProto(s, "databases/information_schema/tables/schemata", &resp); err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify columns.
-	expColumns := []serverpb.TableDetailsResponse_Column{
-		{Name: "CATALOG_NAME", Type: "STRING", Nullable: false, DefaultValue: "''"},
-		{Name: "SCHEMA_NAME", Type: "STRING", Nullable: false, DefaultValue: "''"},
-		{Name: "DEFAULT_CHARACTER_SET_NAME", Type: "STRING", Nullable: false, DefaultValue: "''"},
-		{Name: "SQL_PATH", Type: "STRING", Nullable: true},
-	}
-	testutils.SortStructs(expColumns, "Name")
-	testutils.SortStructs(resp.Columns, "Name")
-	if a, e := len(resp.Columns), len(expColumns); a != e {
-		t.Fatalf("# of result columns %d != expected %d (got: %#v)", a, e, resp.Columns)
-	}
-	for i, a := range resp.Columns {
-		e := expColumns[i]
-		if a.String() != e.String() {
-			t.Fatalf("mismatch at column %d: actual %#v != %#v", i, a, e)
-		}
-	}
-
-	// Verify grants.
-	if a, e := len(resp.Grants), 0; a != e {
-		t.Fatalf("# of grant columns %d != expected %d (got: %#v)", a, e, resp.Grants)
-	}
-
-	// Verify indexes.
-	if a, e := resp.RangeCount, int64(0); a != e {
-		t.Fatalf("# of indexes %d != expected %d", a, e)
-	}
-
-	// Verify range count.
-	if a, e := resp.RangeCount, int64(0); a != e {
-		t.Fatalf("# of ranges %d != expected %d", a, e)
-	}
-
-	// Verify Create Table Statement.
-	{
-		const (
-			showCreateTableQuery = "SHOW CREATE TABLE information_schema.schemata"
-			createTableCol       = "CreateTable"
-		)
-
-		ac := log.AmbientContext{Tracer: tracing.NewTracer()}
-		ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
-		defer span.Finish()
-
-		session := sql.NewSession(
-			ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil)
-		defer session.Finish()
-
-		resSet := ts.sqlExecutor.ExecuteStatements(session, showCreateTableQuery, nil)
-		defer resSet.Close()
-		res := resSet.ResultList[0]
-		if res.Err != nil {
-			t.Fatalf("error executing '%s': %s", showCreateTableQuery, res.Err)
-		}
-
-		scanner := makeResultScanner(res.Columns)
-		var createStmt string
-		if err := scanner.Scan(res.Rows.At(0), createTableCol, &createStmt); err != nil {
-			t.Fatal(err)
-		}
-
-		if a, e := resp.CreateTableStatement, createStmt; a != e {
-			t.Fatalf("mismatched create table statement; expected %s, got %s", e, a)
-		}
-	}
-}
-
 // TestAdminAPIZoneDetails verifies the zone configuration information returned
 // for both DatabaseDetailsResponse AND TableDetailsResponse.
 func TestAdminAPIZoneDetails(t *testing.T) {
@@ -601,8 +557,8 @@ func TestAdminAPIZoneDetails(t *testing.T) {
 	ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
 	defer span.Finish()
 	session := sql.NewSession(
-		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil)
-	defer session.Finish()
+		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil, &sql.MemoryMetrics{})
+	session.StartUnlimitedMonitor()
 	setupQueries := []string{
 		"CREATE DATABASE test",
 		"CREATE TABLE test.tbl (val STRING)",
@@ -711,8 +667,9 @@ func TestAdminAPIUsers(t *testing.T) {
 	ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
 	defer span.Finish()
 	session := sql.NewSession(
-		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil)
-	defer session.Finish()
+		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil, &sql.MemoryMetrics{})
+	session.StartUnlimitedMonitor()
+	defer session.Finish(ts.sqlExecutor)
 	query := `
 INSERT INTO system.users (username, hashedPassword)
 VALUES ('admin', 'abc'), ('bob', 'xyz')`
@@ -755,8 +712,9 @@ func TestAdminAPIEvents(t *testing.T) {
 	ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
 	defer span.Finish()
 	session := sql.NewSession(
-		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil)
-	defer session.Finish()
+		ctx, sql.SessionArgs{User: security.RootUser}, ts.sqlExecutor, nil, &sql.MemoryMetrics{})
+	session.StartUnlimitedMonitor()
+	defer session.Finish(ts.sqlExecutor)
 	setupQueries := []string{
 		"CREATE DATABASE api_test",
 		"CREATE TABLE api_test.tbl1 (a INT)",
@@ -779,7 +737,7 @@ func TestAdminAPIEvents(t *testing.T) {
 		eventType sql.EventLogType
 		expCount  int
 	}{
-		{"", 7},
+		{"", 8},
 		{sql.EventLogNodeJoin, 1},
 		{sql.EventLogNodeRestart, 0},
 		{sql.EventLogDropDatabase, 0},
@@ -944,7 +902,7 @@ func TestClusterAPI(t *testing.T) {
 
 	// We need to retry, because the cluster ID isn't set until after
 	// bootstrapping.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		var resp serverpb.ClusterResponse
 		if err := getAdminJSONProto(s, "cluster", &resp); err != nil {
 			return err
@@ -954,6 +912,35 @@ func TestClusterAPI(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestHealthAPI(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop()
+
+	// We need to retry because the node ID isn't set until after
+	// bootstrapping.
+	testutils.SucceedsSoon(t, func() error {
+		var resp serverpb.HealthResponse
+		return getAdminJSONProto(s, "health", &resp)
+	})
+
+	// Expire this node's liveness record by pausing heartbeats and advancing the
+	// server's clock.
+	ts := s.(*TestServer)
+	ts.nodeLiveness.PauseHeartbeat(true)
+	self, err := ts.nodeLiveness.Self()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Clock().Update(self.Expiration.Add(1, 0))
+
+	expected := "node is not live"
+	var resp serverpb.HealthResponse
+	if err := getAdminJSONProto(s, "health", &resp); !testutils.IsError(err, expected) {
+		t.Errorf("expected %q error, got %v", expected, err)
+	}
 }
 
 func TestClusterFreeze(t *testing.T) {
@@ -981,14 +968,14 @@ func TestClusterFreeze(t *testing.T) {
 		}
 		path := s.AdminURL() + adminPrefix + "cluster/freeze"
 
-		if err := util.StreamJSON(cli, path, &req, &serverpb.ClusterFreezeResponse{}, cb); err != nil {
+		if err := httputil.StreamJSON(cli, path, &req, &serverpb.ClusterFreezeResponse{}, cb); err != nil {
 			t.Fatal(err)
 		}
 		if aff := resp.RangesAffected; aff == 0 {
 			t.Fatalf("expected affected ranges: %+v", resp)
 		}
 
-		if err := util.StreamJSON(cli, path, &req, &serverpb.ClusterFreezeResponse{}, cb); err != nil {
+		if err := httputil.StreamJSON(cli, path, &req, &serverpb.ClusterFreezeResponse{}, cb); err != nil {
 			t.Fatal(err)
 		}
 	}

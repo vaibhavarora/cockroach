@@ -13,6 +13,8 @@ interface VisualizationProps {
   // If stale is true, the visualization is faded
   // and the icon is changed to a warning icon.
   stale?: boolean;
+  // If loading is true a spinner is shown instead of the graph.
+  loading?: boolean;
 }
 
 /**
@@ -24,15 +26,23 @@ export default class extends React.Component<VisualizationProps, {}> {
   render() {
     let { title, tooltip, stale, warning, warningTitle } = this.props;
     let vizClasses = classNames({
-      "visualization-wrapper": true,
-      "viz-faded": stale || false,
+      "visualization": true,
+      "visualization--faded": stale || false,
     });
 
     let icon = (stale || warning || warningTitle) ? "warning" : "info";
 
     return <div className={vizClasses}>
-      <div className="viz-top">
-        <div className="viz-info-icon">
+      <div className="visualization__header">
+        <div className="visualization__title">
+          {this.props.title}
+        </div>
+        {
+          this.props.subtitle ?
+            <div className="visualization__subtitle">{this.props.subtitle}</div>
+            : null
+        }
+        <div className="visualization__info-icon">
           {
             // Display an icon if there is either a tooltip or if data is stale.
             (tooltip || stale) ? <div className={`icon-${icon}`} /> : ""
@@ -43,12 +53,8 @@ export default class extends React.Component<VisualizationProps, {}> {
           (tooltip) ? <ToolTip text={tooltip} title={title} warning={warning} warningTitle={warningTitle} /> : ""
         }
       </div>
-        { this.props.children }
-      <div className="viz-bottom">
-        <div className="viz-title">
-          <div>{this.props.title}</div>
-          { this.props.subtitle ? <div className="small">{this.props.subtitle}</div> : null }
-        </div>
+      <div className={"visualization__content" + (this.props.loading ? " visualization--loading" : "")}>
+        {this.props.loading ? <img className="visualization__spinner" src="assets/spinner.gif" /> :  this.props.children }
       </div>
     </div>;
   }

@@ -60,7 +60,7 @@ func TestIndexedVars(t *testing.T) {
 	c[0] = NewDInt(3)
 	c[1] = NewDInt(5)
 	c[2] = NewDInt(6)
-	typedExpr, err := expr.TypeCheck(nil, nil)
+	typedExpr, err := expr.TypeCheck(nil, TypeAny)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,8 +71,25 @@ func TestIndexedVars(t *testing.T) {
 		t.Errorf("invalid expression string '%s', expected '%s'", str, expectedStr)
 	}
 
+	// Test formatting using the indexed var format interceptor.
+	var buf bytes.Buffer
+	typedExpr.Format(
+		&buf,
+		FmtIndexedVarFormat(
+			FmtSimple,
+			func(buf *bytes.Buffer, _ FmtFlags, _ IndexedVarContainer, idx int) {
+				fmt.Fprintf(buf, "customVar%d", idx)
+			},
+		),
+	)
+	str = buf.String()
+	expectedStr = "customVar0 + (customVar1 * customVar2)"
+	if str != expectedStr {
+		t.Errorf("invalid expression string '%s', expected '%s'", str, expectedStr)
+	}
+
 	typ := typedExpr.ResolvedType()
-	if !typ.Equal(TypeInt) {
+	if !typ.Equivalent(TypeInt) {
 		t.Errorf("invalid expression type %s", typ)
 	}
 	d, err := typedExpr.Eval(&EvalContext{})

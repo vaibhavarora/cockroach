@@ -21,6 +21,10 @@ import (
 	"os/signal"
 	"testing"
 	"time"
+
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+
+	"golang.org/x/net/context"
 )
 
 // TestBuildBabyCluster resizes the cluster to one node. It does not tear down
@@ -28,12 +32,17 @@ import (
 // the `terrafarm` package.
 func TestBuildBabyCluster(t *testing.T) {
 	t.Skip("only enabled during testing")
-	f := farmer(t, "baby")
+
+	s := log.Scope(t, "")
+	defer s.Close(t)
+
+	ctx := context.Background()
+	f := MakeFarmer(t, "baby", stopper)
 	defer f.CollectLogs()
 	if err := f.Resize(1); err != nil {
 		t.Fatal(err)
 	}
-	f.Assert(t)
+	f.Assert(ctx, t)
 }
 
 // TestFiveNodesAndWriters runs a cluster and one writer per node.
@@ -47,13 +56,17 @@ func TestBuildBabyCluster(t *testing.T) {
 //	 TESTS=FiveNodesAndWriters \
 //	 TESTFLAGS='-v -remote -key-name google_compute_engine -cwd terraform'
 func TestFiveNodesAndWriters(t *testing.T) {
+	s := log.Scope(t, "")
+	defer s.Close(t)
+
+	ctx := context.Background()
 	deadline := time.After(*flagDuration)
-	f := farmer(t, "write-5n5w")
+	f := MakeFarmer(t, "write-5n5w", stopper)
 	defer f.MustDestroy(t)
 	assertClusterUp := func() {
-		f.Assert(t)
-		for _, host := range f.Nodes() {
-			f.AssertState(t, host, "block_writer", "RUNNING")
+		f.Assert(ctx, t)
+		for i := 0; i < f.NumNodes(); i++ {
+			f.AssertState(ctx, t, f.Hostname(i), "block_writer", "RUNNING")
 		}
 	}
 
@@ -62,7 +75,7 @@ func TestFiveNodesAndWriters(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < size; i++ {
-		if err := f.Start(i, "block_writer"); err != nil {
+		if err := f.Start(ctx, i, "block_writer"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -70,7 +83,7 @@ func TestFiveNodesAndWriters(t *testing.T) {
 	if err := f.WaitReady(3 * time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	checkGossip(t, f, longWaitTime, hasPeers(size))
+	CheckGossip(ctx, t, f, longWaitTime, HasPeers(size))
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
@@ -84,5 +97,12 @@ func TestFiveNodesAndWriters(t *testing.T) {
 		case <-time.After(time.Minute):
 			assertClusterUp()
 		}
+	}
+}
+
+func TestRandomNameMeetsTerraformRules(t *testing.T) {
+	prefix := "testprefix-" + getRandomName()
+	if !prefixRE.MatchString(prefix) {
+		t.Fatalf("generated prefix '%s' doesn't match Terraform-enforced regex %s", prefix, prefixRE)
 	}
 }

@@ -31,8 +31,6 @@ import (
 )
 
 const (
-	// splitQueueMaxSize is the max size of the split queue.
-	splitQueueMaxSize = 100
 	// splitQueueTimerDuration is the duration between splits of queued ranges.
 	splitQueueTimerDuration = 0 // zero duration to process splits greedily.
 )
@@ -52,7 +50,7 @@ func newSplitQueue(store *Store, db *client.DB, gossip *gossip.Gossip) *splitQue
 	sq.baseQueue = newBaseQueue(
 		"split", sq, store, gossip,
 		queueConfig{
-			maxSize:              splitQueueMaxSize,
+			maxSize:              defaultQueueMaxSize,
 			needsLease:           true,
 			acceptsUnsplitRanges: true,
 			successes:            store.metrics.SplitQueueSuccesses,
@@ -68,9 +66,9 @@ func newSplitQueue(store *Store, db *client.DB, gossip *gossip.Gossip) *splitQue
 // splitting. This is true if the range is intersected by a zone config
 // prefix or if the range's size in bytes exceeds the limit for the zone.
 func (sq *splitQueue) shouldQueue(
-	ctx context.Context, now hlc.Timestamp, rng *Replica, sysCfg config.SystemConfig,
+	ctx context.Context, now hlc.Timestamp, repl *Replica, sysCfg config.SystemConfig,
 ) (shouldQ bool, priority float64) {
-	desc := rng.Desc()
+	desc := repl.Desc()
 	if len(sysCfg.ComputeSplitKeys(desc.StartKey, desc.EndKey)) > 0 {
 		// Set priority to 1 in the event the range is split by zone configs.
 		priority = 1
@@ -85,7 +83,7 @@ func (sq *splitQueue) shouldQueue(
 		return
 	}
 
-	if ratio := float64(rng.GetMVCCStats().Total()) / float64(zone.RangeMaxBytes); ratio > 1 {
+	if ratio := float64(repl.GetMVCCStats().Total()) / float64(zone.RangeMaxBytes); ratio > 1 {
 		priority += ratio
 		shouldQ = true
 	}
@@ -93,17 +91,21 @@ func (sq *splitQueue) shouldQueue(
 }
 
 // process synchronously invokes admin split for each proposed split key.
-func (sq *splitQueue) process(
-	ctx context.Context, now hlc.Timestamp, r *Replica, sysCfg config.SystemConfig,
-) error {
+func (sq *splitQueue) process(ctx context.Context, r *Replica, sysCfg config.SystemConfig) error {
 	// First handle case of splitting due to zone config maps.
 	desc := r.Desc()
 	splitKeys := sysCfg.ComputeSplitKeys(desc.StartKey, desc.EndKey)
 	if len(splitKeys) > 0 {
 		log.Infof(ctx, "splitting at keys %v", splitKeys)
 		for _, splitKey := range splitKeys {
-			if err := sq.db.AdminSplit(ctx, splitKey.AsRawKey()); err != nil {
-				return errors.Errorf("unable to split %s at key %q: %s", r, splitKey, err)
+			if _, pErr := r.adminSplitWithDescriptor(
+				ctx,
+				roachpb.AdminSplitRequest{
+					SplitKey: splitKey.AsRawKey(),
+				},
+				desc,
+			); pErr != nil {
+				return errors.Wrapf(pErr.GoError(), "unable to split %s at key %q", r, splitKey)
 			}
 		}
 		return nil
@@ -115,14 +117,13 @@ func (sq *splitQueue) process(
 		return err
 	}
 	size := r.GetMVCCStats().Total()
-	// FIXME: why is this implementation not the same as the one above?
 	if float64(size)/float64(zone.RangeMaxBytes) > 1 {
 		log.Infof(ctx, "splitting size=%d max=%d", size, zone.RangeMaxBytes)
-		if _, pErr := client.SendWrappedWith(ctx, r, roachpb.Header{
-			Timestamp: now,
-		}, &roachpb.AdminSplitRequest{
-			Span: roachpb.Span{Key: desc.StartKey.AsRawKey()},
-		}); pErr != nil {
+		if _, pErr := r.adminSplitWithDescriptor(
+			ctx,
+			roachpb.AdminSplitRequest{},
+			desc,
+		); pErr != nil {
 			return pErr.GoError()
 		}
 	}
@@ -130,7 +131,7 @@ func (sq *splitQueue) process(
 }
 
 // timer returns interval between processing successive queued splits.
-func (*splitQueue) timer() time.Duration {
+func (*splitQueue) timer(_ time.Duration) time.Duration {
 	return splitQueueTimerDuration
 }
 

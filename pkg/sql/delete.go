@@ -17,7 +17,6 @@
 package sql
 
 import (
-	"bytes"
 	"fmt"
 
 	"golang.org/x/net/context"
@@ -103,12 +102,8 @@ func (p *planner) Delete(
 	return dn, nil
 }
 
-func (d *deleteNode) expandPlan() error {
-	return d.run.expandEditNodePlan(&d.editNodeBase, &d.tw)
-}
-
 func (d *deleteNode) Start() error {
-	if err := d.run.startEditNode(); err != nil {
+	if err := d.run.startEditNode(&d.editNodeBase, &d.tw); err != nil {
 		return err
 	}
 
@@ -120,16 +115,18 @@ func (d *deleteNode) Start() error {
 		//
 		// (When explain == explainDebug, we use the slow path so that
 		// each debugVal gets a chance to be reported via Next().)
-		sel := d.run.rows.(*selectTopNode).source.(*selectNode)
-		if scan, ok := sel.source.plan.(*scanNode); ok && canDeleteWithoutScan(d.n, scan, &d.tw) {
+		maybeScanNode := d.run.rows
+		if topSel, ok := maybeScanNode.(*selectTopNode); ok {
+			maybeScanNode = topSel.source
+		}
+		if sel, ok := maybeScanNode.(*renderNode); ok {
+			maybeScanNode = sel.source.plan
+		}
+		if scan, ok := maybeScanNode.(*scanNode); ok && canDeleteWithoutScan(d.n, scan, &d.tw) {
 			d.run.fastPath = true
 			err := d.fastDelete(scan)
 			return err
 		}
-	}
-
-	if err := d.rh.startPlans(); err != nil {
-		return err
 	}
 
 	return d.run.tw.init(d.p.txn)
@@ -239,36 +236,6 @@ func (d *deleteNode) DebugValues() debugValues {
 	return d.run.rows.DebugValues()
 }
 
-func (d *deleteNode) Ordering() orderingInfo {
-	return d.run.rows.Ordering()
-}
-
-func (d *deleteNode) ExplainPlan(v bool) (name, description string, children []planNode) {
-	var buf bytes.Buffer
-	if v {
-		fmt.Fprintf(&buf, "from %s returning (", d.tableDesc.Name)
-		for i, col := range d.rh.columns {
-			if i > 0 {
-				fmt.Fprintf(&buf, ", ")
-			}
-			fmt.Fprintf(&buf, "%s", col.Name)
-		}
-		fmt.Fprintf(&buf, ")")
-	}
-
-	subplans := []planNode{d.run.rows}
-	for _, e := range d.rh.exprs {
-		subplans = d.p.collectSubqueryPlans(e, subplans)
-	}
-
-	return "delete", buf.String(), subplans
-}
-
-func (d *deleteNode) ExplainTypes(regTypes func(string, string)) {
-	cols := d.rh.columns
-	for i, rexpr := range d.rh.exprs {
-		regTypes(fmt.Sprintf("returning %s", cols[i].Name), parser.AsStringWithFlags(rexpr, parser.FmtShowTypes))
-	}
-}
+func (d *deleteNode) Ordering() orderingInfo { return orderingInfo{} }
 
 func (d *deleteNode) SetLimitHint(numRows int64, soft bool) {}

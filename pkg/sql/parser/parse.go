@@ -74,10 +74,6 @@ func (p *Parser) Parse(sql string, syntax Syntax) (stmts StatementList, err erro
 	return p.scanner.stmts, nil
 }
 
-// NoTypePreference can be provided to TypeCheck's desired type parameter to indicate that
-// the caller of the function has no preference on the type of the resulting TypedExpr.
-var NoTypePreference = Type(nil)
-
 // TypeCheck performs type checking on the provided expression tree, returning
 // the new typed expression tree, which additionally permits evaluation and type
 // introspection globally and on each sub-tree.
@@ -85,8 +81,13 @@ var NoTypePreference = Type(nil)
 // While doing so, it will fold numeric constants and bind placeholder names to
 // their inferred types in the provided context. The optional desired parameter can
 // be used to hint the desired type for the root of the resulting typed expression
-// tree.
+// tree. Like with Expr.TypeCheck, it is not valid to provide a nil desired
+// type. Instead, call it with the wildcard type TypeAny if no specific type is
+// desired.
 func TypeCheck(expr Expr, ctx *SemaContext, desired Type) (TypedExpr, error) {
+	if desired == nil {
+		panic("the desired type for parser.TypeCheck cannot be nil, use TypeAny instead")
+	}
 	expr, err := foldConstantLiterals(expr)
 	if err != nil {
 		return nil, err
@@ -103,7 +104,7 @@ func TypeCheckAndRequire(expr Expr, ctx *SemaContext, required Type, op string) 
 	if err != nil {
 		return nil, err
 	}
-	if typ := typedExpr.ResolvedType(); !(typ.Equal(required) || typ == TypeNull) {
+	if typ := typedExpr.ResolvedType(); !(typ.Equivalent(required) || typ == TypeNull) {
 		return typedExpr, fmt.Errorf("argument of %s must be type %s, not type %s", op, required, typ)
 	}
 	return typedExpr, nil
@@ -177,7 +178,7 @@ func parseExprs(exprs []string, syntax Syntax) (Exprs, error) {
 	return set.Values, nil
 }
 
-// ParseExprsTraditional is a short-hand for parseExprs(Traditional, sql)
+// ParseExprsTraditional is a short-hand for parseExprs(sql, Traditional)
 func ParseExprsTraditional(sql []string) (Exprs, error) {
 	if len(sql) == 0 {
 		return Exprs{}, nil
@@ -185,7 +186,7 @@ func ParseExprsTraditional(sql []string) (Exprs, error) {
 	return parseExprs(sql, Traditional)
 }
 
-// ParseExprTraditional is a short-hand for parseExprs(Traditional, []string{sql})
+// ParseExprTraditional is a short-hand for parseExprs([]string{sql}, Traditional)
 func ParseExprTraditional(sql string) (Expr, error) {
 	exprs, err := parseExprs([]string{sql}, Traditional)
 	if err != nil {

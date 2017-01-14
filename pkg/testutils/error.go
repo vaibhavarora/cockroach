@@ -20,15 +20,18 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
-	"runtime"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/util/caller"
 )
 
-// IsError returns true if err is non-nil and the error string matches the
-// supplied regexp.
+// IsError returns true if the error string matches the supplied regex.
+// An empty regex is interpreted to mean that a nil error is expected.
 func IsError(err error, re string) bool {
-	if err == nil {
+	if err == nil && re == "" {
+		return true
+	}
+	if err == nil || re == "" {
 		return false
 	}
 	matched, merr := regexp.MatchString(re, err.Error())
@@ -38,10 +41,13 @@ func IsError(err error, re string) bool {
 	return matched
 }
 
-// IsPError returns true if pErr is non-nil and the error message matches the
-// supplied regexp.
+// IsPError returns true if pErr's message matches the supplied regex.
+// An empty regex is interpreted to mean that a nil error is expected.
 func IsPError(pErr *roachpb.Error, re string) bool {
-	if pErr == nil {
+	if pErr == nil && re == "" {
+		return true
+	}
+	if pErr == nil || re == "" {
 		return false
 	}
 	matched, merr := regexp.MatchString(re, pErr.Message)
@@ -51,11 +57,15 @@ func IsPError(pErr *roachpb.Error, re string) bool {
 	return matched
 }
 
-// IsSQLRetryError returns true if err is retryable. This is true for errors
-// that show a connection issue or an issue with the node itself. This can
-// occur when a node is restarting or is unstable in some other way.
-func IsSQLRetryError(err error) bool {
-	return IsError(err, "(connection reset by peer|connection refused|failed to send RPC|EOF)")
+// IsSQLRetryableError returns true if err is retryable. This is true
+// for errors that show a connection issue or an issue with the node
+// itself. This can occur when a node is restarting or is unstable in
+// some other way. Note that retryable errors may occur event in cases
+// where the SQL execution ran to completion.
+func IsSQLRetryableError(err error) bool {
+	// Don't forget to update the corresponding test when making adjustments
+	// here.
+	return IsError(err, "(connection reset by peer|connection refused|failed to send RPC|EOF|result is ambiguous)")
 }
 
 // Caller returns filename and line number info for the specified stack
@@ -65,7 +75,7 @@ func Caller(depth ...int) string {
 	var sep string
 	var buf bytes.Buffer
 	for _, d := range depth {
-		_, file, line, _ := runtime.Caller(d + 1)
+		file, line, _ := caller.Lookup(d + 1)
 		fmt.Fprintf(&buf, "%s%s:%d", sep, file, line)
 		sep = " "
 	}

@@ -132,6 +132,25 @@ type Request interface {
 	flags() int
 }
 
+// leaseRequestor is implemented by requests dealing with leases.
+// Implementors return the previous lease at the time the request
+// was proposed.
+type leaseRequestor interface {
+	prevLease() *Lease
+}
+
+var _ leaseRequestor = &RequestLeaseRequest{}
+
+func (rlr *RequestLeaseRequest) prevLease() *Lease {
+	return rlr.PrevLease
+}
+
+var _ leaseRequestor = &TransferLeaseRequest{}
+
+func (tlr *TransferLeaseRequest) prevLease() *Lease {
+	return tlr.PrevLease
+}
+
 // Response is an interface for RPC responses.
 type Response interface {
 	proto.Message
@@ -162,6 +181,7 @@ func (rh *ResponseHeader) combine(otherRH ResponseHeader) error {
 	}
 	rh.ResumeSpan = otherRH.ResumeSpan
 	rh.NumKeys += otherRH.NumKeys
+	rh.RangeInfos = append(rh.RangeInfos, otherRH.RangeInfos...)
 	return nil
 }
 
@@ -266,10 +286,10 @@ func (rh *Span) SetHeader(other Span) {
 }
 
 // Header implements the Request interface.
-func (*NoopRequest) Header() Span { return Span{} }
+func (*NoopRequest) Header() Span { panic("NoopRequest has no span") }
 
 // SetHeader implements the Request interface.
-func (*NoopRequest) SetHeader(_ Span) {}
+func (*NoopRequest) SetHeader(_ Span) { panic("NoopRequest has no span") }
 
 // SetHeader implements the Response interface.
 func (rh *ResponseHeader) SetHeader(other ResponseHeader) {
@@ -445,7 +465,7 @@ func (*LeaseInfoRequest) Method() Method { return LeaseInfo }
 func (*ComputeChecksumRequest) Method() Method { return ComputeChecksum }
 
 // Method implements the Request interface.
-func (*DeprecatedVerifyChecksumRequest) Method() Method { return Noop }
+func (*DeprecatedVerifyChecksumRequest) Method() Method { return DeprecatedVerifyChecksum }
 
 // ShallowCopy implements the Request interface.
 func (gr *GetRequest) ShallowCopy() Request {
@@ -598,14 +618,14 @@ func (tlr *TruncateLogRequest) ShallowCopy() Request {
 }
 
 // ShallowCopy implements the Request interface.
-func (llr *RequestLeaseRequest) ShallowCopy() Request {
-	shallowCopy := *llr
+func (rlr *RequestLeaseRequest) ShallowCopy() Request {
+	shallowCopy := *rlr
 	return &shallowCopy
 }
 
 // ShallowCopy implements the Request interface.
-func (lt *TransferLeaseRequest) ShallowCopy() Request {
-	shallowCopy := *lt
+func (tlr *TransferLeaseRequest) ShallowCopy() Request {
+	shallowCopy := *tlr
 	return &shallowCopy
 }
 
@@ -770,13 +790,32 @@ func NewReverseScan(key, endKey Key) Request {
 	}
 }
 
-func (*GetRequest) flags() int                { return isRead | isTxn }
-func (*PutRequest) flags() int                { return isWrite | isTxn | isTxnWrite }
-func (*ConditionalPutRequest) flags() int     { return isRead | isWrite | isTxn | isTxnWrite }
-func (*InitPutRequest) flags() int            { return isRead | isWrite | isTxn | isTxnWrite }
-func (*IncrementRequest) flags() int          { return isRead | isWrite | isTxn | isTxnWrite }
-func (*DeleteRequest) flags() int             { return isWrite | isTxn | isTxnWrite }
-func (*DeleteRangeRequest) flags() int        { return isWrite | isTxn | isTxnWrite | isRange }
+func (*GetRequest) flags() int            { return isRead | isTxn }
+func (*PutRequest) flags() int            { return isWrite | isTxn | isTxnWrite }
+func (*ConditionalPutRequest) flags() int { return isRead | isWrite | isTxn | isTxnWrite }
+func (*InitPutRequest) flags() int        { return isRead | isWrite | isTxn | isTxnWrite }
+func (*IncrementRequest) flags() int      { return isRead | isWrite | isTxn | isTxnWrite }
+func (*DeleteRequest) flags() int         { return isWrite | isTxn | isTxnWrite }
+func (drr *DeleteRangeRequest) flags() int {
+	// DeleteRangeRequest has different properties if the "inline" flag is set.
+	// This flag indicates that the request is deleting inline MVCC values,
+	// which cannot be deleted transactionally - inline DeleteRange will thus
+	// fail if executed as part of a transaction. This alternate flag set
+	// is needed to prevent the command from being automatically wrapped into a
+	// transaction by TxnCoordSender, which can occur if the command spans
+	// multiple ranges.
+	//
+	// TODO(mrtracy): The behavior of DeleteRangeRequest with "inline" set has
+	// likely diverged enough that it should be promoted into its own command.
+	// However, it is complicated to plumb a new command through the system,
+	// while this special case in flags() fixes all current issues succinctly.
+	// This workaround does not preclude us from creating a separate
+	// "DeleteInlineRange" command at a later date.
+	if drr.Inline {
+		return isWrite | isRange | isAlone
+	}
+	return isWrite | isTxn | isTxnWrite | isRange
+}
 func (*ScanRequest) flags() int               { return isRead | isRange | isTxn }
 func (*ReverseScanRequest) flags() int        { return isRead | isRange | isReverse | isTxn }
 func (*BeginTransactionRequest) flags() int   { return isWrite | isTxn }
@@ -806,14 +845,15 @@ func (*RequestLeaseRequest) flags() int {
 // effect of the `skipLeaseCheck` flag that lease write operations have.
 func (*LeaseInfoRequest) flags() int { return isRead | isNonKV | isAlone }
 func (*TransferLeaseRequest) flags() int {
+	// TODO(andrei): update this comment.
 	// TransferLeaseRequest requires the lease, which is checked in
 	// `AdminTransferLease()` at proposal time and in the usual way for write
 	// commands at apply time.
 	// But it can't be checked at propose time through the
 	// `redirectOnOrAcquireLease` call because, by the time that call is made, the
 	// replica has registered that a transfer is in progress and
-	// `redirectOrAcquire` already tentatively redirects to the future lease
-	// holder.
+	// `redirectOnOrAcquireLease` already tentatively redirects to the
+	// future lease holder.
 	return isWrite | isAlone | isNonKV | skipLeaseCheck
 }
 func (*ComputeChecksumRequest) flags() int          { return isWrite | isNonKV | isRange }

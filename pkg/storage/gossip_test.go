@@ -17,18 +17,22 @@
 package storage_test
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 )
 
 func TestGossipFirstRange(t *testing.T) {
@@ -61,13 +65,13 @@ func TestGossipFirstRange(t *testing.T) {
 	// Wait for the specified descriptor to be gossiped for the first range. We
 	// loop because the timing of replica addition and lease transfer can cause
 	// extra gossiping of the first range.
-	waitForGossip := func(desc *roachpb.RangeDescriptor) {
+	waitForGossip := func(desc roachpb.RangeDescriptor) {
 		for {
 			select {
 			case err := <-errors:
 				t.Fatal(err)
 			case gossiped := <-descs:
-				if reflect.DeepEqual(desc, gossiped) {
+				if reflect.DeepEqual(&desc, gossiped) {
 					return
 				}
 				log.Infof(context.TODO(), "expected\n%+v\nbut found\n%+v", desc, gossiped)
@@ -84,7 +88,7 @@ func TestGossipFirstRange(t *testing.T) {
 
 	// Add two replicas. The first range descriptor should be gossiped after each
 	// addition.
-	var desc *roachpb.RangeDescriptor
+	var desc roachpb.RangeDescriptor
 	firstRangeKey := keys.MinKey
 	for i := 1; i <= 2; i++ {
 		var err error
@@ -125,4 +129,58 @@ func TestGossipFirstRange(t *testing.T) {
 	// 		t.Fatalf("expected\n%+v\nbut found\n%+v", desc, gossiped)
 	// 	}
 	// }
+}
+
+// TestGossipHandlesReplacedNode tests that we can shut down a node and
+// replace it with a new node at the same address (simulating a node getting
+// restarted after losing its data) without the cluster breaking.
+func TestGossipHandlesReplacedNode(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+
+	// Shorten the raft tick interval and election timeout to make range leases
+	// much shorter than normal. This keeps us from having to wait so long for
+	// the replaced node's leases to time out, but has still shown itself to be
+	// long enough to avoid flakes.
+	serverArgs := base.TestServerArgs{
+		RaftTickInterval:         50 * time.Millisecond,
+		RaftElectionTimeoutTicks: 10,
+		RetryOptions: retry.Options{
+			InitialBackoff: 10 * time.Millisecond,
+			MaxBackoff:     50 * time.Millisecond,
+		},
+	}
+
+	tc := testcluster.StartTestCluster(t, 3,
+		base.TestClusterArgs{
+			ReplicationMode: base.ReplicationAuto,
+			ServerArgs:      serverArgs,
+		})
+	defer tc.Stopper().Stop()
+
+	// Take down a node other than the first node and replace it with a new one.
+	// Replacing the first node would be better from an adversarial testing
+	// perspective because it typically has the most leases on it, but that also
+	// causes the test to take significantly longer as a result.
+	oldNodeIdx := 0
+	newServerArgs := serverArgs
+	newServerArgs.Addr = tc.Servers[oldNodeIdx].ServingAddr()
+	newServerArgs.PartOfCluster = true
+	newServerArgs.JoinAddr = tc.Servers[1].ServingAddr()
+	tc.StopServer(oldNodeIdx)
+	tc.AddServer(t, newServerArgs)
+	tc.WaitForStores(t, tc.Server(1).Gossip())
+
+	// Ensure that all servers still running are responsive. If the two remaining
+	// original nodes don't refresh their connection to the address of the first
+	// node, they can get stuck here.
+	for i, server := range tc.Servers {
+		if i == oldNodeIdx {
+			continue
+		}
+		kvClient := server.KVClient().(*client.DB)
+		if err := kvClient.Put(ctx, fmt.Sprintf("%d", i), i); err != nil {
+			t.Errorf("failed Put to node %d: %s", i, err)
+		}
+	}
 }
