@@ -10,8 +10,8 @@ import (
 )
 
 func main() {
-	dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	//dbURL := "postgresql://root@pacific:26257/bank2?sslmode=disable"
+	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
+	dbURL := "postgresql://root@pacific:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 
 	parsedURL, err := url.Parse(dbURL)

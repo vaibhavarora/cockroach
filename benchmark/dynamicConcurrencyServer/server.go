@@ -25,7 +25,8 @@ type data struct {
 type Listener int
 
 var maxconcurrency = flag.Int("max", 200, "Maximum concurrency level to test.")
-var concurrencystep = flag.Int("step", 2, "Incremental for concurrency")
+var concurrencystep = flag.Int("step", 5, "Incremental for concurrency")
+var startconcurrency = flag.Int("start", 1, "start of concurrency")
 
 var stats = make(map[int]data)
 var optimalConcurrency = 1
@@ -45,7 +46,7 @@ func (l *Listener) CollectStats(info *shared.Data, ack *bool) error {
 
 func callbenchmark() {
 
-	concurrency := 1
+	concurrency := *startconcurrency
 	// everything is set to its default values as in main program
 	maxTransfer := 100
 	numTransfers := 50000
