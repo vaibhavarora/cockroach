@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/cockroachdb/cockroach/benchmark/dynamicConcurrencyServer/shared"
+	"github.com/cockroachdb/cockroach/benchmark/concurrency/shared"
 	"log"
 	"net/rpc"
 )

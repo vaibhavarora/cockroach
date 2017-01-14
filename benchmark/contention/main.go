@@ -21,7 +21,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"github.com/cockroachdb/cockroach/benchmark/dynamicConcurrencyServer/shared"
+	"github.com/cockroachdb/cockroach/benchmark/concurrency/shared"
 	"log"
 	"math/rand"
 	"net/rpc"
@@ -31,7 +31,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
 	// Import postgres driver.
 	"github.com/cockroachdb/cockroach-go/crdb"
 	_ "github.com/lib/pq"

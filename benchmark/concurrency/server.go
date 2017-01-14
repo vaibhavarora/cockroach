@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"github.com/cockroachdb/cockroach/benchmark/dynamicConcurrencyServer/shared"
+	"github.com/cockroachdb/cockroach/benchmark/concurrency/shared"
 	"log"
 	"net"
 	"net/rpc"
@@ -61,7 +61,7 @@ func callbenchmark() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	binary := strings.TrimSpace(string(path)) + "/benchmark"
+	binary := strings.TrimSpace(string(path)) + "/contention/contention"
 
 	for concurrency <= *maxconcurrency {
 
