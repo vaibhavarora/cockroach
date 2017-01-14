@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/pkg/errors"
@@ -67,7 +68,7 @@ import (
 // is implemented as follows:
 //
 // - dataSourceInfo provides column metadata for exactly one data source;
-// - multiSourceInfo is an array of one ore more dataSourceInfo
+// - multiSourceInfo is an array of one or more dataSourceInfo
 // - the index in IndexedVars points to one of the columns in the
 //   logical concatenation of all items in the multiSourceInfo;
 // - IndexedVarResolver (select_name_resolution.go) is tasked with
@@ -143,9 +144,80 @@ type planDataSource struct {
 // table names to column ranges.
 type columnRange []int
 
-// sourceAliases associates a table name (alias) to a set of columns
-// in the result row of a data source.
-type sourceAliases map[parser.TableName]columnRange
+// sourceAlias associates a table name (alias) to a set of columns in the result
+// row of a data source.
+type sourceAlias struct {
+	name        parser.TableName
+	columnRange columnRange
+}
+
+func (src *dataSourceInfo) String() string {
+	var buf bytes.Buffer
+	for i := range src.sourceColumns {
+		if i > 0 {
+			buf.WriteByte('\t')
+		}
+		fmt.Fprintf(&buf, "%d", i)
+	}
+	buf.WriteString("\toutput column positions\n")
+	for i, c := range src.sourceColumns {
+		if i > 0 {
+			buf.WriteByte('\t')
+		}
+		if c.hidden {
+			buf.WriteByte('*')
+		}
+		buf.WriteString(c.Name)
+	}
+	buf.WriteString("\toutput column names\n")
+	for _, a := range src.sourceAliases {
+		for i := range src.sourceColumns {
+			if i > 0 {
+				buf.WriteByte('\t')
+			}
+			for _, j := range a.columnRange {
+				if i == j {
+					buf.WriteString("x")
+					break
+				}
+			}
+		}
+		if a.name == anonymousTable {
+			buf.WriteString("\t<anonymous table>")
+		} else {
+			fmt.Fprintf(&buf, "\t'%s'", a.name.String())
+		}
+		fmt.Fprintf(&buf, " - %q\n", a.columnRange)
+	}
+	return buf.String()
+}
+
+type sourceAliases []sourceAlias
+
+// srcIdx looks up a source by qualified name and returns the index of the
+// source (and whether we found one).
+func (s sourceAliases) srcIdx(name parser.TableName) (srcIdx int, found bool) {
+	for i := range s {
+		if s[i].name.DatabaseName == name.DatabaseName && s[i].name.TableName == name.TableName {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+// columnRange looks up a source by name and returns the column range (and
+// whether we found the name).
+func (s sourceAliases) columnRange(name parser.TableName) (colRange columnRange, found bool) {
+	idx, ok := s.srcIdx(name)
+	if !ok {
+		return nil, false
+	}
+	return s[idx].columnRange, true
+}
+
+// anonymousTable is the empty table name, used when a data source
+// has no own name, e.g. VALUES, subqueries or the empty source.
+var anonymousTable = parser.TableName{}
 
 // fillColumnRange creates a single range that refers to all the
 // columns between firstIdx and lastIdx, inclusive.
@@ -160,10 +232,10 @@ func fillColumnRange(firstIdx, lastIdx int) columnRange {
 // newSourceInfoForSingleTable creates a simple dataSourceInfo
 // which maps the same tableAlias to all columns.
 func newSourceInfoForSingleTable(tn parser.TableName, columns ResultColumns) *dataSourceInfo {
-	norm := sqlbase.NormalizeTableName(tn)
+	norm := tn.NormalizedTableName()
 	return &dataSourceInfo{
 		sourceColumns: columns,
-		sourceAliases: sourceAliases{norm: fillColumnRange(0, len(columns)-1)},
+		sourceAliases: sourceAliases{{name: norm, columnRange: fillColumnRange(0, len(columns)-1)}},
 	}
 }
 
@@ -175,7 +247,7 @@ func (p *planner) getSources(
 	case 0:
 		plan := &emptyNode{results: true}
 		return planDataSource{
-			info: newSourceInfoForSingleTable(parser.TableName{}, plan.Columns()),
+			info: newSourceInfoForSingleTable(anonymousTable, plan.Columns()),
 			plan: plan,
 		}, nil
 
@@ -198,7 +270,7 @@ func (p *planner) getSources(
 // getVirtualDataSource attempts to find a virtual table with the
 // given name.
 func (p *planner) getVirtualDataSource(tn *parser.TableName) (planDataSource, bool, error) {
-	virtual, err := p.virtualSchemas().getVirtualTableEntry(tn)
+	virtual, err := p.session.virtualSchemas.getVirtualTableEntry(tn)
 	if err != nil {
 		return planDataSource{}, false, err
 	}
@@ -211,7 +283,6 @@ func (p *planner) getVirtualDataSource(tn *parser.TableName) (planDataSource, bo
 		return planDataSource{
 			info: newSourceInfoForSingleTable(sourceName, columns),
 			plan: &delayedNode{
-				p:           p,
 				name:        sourceName.String(),
 				columns:     columns,
 				constructor: constructor,
@@ -244,6 +315,9 @@ func (p *planner) getDataSource(
 		}
 		return p.getTableScanOrViewPlan(tn, hints, scanVisibility)
 
+	case *parser.FuncExpr:
+		return p.getGeneratorPlan(t)
+
 	case *parser.Subquery:
 		return p.getSubqueryPlan(t.Select, nil)
 
@@ -259,6 +333,16 @@ func (p *planner) getDataSource(
 		}
 		return p.makeJoin(t.Join, left, right, t.Cond)
 
+	case *parser.Explain:
+		plan, err := p.Explain(t, false)
+		if err != nil {
+			return planDataSource{}, err
+		}
+		return planDataSource{
+			info: newSourceInfoForSingleTable(anonymousTable, plan.Columns()),
+			plan: plan,
+		}, nil
+
 	case *parser.ParenTableExpr:
 		return p.getDataSource(t.Expr, hints, scanVisibility)
 
@@ -269,13 +353,22 @@ func (p *planner) getDataSource(
 			return src, err
 		}
 
+		if t.Ordinality {
+			// The WITH ORDINALITY clause numbers the rows coming out of the
+			// data source. See the comments next to the definition of
+			// `ordinalityNode` in particular how this restricts
+			// optimizations.
+			src = p.wrapOrdinality(src)
+		}
+
 		var tableAlias parser.TableName
 		if t.As.Alias != "" {
 			// If an alias was specified, use that.
-			tableAlias.TableName = parser.Name(sqlbase.NormalizeName(t.As.Alias))
-			src.info.sourceAliases = sourceAliases{
-				tableAlias: fillColumnRange(0, len(src.info.sourceColumns)-1),
-			}
+			tableAlias.TableName = parser.Name(t.As.Alias.Normalize())
+			src.info.sourceAliases = sourceAliases{{
+				name:        tableAlias,
+				columnRange: fillColumnRange(0, len(src.info.sourceColumns)-1),
+			}}
 		}
 		colAlias := t.As.Cols
 
@@ -382,6 +475,20 @@ func (p *planner) getViewPlan(
 		return planDataSource{},
 			errors.Errorf("failed to parse underlying query from view %q as a select", tn)
 	}
+
+	// When constructing the subquery plan, we don't want to check for the SELECT
+	// privilege on the underlying tables, just on the view itself. Checking on
+	// the underlying tables as well would defeat the purpose of having separate
+	// SELECT privileges on the view, which is intended to allow for exposing
+	// some subset of a restricted table's data to less privileged users.
+	if !p.skipSelectPrivilegeChecks {
+		if err := p.checkPrivilege(desc, privilege.SELECT); err != nil {
+			return planDataSource{}, err
+		}
+		p.skipSelectPrivilegeChecks = true
+		defer func() { p.skipSelectPrivilegeChecks = false }()
+	}
+
 	// TODO(a-robinson): Support ORDER BY and LIMIT in views. Is it as simple as
 	// just passing the entire select here or will inserting an ORDER BY in the
 	// middle of a query plan break things?
@@ -406,7 +513,19 @@ func (p *planner) getSubqueryPlan(
 		cols = plan.Columns()
 	}
 	return planDataSource{
-		info: newSourceInfoForSingleTable(parser.TableName{}, cols),
+		info: newSourceInfoForSingleTable(anonymousTable, cols),
+		plan: plan,
+	}, nil
+}
+
+func (p *planner) getGeneratorPlan(t *parser.FuncExpr) (planDataSource, error) {
+	plan, name, err := p.makeGenerator(t)
+	if err != nil {
+		return planDataSource{}, err
+	}
+	tn := parser.TableName{TableName: parser.Name(name)}
+	return planDataSource{
+		info: newSourceInfoForSingleTable(tn, plan.Columns()),
 		plan: plan,
 	}, nil
 }
@@ -438,14 +557,14 @@ func (src *dataSourceInfo) expandStar(
 			colSel(i)
 		}
 	} else {
-		norm := sqlbase.NormalizeTableName(tableName)
+		norm := tableName.NormalizedTableName()
 
 		qualifiedTn, err := src.checkDatabaseName(norm)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		colRange, ok := src.sourceAliases[qualifiedTn]
+		colRange, ok := src.sourceAliases.columnRange(qualifiedTn)
 		if !ok {
 			return nil, nil, fmt.Errorf("table %q not found", tableName.String())
 		}
@@ -457,83 +576,21 @@ func (src *dataSourceInfo) expandStar(
 	return columns, exprs, nil
 }
 
-// findUnaliasedColumn looks up the column specified by a VarName, not
-// taking column renames into account (but table renames will be taken
-// into account). That is, given a table "blah" with single column "y",
-// findUnaliasedColumn("y") returns a valid index even in the context
-// of:
-//     SELECT * FROM blah as foo(x)
-// If the VarName specifies a table name, only columns that have that
-// name as their source alias are considered. If the VarName does not
-// specify a table name, all columns in the data source are
-// considered.  If no column is found, invalidColIdx is returned with
-// no error.
-func (p *planDataSource) findUnaliasedColumn(c *parser.ColumnItem) (colIdx int, err error) {
-	colName := sqlbase.NormalizeName(c.ColumnName)
-	tableName := sqlbase.NormalizeTableName(c.TableName)
-
-	if tableName.Table() != "" {
-		tn, err := p.info.checkDatabaseName(tableName)
-		if err != nil {
-			return invalidColIdx, nil
-		}
-		tableName = tn
-	}
-
-	colIdx = invalidColIdx
-	planColumns := p.plan.Columns()
-
-	selCol := func(colIdx int, idx int) (int, error) {
-		col := planColumns[idx]
-		if sqlbase.ReNormalizeName(col.Name) == colName {
-			if colIdx != invalidColIdx {
-				return invalidColIdx, fmt.Errorf("column reference %q is ambiguous", c)
-			}
-			colIdx = idx
-		}
-		return colIdx, nil
-	}
-
-	if tableName.Table() == "" {
-		for idx := 0; idx < len(p.info.sourceColumns); idx++ {
-			colIdx, err = selCol(colIdx, idx)
-			if err != nil {
-				return colIdx, err
-			}
-		}
-	} else {
-		colRange, ok := p.info.sourceAliases[tableName]
-		if !ok {
-			// A table name is specified, but there is no column with this
-			// table name.
-			return invalidColIdx, nil
-		}
-		for _, idx := range colRange {
-			colIdx, err = selCol(colIdx, idx)
-			if err != nil {
-				return colIdx, err
-			}
-		}
-	}
-
-	return colIdx, nil
-}
-
 type multiSourceInfo []*dataSourceInfo
 
 // checkDatabaseName checks whether the given TableName is unambiguous
 // for the set of sources and if it is, qualifies the missing database name.
 func (sources multiSourceInfo) checkDatabaseName(tn parser.TableName) (parser.TableName, error) {
-	found := false
 	if tn.DatabaseName == "" {
 		// No database name yet. Try to find one.
+		found := false
 		for _, src := range sources {
-			for name := range src.sourceAliases {
-				if name.TableName == tn.TableName {
+			for _, alias := range src.sourceAliases {
+				if alias.name.TableName == tn.TableName {
 					if found {
 						return parser.TableName{}, fmt.Errorf("ambiguous source name: %q", tn.TableName)
 					}
-					tn.DatabaseName = name.DatabaseName
+					tn.DatabaseName = alias.name.DatabaseName
 					found = true
 				}
 			}
@@ -545,8 +602,9 @@ func (sources multiSourceInfo) checkDatabaseName(tn parser.TableName) (parser.Ta
 	}
 
 	// Database given. Check that the name is unambiguous.
+	found := false
 	for _, src := range sources {
-		if _, ok := src.sourceAliases[tn]; ok {
+		if _, ok := src.sourceAliases.srcIdx(tn); ok {
 			if found {
 				return parser.TableName{}, fmt.Errorf("ambiguous source name: %q (within database %q)",
 					tn.TableName, tn.DatabaseName)
@@ -563,16 +621,16 @@ func (sources multiSourceInfo) checkDatabaseName(tn parser.TableName) (parser.Ta
 // checkDatabaseName checks whether the given TableName is unambiguous
 // within this source and if it is, qualifies the missing database name.
 func (src *dataSourceInfo) checkDatabaseName(tn parser.TableName) (parser.TableName, error) {
-	found := false
 	if tn.DatabaseName == "" {
 		// No database name yet. Try to find one.
-		for name := range src.sourceAliases {
-			if name.TableName == tn.TableName {
+		found := false
+		for _, alias := range src.sourceAliases {
+			if alias.name.TableName == tn.TableName {
 				if found {
 					return parser.TableName{}, fmt.Errorf("ambiguous source name: %q", tn.TableName)
 				}
-				tn.DatabaseName = name.DatabaseName
 				found = true
+				tn.DatabaseName = alias.name.DatabaseName
 			}
 		}
 		if !found {
@@ -581,16 +639,8 @@ func (src *dataSourceInfo) checkDatabaseName(tn parser.TableName) (parser.TableN
 		return tn, nil
 	}
 
-	// Database given. Check that the name is unambiguous.
-	if _, ok := src.sourceAliases[tn]; ok {
-		if found {
-			return parser.TableName{}, fmt.Errorf("ambiguous source name: %q (within database %q)",
-				tn.TableName, tn.DatabaseName)
-		}
-		found = true
-	}
-
-	if !found {
+	// Database given.
+	if _, found := src.sourceAliases.srcIdx(tn); !found {
 		return parser.TableName{}, fmt.Errorf("table %q not selected in FROM clause", &tn)
 	}
 	return tn, nil
@@ -606,10 +656,10 @@ func (sources multiSourceInfo) findColumn(c *parser.ColumnItem) (srcIdx int, col
 		return invalidSrcIdx, invalidColIdx, util.UnimplementedWithIssueErrorf(8318, "compound types not supported yet: %q", c)
 	}
 
-	colName := sqlbase.NormalizeName(c.ColumnName)
+	colName := c.ColumnName.Normalize()
 	var tableName parser.TableName
 	if c.TableName.Table() != "" {
-		tableName = sqlbase.NormalizeTableName(c.TableName)
+		tableName = c.TableName.NormalizedTableName()
 
 		tn, err := sources.checkDatabaseName(tableName)
 		if err != nil {
@@ -622,35 +672,39 @@ func (sources multiSourceInfo) findColumn(c *parser.ColumnItem) (srcIdx int, col
 		c.TableName.DatabaseName = tableName.DatabaseName
 	}
 
+	findColHelper := func(src *dataSourceInfo, iSrc, srcIdx, colIdx int, idx int) (int, int, error) {
+		col := src.sourceColumns[idx]
+		if parser.ReNormalizeName(col.Name) == colName {
+			if colIdx != invalidColIdx {
+				return invalidSrcIdx, invalidColIdx, fmt.Errorf("column reference %q is ambiguous", c)
+			}
+			srcIdx = iSrc
+			colIdx = idx
+		}
+		return srcIdx, colIdx, nil
+	}
+
 	colIdx = invalidColIdx
 	for iSrc, src := range sources {
-		findColHelper := func(src *dataSourceInfo, iSrc, srcIdx, colIdx int, idx int) (int, int, error) {
-			col := src.sourceColumns[idx]
-			if sqlbase.ReNormalizeName(col.Name) == colName {
-				if colIdx != invalidColIdx {
-					return invalidSrcIdx, invalidColIdx, fmt.Errorf("column reference %q is ambiguous", c)
-				}
-				srcIdx = iSrc
-				colIdx = idx
-			}
-			return srcIdx, colIdx, nil
+		colRange, ok := src.sourceAliases.columnRange(tableName)
+		if !ok {
+			// The data source "src" has no column for table tableName.
+			// Try again with the net one.
+			continue
 		}
+		for _, idx := range colRange {
+			srcIdx, colIdx, err = findColHelper(src, iSrc, srcIdx, colIdx, idx)
+			if err != nil {
+				return srcIdx, colIdx, err
+			}
+		}
+	}
 
-		if tableName.Table() == "" {
+	if colIdx == invalidColIdx && tableName.Table() == "" {
+		// Try harder: unqualified column names can look at all
+		// columns, not just columns of the anonymous table.
+		for iSrc, src := range sources {
 			for idx := 0; idx < len(src.sourceColumns); idx++ {
-				srcIdx, colIdx, err = findColHelper(src, iSrc, srcIdx, colIdx, idx)
-				if err != nil {
-					return srcIdx, colIdx, err
-				}
-			}
-		} else {
-			colRange, ok := src.sourceAliases[tableName]
-			if !ok {
-				// The data source "src" has no column for table tableName.
-				// Try again with the net one.
-				continue
-			}
-			for _, idx := range colRange {
 				srcIdx, colIdx, err = findColHelper(src, iSrc, srcIdx, colIdx, idx)
 				if err != nil {
 					return srcIdx, colIdx, err
@@ -666,54 +720,33 @@ func (sources multiSourceInfo) findColumn(c *parser.ColumnItem) (srcIdx int, col
 	return srcIdx, colIdx, nil
 }
 
-// concatDataSourceInfos creates a new dataSourceInfo that represents
-// the side-by-side concatenation of the two data sources described by
-// its arguments.  If it detects that a table alias appears on both
-// sides, an ambiguity is reported.
-func concatDataSourceInfos(left *dataSourceInfo, right *dataSourceInfo) (*dataSourceInfo, error) {
-	aliases := make(sourceAliases)
-	nColsLeft := len(left.sourceColumns)
-	for alias, colRange := range right.sourceAliases {
-		newRange := make(columnRange, len(colRange))
-		for i, idx := range colRange {
-			newRange[i] = idx + nColsLeft
-		}
-		aliases[alias] = newRange
-	}
-	for k, v := range left.sourceAliases {
-		aliases[k] = v
-	}
-
-	columns := make(ResultColumns, 0, len(left.sourceColumns)+len(right.sourceColumns))
-	columns = append(columns, left.sourceColumns...)
-	columns = append(columns, right.sourceColumns...)
-
-	return &dataSourceInfo{sourceColumns: columns, sourceAliases: aliases}, nil
-}
-
 // findTableAlias returns the first table alias providing the column
 // index given as argument. The index must be valid.
-func (src *dataSourceInfo) findTableAlias(colIdx int) parser.TableName {
-	for alias, colRange := range src.sourceAliases {
-		for _, idx := range colRange {
+func (src *dataSourceInfo) findTableAlias(colIdx int) (parser.TableName, bool) {
+	for _, alias := range src.sourceAliases {
+		for _, idx := range alias.columnRange {
 			if colIdx == idx {
-				return alias
+				return alias.name, true
 			}
 		}
 	}
-	panic(fmt.Sprintf("no alias for position %d in %q", colIdx, src.sourceAliases))
+	return anonymousTable, false
 }
 
 func (src *dataSourceInfo) FormatVar(buf *bytes.Buffer, f parser.FmtFlags, colIdx int) {
-	if f == parser.FmtQualify {
-		tableAlias := src.findTableAlias(colIdx)
-		if tableAlias.TableName != "" {
-			if tableAlias.DatabaseName != "" {
-				parser.FormatNode(buf, f, tableAlias.DatabaseName)
+	if f.ShowTableAliases {
+		tableAlias, found := src.findTableAlias(colIdx)
+		if found {
+			if tableAlias.TableName != "" {
+				if tableAlias.DatabaseName != "" {
+					parser.FormatNode(buf, f, tableAlias.DatabaseName)
+					buf.WriteByte('.')
+				}
+				parser.FormatNode(buf, f, tableAlias.TableName)
 				buf.WriteByte('.')
 			}
-			parser.FormatNode(buf, f, tableAlias.TableName)
-			buf.WriteByte('.')
+		} else {
+			buf.WriteString("_.")
 		}
 	}
 	buf.WriteString(src.sourceColumns[colIdx].Name)

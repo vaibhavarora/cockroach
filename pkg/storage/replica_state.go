@@ -42,10 +42,11 @@ func loadState(
 	// on-disk state (likely iffy during Split/ChangeReplica triggers).
 	s.Desc = protoutil.Clone(desc).(*roachpb.RangeDescriptor)
 	// Read the range lease.
-	var err error
-	if s.Lease, err = loadLease(ctx, reader, desc.RangeID); err != nil {
+	lease, err := loadLease(ctx, reader, desc.RangeID)
+	if err != nil {
 		return storagebase.ReplicaState{}, err
 	}
+	s.Lease = &lease
 
 	if s.Frozen, err = loadFrozenStatus(ctx, reader, desc.RangeID); err != nil {
 		return storagebase.ReplicaState{}, err
@@ -89,7 +90,7 @@ func loadState(
 //
 // TODO(tschottdorf): test and assert that none of the optional values are
 // missing when- ever saveState is called. Optional values should be reserved
-// strictly for use in ProposalData. Do before merge.
+// strictly for use in EvalResult. Do before merge.
 func saveState(
 	ctx context.Context, eng engine.ReadWriter, state storagebase.ReplicaState,
 ) (enginepb.MVCCStats, error) {
@@ -111,7 +112,7 @@ func saveState(
 	if err := setTxnSpanGCThreshold(ctx, eng, ms, rangeID, &state.TxnSpanGCThreshold); err != nil {
 		return enginepb.MVCCStats{}, err
 	}
-	if err := setTruncatedState(ctx, eng, ms, rangeID, *state.TruncatedState); err != nil {
+	if err := setTruncatedState(ctx, eng, ms, rangeID, state.TruncatedState); err != nil {
 		return enginepb.MVCCStats{}, err
 	}
 	if err := setMVCCStats(ctx, eng, rangeID, state.Stats); err != nil {
@@ -122,15 +123,13 @@ func saveState(
 
 func loadLease(
 	ctx context.Context, reader engine.Reader, rangeID roachpb.RangeID,
-) (*roachpb.Lease, error) {
-	lease := &roachpb.Lease{}
+) (roachpb.Lease, error) {
+	var lease roachpb.Lease
 	_, err := engine.MVCCGetProto(ctx, reader,
 		keys.RangeLeaseKey(rangeID), hlc.ZeroTimestamp,
-		true, nil, lease)
-	if err != nil {
-		return nil, err
-	}
-	return lease, nil
+		true, nil, &lease,
+	)
+	return lease, err
 }
 
 func setLease(
@@ -184,6 +183,8 @@ func loadAppliedIndex(
 	return appliedIndex, leaseAppliedIndex, nil
 }
 
+// setAppliedIndex sets the {raft,lease} applied index values, properly
+// accounting for existing keys in the returned stats.
 func setAppliedIndex(
 	ctx context.Context,
 	eng engine.ReadWriter,
@@ -192,22 +193,80 @@ func setAppliedIndex(
 	appliedIndex,
 	leaseAppliedIndex uint64,
 ) error {
+	return setAppliedIndexCommon(
+		ctx, eng, ms, rangeID, appliedIndex, leaseAppliedIndex, false /* blind */)
+}
+
+// setAppliedIndexBlind sets the {raft,lease} applied index values using a
+// "blind" put which ignores any existing keys. This is identical to
+// setAppliedIndex but is used to optimize the writing of the applied index
+// values during write operations where we definitively know the size of the
+// previous values.
+func setAppliedIndexBlind(
+	ctx context.Context,
+	eng engine.ReadWriter,
+	ms *enginepb.MVCCStats,
+	rangeID roachpb.RangeID,
+	appliedIndex,
+	leaseAppliedIndex uint64,
+) error {
+	return setAppliedIndexCommon(
+		ctx, eng, ms, rangeID, appliedIndex, leaseAppliedIndex, true /* blind */)
+}
+
+func setAppliedIndexCommon(
+	ctx context.Context,
+	eng engine.ReadWriter,
+	ms *enginepb.MVCCStats,
+	rangeID roachpb.RangeID,
+	appliedIndex,
+	leaseAppliedIndex uint64,
+	blind bool,
+) error {
 	var value roachpb.Value
 	value.SetInt(int64(appliedIndex))
 
-	if err := engine.MVCCPut(ctx, eng, ms,
-		keys.RaftAppliedIndexKey(rangeID),
-		hlc.ZeroTimestamp,
-		value,
-		nil /* txn */); err != nil {
-		return err
+	if blind {
+		if err := engine.MVCCBlindPut(ctx, eng, ms,
+			keys.RaftAppliedIndexKey(rangeID),
+			hlc.ZeroTimestamp,
+			value,
+			nil /* txn */); err != nil {
+			return err
+		}
+	} else {
+		if err := engine.MVCCPut(ctx, eng, ms,
+			keys.RaftAppliedIndexKey(rangeID),
+			hlc.ZeroTimestamp,
+			value,
+			nil /* txn */); err != nil {
+			return err
+		}
 	}
 	value.SetInt(int64(leaseAppliedIndex))
-	return engine.MVCCPut(ctx, eng, ms,
+	return engine.MVCCBlindPut(ctx, eng, ms,
 		keys.LeaseAppliedIndexKey(rangeID),
 		hlc.ZeroTimestamp,
 		value,
 		nil /* txn */)
+}
+
+func inlineValueIntEncodedSize(v int64) int {
+	var value roachpb.Value
+	value.SetInt(v)
+	meta := enginepb.MVCCMetadata{RawBytes: value.RawBytes}
+	return meta.Size()
+}
+
+// Calculate the size (MVCCStats.SysBytes) of the {raft,lease} applied index
+// keys/values.
+func calcAppliedIndexSysBytes(
+	rangeID roachpb.RangeID, appliedIndex, leaseAppliedIndex uint64,
+) int64 {
+	return int64(engine.MakeMVCCMetadataKey(keys.RaftAppliedIndexKey(rangeID)).EncodedSize() +
+		engine.MakeMVCCMetadataKey(keys.LeaseAppliedIndexKey(rangeID)).EncodedSize() +
+		inlineValueIntEncodedSize(int64(appliedIndex)) +
+		inlineValueIntEncodedSize(int64(leaseAppliedIndex)))
 }
 
 func loadTruncatedState(
@@ -227,13 +286,13 @@ func setTruncatedState(
 	eng engine.ReadWriter,
 	ms *enginepb.MVCCStats,
 	rangeID roachpb.RangeID,
-	truncState roachpb.RaftTruncatedState,
+	truncState *roachpb.RaftTruncatedState,
 ) error {
-	if (truncState == roachpb.RaftTruncatedState{}) {
+	if (*truncState == roachpb.RaftTruncatedState{}) {
 		return errors.New("cannot persist empty RaftTruncatedState")
 	}
 	return engine.MVCCPutProto(ctx, eng, ms,
-		keys.RaftTruncatedStateKey(rangeID), hlc.ZeroTimestamp, nil, &truncState)
+		keys.RaftTruncatedStateKey(rangeID), hlc.ZeroTimestamp, nil, truncState)
 }
 
 func loadGCThreshold(
@@ -286,11 +345,7 @@ func setTxnSpanGCThreshold(
 func loadMVCCStats(
 	ctx context.Context, reader engine.Reader, rangeID roachpb.RangeID,
 ) (enginepb.MVCCStats, error) {
-	var ms enginepb.MVCCStats
-	if err := engine.MVCCGetRangeStats(ctx, reader, rangeID, &ms); err != nil {
-		return enginepb.MVCCStats{}, err
-	}
-	return ms, nil
+	return engine.MVCCGetRangeStats(ctx, reader, rangeID)
 }
 
 func setMVCCStats(
@@ -495,7 +550,7 @@ func writeInitialState(
 
 	if existingLease, err := loadLease(ctx, eng, desc.RangeID); err != nil {
 		return enginepb.MVCCStats{}, errors.Wrap(err, "error reading lease")
-	} else if (existingLease != nil && *existingLease != roachpb.Lease{}) {
+	} else if (existingLease != roachpb.Lease{}) {
 		log.Fatalf(ctx, "expected trivial lease, but found %+v", existingLease)
 	}
 

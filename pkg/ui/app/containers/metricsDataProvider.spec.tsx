@@ -6,7 +6,8 @@ import Long from "long";
 import * as sinon from "sinon";
 
 import * as protos from  "../js/protos";
-import { TextGraph, Axis, Metric } from "../components/graphs";
+import { TextGraph, Axis } from "../components/graphs";
+import { Metric } from "../components/metric";
 import {
   MetricsDataProviderUnconnected as MetricsDataProvider,
   QueryTimeInfo,
@@ -192,7 +193,7 @@ describe("<MetricsDataProvider>", function() {
                 <Metric name="test.metrics.2" />
               </Axis>
             </TextGraph>
-          </MetricsDataProvider>
+          </MetricsDataProvider>,
         );
         assert.fail("expected error from MetricsDataProvider");
       } catch (e) {

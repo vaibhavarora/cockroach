@@ -18,18 +18,19 @@ package storage
 
 import (
 	"sort"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
 // TestIDAllocator creates an ID allocator which allocates from
@@ -40,9 +41,12 @@ import (
 // from 2 to 101 are present.
 func TestIDAllocator(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	store, _, stopper := createTestStore(t)
+	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	allocd := make(chan int, 100)
+	store, _ := createTestStore(t, stopper)
+	const maxI, maxJ = 10, 10
+	allocd := make(chan uint32, maxI*maxJ)
+	errChan := make(chan error, maxI*maxJ)
 	idAlloc, err := newIDAllocator(
 		log.AmbientContext{}, keys.RangeIDGenerator, store.cfg.DB, 2, 10, stopper,
 	)
@@ -50,25 +54,26 @@ func TestIDAllocator(t *testing.T) {
 		t.Errorf("failed to create idAllocator: %v", err)
 	}
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < maxI; i++ {
 		go func() {
-			for j := 0; j < 10; j++ {
+			for j := 0; j < maxJ; j++ {
 				id, err := idAlloc.Allocate()
-				if err != nil {
-					t.Fatal(err)
-				}
-				allocd <- int(id)
+				errChan <- err
+				allocd <- id
 			}
 		}()
 	}
 
 	// Verify all IDs accounted for.
-	ids := make([]int, 100)
-	for i := 0; i < 100; i++ {
-		ids[i] = <-allocd
+	ids := make([]int, maxI*maxJ)
+	for i := range ids {
+		ids[i] = int(<-allocd)
+		if err := <-errChan; err != nil {
+			t.Fatal(err)
+		}
 	}
 	sort.Ints(ids)
-	for i := 0; i < 100; i++ {
+	for i := range ids {
 		if ids[i] != i+2 {
 			t.Errorf("expected \"%d\"th ID to be %d; got %d", i, i+2, ids[i])
 		}
@@ -89,8 +94,9 @@ func TestIDAllocator(t *testing.T) {
 // and push the id allocation into positive integers.
 func TestIDAllocatorNegativeValue(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	store, _, stopper := createTestStore(t)
+	stopper := stop.NewStopper()
 	defer stopper.Stop()
+	store, _ := createTestStore(t, stopper)
 
 	// Increment our key to a negative value.
 	newValue, err := engine.MVCCIncrement(context.Background(), store.Engine(), nil, keys.RangeIDGenerator, store.cfg.Clock.Now(), nil, -1024)
@@ -139,9 +145,11 @@ func TestNewIDAllocatorInvalidArgs(t *testing.T) {
 // 5) Check if the following allocations return correctly.
 func TestAllocateErrorAndRecovery(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	store, _, stopper := createTestStore(t)
+	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	allocd := make(chan int, 10)
+	store, _ := createTestStore(t, stopper)
+	const routines = 10
+	allocd := make(chan uint32, routines)
 
 	// Firstly create a valid IDAllocator to get some ID.
 	idAlloc, err := newIDAllocator(
@@ -174,10 +182,7 @@ func TestAllocateErrorAndRecovery(t *testing.T) {
 		}
 	}
 
-	const routines = 10
-
-	var wg sync.WaitGroup
-	wg.Add(routines)
+	errChan := make(chan error, routines)
 
 	// Then the paralleled allocations should be blocked until Allocator
 	// is recovered.
@@ -185,31 +190,36 @@ func TestAllocateErrorAndRecovery(t *testing.T) {
 		go func() {
 			select {
 			case <-idAlloc.ids:
-				t.Errorf("Allocate() should be blocked until idKey is valid")
+				errChan <- errors.Errorf("Allocate() should be blocked until idKey is valid")
 			case <-time.After(10 * time.Millisecond):
+				errChan <- nil
 			}
-			wg.Done()
 
 			id, err := idAlloc.Allocate()
-			if err != nil {
-				t.Fatal(err)
-			}
-			allocd <- int(id)
+			errChan <- err
+			allocd <- id
 		}()
 	}
 
 	// Wait until all the allocations are blocked.
-	wg.Wait()
+	for i := 0; i < routines; i++ {
+		if err := <-errChan; err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// Make the IDAllocator valid again.
 	idAlloc.idKey.Store(keys.RangeIDGenerator)
 	// Check if the blocked allocations return expected ID.
 	ids := make([]int, routines)
-	for i := 0; i < routines; i++ {
-		ids[i] = <-allocd
+	for i := range ids {
+		ids[i] = int(<-allocd)
+		if err := <-errChan; err != nil {
+			t.Fatal(err)
+		}
 	}
 	sort.Ints(ids)
-	for i := 0; i < routines; i++ {
+	for i := range ids {
 		if ids[i] != i+11 {
 			t.Errorf("expected \"%d\"th ID to be %d; got %d", i, i+11, ids[i])
 		}
@@ -229,19 +239,23 @@ func TestAllocateErrorAndRecovery(t *testing.T) {
 
 func TestAllocateWithStopper(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	store, _, stopper := createTestStore(t)
-	idAlloc, err := newIDAllocator(
-		log.AmbientContext{}, keys.RangeIDGenerator, store.cfg.DB, 2, 10, stopper,
-	)
-	if err != nil {
-		log.Fatal(context.Background(), err)
-	}
 
-	stopper.Stop()
+	// Wrap things in a function so we can defer the stopper, but have it stop
+	// before the end of the test.
+	idAlloc := func() *idAllocator {
+		stopper := stop.NewStopper()
+		defer stopper.Stop()
+		store, _ := createTestStore(t, stopper)
+		idAlloc, err := newIDAllocator(
+			log.AmbientContext{}, keys.RangeIDGenerator, store.cfg.DB, 2, 10, stopper,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return idAlloc
+	}()
 
-	if _, err := idAlloc.Allocate(); err == nil {
-		t.Errorf("unexpected success")
-	} else if !strings.Contains(err.Error(), "system is draining") {
-		t.Errorf("unexpected error: %s", err)
+	if _, err := idAlloc.Allocate(); !testutils.IsError(err, "system is draining") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }

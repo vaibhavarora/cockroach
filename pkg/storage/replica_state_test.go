@@ -35,7 +35,8 @@ func TestSynthesizeHardState(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	eng := engine.NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	eng := engine.NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(eng)
 
 	tHS := raftpb.HardState{Term: 2, Vote: 3, Commit: 4}
 
@@ -76,8 +77,9 @@ func TestSynthesizeHardState(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if err := synthesizeHardState(context.Background(), batch, testState, oldHS); !(test.Err == "" && err == nil || testutils.IsError(err, test.Err)) {
-				t.Fatalf("%d: expected %s got %v", i, test.Err, err)
+			err = synthesizeHardState(context.Background(), batch, testState, oldHS)
+			if !testutils.IsError(err, test.Err) {
+				t.Fatalf("%d: expected %q got %v", i, test.Err, err)
 			} else if err != nil {
 				// No further checking if we expected an error and got it.
 				return

@@ -21,23 +21,29 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 )
 
 func TestEncDatum(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
 	a := &DatumAlloc{}
-	x := &EncDatum{}
-	if !x.IsUnset() {
+	v := EncDatum{}
+	if !v.IsUnset() {
 		t.Errorf("empty EncDatum should be unset")
 	}
 
-	if _, ok := x.Encoding(); ok {
+	if _, ok := v.Encoding(); ok {
 		t.Errorf("empty EncDatum has an encoding")
 	}
 
-	x.SetDatum(ColumnType_INT, parser.NewDInt(5))
+	x := DatumToEncDatum(ColumnType{Kind: ColumnType_INT}, parser.NewDInt(5))
 	if x.IsUnset() {
-		t.Errorf("unset after SetDatum()")
+		t.Errorf("unset after DatumToEncDatum()")
+	}
+	if x.IsNull() {
+		t.Errorf("null after DatumToEncDatum()")
 	}
 
 	encoded, err := x.Encode(a, DatumEncoding_ASCENDING_KEY, nil)
@@ -45,18 +51,20 @@ func TestEncDatum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	y := &EncDatum{}
-	y.SetEncoded(ColumnType_INT, DatumEncoding_ASCENDING_KEY, encoded)
+	y := EncDatumFromEncoded(ColumnType{Kind: ColumnType_INT}, DatumEncoding_ASCENDING_KEY, encoded)
 
 	if y.IsUnset() {
-		t.Errorf("unset after SetEncoded()")
+		t.Errorf("unset after EncDatumFromEncoded")
+	}
+	if y.IsNull() {
+		t.Errorf("null after EncDatumFromEncoded")
 	}
 	if enc, ok := y.Encoding(); !ok {
-		t.Error("no encoding after SetEncoded")
+		t.Error("no encoding after EncDatumFromEncoded")
 	} else if enc != DatumEncoding_ASCENDING_KEY {
 		t.Errorf("invalid encoding %d", enc)
 	}
-	err = y.Decode(a)
+	err = y.EnsureDecoded(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,19 +82,58 @@ func TestEncDatum(t *testing.T) {
 	} else if enc != DatumEncoding_ASCENDING_KEY {
 		t.Errorf("invalid encoding %d", enc)
 	}
-	x.SetEncoded(ColumnType_INT, DatumEncoding_DESCENDING_KEY, enc2)
-	if enc, ok := x.Encoding(); !ok {
+	z := EncDatumFromEncoded(ColumnType{Kind: ColumnType_INT}, DatumEncoding_DESCENDING_KEY, enc2)
+	if enc, ok := z.Encoding(); !ok {
 		t.Error("no encoding")
 	} else if enc != DatumEncoding_DESCENDING_KEY {
 		t.Errorf("invalid encoding %d", enc)
 	}
-	err = x.Decode(a)
+	if z.IsNull() {
+		t.Errorf("null after EncDatumFromEncoded")
+	}
+	err = z.EnsureDecoded(a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmp := y.Datum.Compare(x.Datum); cmp != 0 {
+	if cmp := y.Datum.Compare(z.Datum); cmp != 0 {
 		t.Errorf("Datums should be equal, cmp = %d", cmp)
 	}
+	y.UnsetDatum()
+	if !y.IsUnset() {
+		t.Error("not unset after UnsetDatum()")
+	}
+}
+
+func TestEncDatumNull(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	// Verify DNull is null.
+	n := DatumToEncDatum(ColumnType{Kind: ColumnType_INT}, parser.DNull)
+	if !n.IsNull() {
+		t.Error("DNull not null")
+	}
+
+	var alloc DatumAlloc
+	rng, _ := randutil.NewPseudoRand()
+
+	// Generate random EncDatums (some of which are null), and verify that a datum
+	// created from its encoding has the same IsNull() value.
+	for cases := 0; cases < 100; cases++ {
+		a := RandEncDatum(rng)
+
+		for enc := range DatumEncoding_name {
+			encoded, err := a.Encode(&alloc, DatumEncoding(enc), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := EncDatumFromEncoded(ColumnType{Kind: ColumnType_INT}, DatumEncoding(enc), encoded)
+			if a.IsNull() != b.IsNull() {
+				t.Errorf("before: %s (null=%t) after: %s (null=%t)",
+					a.String(), a.IsNull(), b.String(), b.IsNull())
+			}
+		}
+	}
+
 }
 
 // checkEncDatumCmp encodes the given values using the given encodings,
@@ -108,13 +155,11 @@ func checkEncDatumCmp(
 	if err != nil {
 		t.Fatal(err)
 	}
-	dec1 := &EncDatum{}
-	dec1.SetEncoded(v1.Type, enc1, buf1)
+	dec1 := EncDatumFromEncoded(v1.Type, enc1, buf1)
 
-	dec2 := &EncDatum{}
-	dec2.SetEncoded(v2.Type, enc2, buf2)
+	dec2 := EncDatumFromEncoded(v2.Type, enc2, buf2)
 
-	if val, err := dec1.Compare(a, dec2); err != nil {
+	if val, err := dec1.Compare(a, &dec2); err != nil {
 		t.Fatal(err)
 	} else if val != expectedCmp {
 		t.Errorf("comparing %s (%s), %s (%s) resulted in %d, expected %d",
@@ -133,10 +178,20 @@ func checkEncDatumCmp(
 }
 
 func TestEncDatumCompare(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
 	a := &DatumAlloc{}
 	rng, _ := randutil.NewPseudoRand()
 
-	for typ := ColumnType_Kind(0); int(typ) < len(ColumnType_Kind_value); typ++ {
+	for kind := range ColumnType_Kind_name {
+		kind := ColumnType_Kind(kind)
+		// TODO(cuongdo,eisen): we don't support persistence for arrays or collated
+		// strings yet
+		if kind == ColumnType_COLLATEDSTRING || kind == ColumnType_INT_ARRAY {
+			continue
+		}
+		typ := ColumnType{Kind: kind}
+
 		// Generate two datums d1 < d2
 		var d1, d2 parser.Datum
 		for {
@@ -146,12 +201,10 @@ func TestEncDatumCompare(t *testing.T) {
 				break
 			}
 		}
-		v1 := &EncDatum{}
-		v1.SetDatum(typ, d1)
-		v2 := &EncDatum{}
-		v2.SetDatum(typ, d2)
+		v1 := DatumToEncDatum(typ, d1)
+		v2 := DatumToEncDatum(typ, d2)
 
-		if val, err := v1.Compare(a, v2); err != nil {
+		if val, err := v1.Compare(a, &v2); err != nil {
 			t.Fatal(err)
 		} else if val != -1 {
 			t.Errorf("compare(1, 2) = %d", val)
@@ -161,24 +214,26 @@ func TestEncDatumCompare(t *testing.T) {
 		desc := DatumEncoding_DESCENDING_KEY
 		noncmp := DatumEncoding_VALUE
 
-		checkEncDatumCmp(t, a, v1, v2, asc, asc, -1, false)
-		checkEncDatumCmp(t, a, v2, v1, asc, asc, +1, false)
-		checkEncDatumCmp(t, a, v1, v1, asc, asc, 0, false)
-		checkEncDatumCmp(t, a, v2, v2, asc, asc, 0, false)
+		checkEncDatumCmp(t, a, &v1, &v2, asc, asc, -1, false)
+		checkEncDatumCmp(t, a, &v2, &v1, asc, asc, +1, false)
+		checkEncDatumCmp(t, a, &v1, &v1, asc, asc, 0, false)
+		checkEncDatumCmp(t, a, &v2, &v2, asc, asc, 0, false)
 
-		checkEncDatumCmp(t, a, v1, v2, desc, desc, -1, false)
-		checkEncDatumCmp(t, a, v2, v1, desc, desc, +1, false)
-		checkEncDatumCmp(t, a, v1, v1, desc, desc, 0, false)
-		checkEncDatumCmp(t, a, v2, v2, desc, desc, 0, false)
+		checkEncDatumCmp(t, a, &v1, &v2, desc, desc, -1, false)
+		checkEncDatumCmp(t, a, &v2, &v1, desc, desc, +1, false)
+		checkEncDatumCmp(t, a, &v1, &v1, desc, desc, 0, false)
+		checkEncDatumCmp(t, a, &v2, &v2, desc, desc, 0, false)
 
-		checkEncDatumCmp(t, a, v1, v2, noncmp, noncmp, -1, true)
-		checkEncDatumCmp(t, a, v2, v1, desc, noncmp, +1, true)
-		checkEncDatumCmp(t, a, v1, v1, asc, desc, 0, true)
-		checkEncDatumCmp(t, a, v2, v2, desc, asc, 0, true)
+		checkEncDatumCmp(t, a, &v1, &v2, noncmp, noncmp, -1, true)
+		checkEncDatumCmp(t, a, &v2, &v1, desc, noncmp, +1, true)
+		checkEncDatumCmp(t, a, &v1, &v1, asc, desc, 0, true)
+		checkEncDatumCmp(t, a, &v2, &v2, desc, asc, 0, true)
 	}
 }
 
 func TestEncDatumFromBuffer(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
 	var alloc DatumAlloc
 	rng, _ := randutil.NewPseudoRand()
 	for test := 0; test < 20; test++ {
@@ -205,11 +260,11 @@ func TestEncDatumFromBuffer(t *testing.T) {
 				t.Fatal("buffer ended early")
 			}
 			var decoded EncDatum
-			b, err = decoded.SetFromBuffer(ed[i].Type, enc[i], b)
+			decoded, b, err = EncDatumFromBuffer(ed[i].Type, enc[i], b)
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = decoded.Decode(&alloc)
+			err = decoded.EnsureDecoded(&alloc)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -224,9 +279,11 @@ func TestEncDatumFromBuffer(t *testing.T) {
 }
 
 func TestEncDatumRowCompare(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
 	v := [5]EncDatum{}
 	for i := range v {
-		v[i].SetDatum(ColumnType_INT, parser.NewDInt(parser.DInt(i)))
+		v[i] = DatumToEncDatum(ColumnType{Kind: ColumnType_INT}, parser.NewDInt(parser.DInt(i)))
 	}
 
 	asc := encoding.Ascending
@@ -330,6 +387,8 @@ func TestEncDatumRowCompare(t *testing.T) {
 }
 
 func TestEncDatumRowAlloc(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
 	rng, _ := randutil.NewPseudoRand()
 	for _, cols := range []int{1, 2, 4, 10, 40, 100} {
 		for _, rows := range []int{1, 2, 3, 5, 10, 20} {

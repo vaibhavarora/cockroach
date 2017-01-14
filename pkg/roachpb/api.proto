@@ -45,6 +45,13 @@ enum ReadConsistencyType {
   INCONSISTENT = 2;
 }
 
+// RangeInfo describes a range which executed a request. It contains
+// the range descriptor and lease information at the time of execution.
+message RangeInfo {
+  optional RangeDescriptor desc = 1 [(gogoproto.nullable) = false];
+  optional Lease lease = 2 [(gogoproto.nullable) = false];
+}
+
 // ResponseHeader is returned with every storage node response.
 message ResponseHeader {
   // txn is non-nil if the request specified a non-nil transaction.
@@ -60,6 +67,9 @@ message ResponseHeader {
   optional Span resume_span = 4;
   // The number of keys operated on.
   optional int64 num_keys = 5 [(gogoproto.nullable) = false];
+  // Range or list of ranges used to execute the request. Multiple
+  // ranges may be returned for Scan, ReverseScan or DeleteRange.
+  repeated RangeInfo range_infos = 6 [(gogoproto.nullable) = false];
 }
 
 // A GetRequest is the argument for the Get() method.
@@ -169,8 +179,17 @@ message DeleteRangeRequest {
   reserved 2;
   // return the keys that are deleted in the response.
   optional bool return_keys = 3 [(gogoproto.nullable) = false];
-  // delete values without a corresponding timestamp. This option should be used
-  // with care as this precludes deleting the keys transactionally.
+  // delete "inline" keys which are stored without MVCC timestamps. Note that
+  // an "inline" DeleteRange will fail if it attempts to delete any keys which
+  // contain timestamped (non-inline) values; this option should only be used on
+  // keys which are known to store inline values, such as data in cockroach's
+  // time series system.
+  //
+  // Similarly, attempts to delete keys with inline values will fail unless this
+  // flag is set to true; the setting must match the data being deleted.
+  //
+  // Inline values cannot be deleted transactionally; a DeleteRange with
+  // "inline" set to true will fail if it is executed within a transaction.
   optional bool inline = 4 [(gogoproto.nullable) = false];
 }
 
@@ -600,6 +619,9 @@ message TruncateLogResponse {
 message RequestLeaseRequest {
   optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
   optional Lease lease = 2 [(gogoproto.nullable) = false];
+  // The previous lease is specified by the caller to verify
+  // it has not changed when executing this command.
+  optional Lease prev_lease = 3;
 }
 
 // A TransferLeaseRequest represents the arguments to the TransferLease()
@@ -617,6 +639,9 @@ message RequestLeaseRequest {
 message TransferLeaseRequest {
   optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
   optional Lease lease = 2 [(gogoproto.nullable) = false];
+  // The previous lease is specified by the caller to verify
+  // it has not changed when executing this command.
+  optional Lease prev_lease = 3;
 }
 
 // LeaseInfoRequest is the argument to the LeaseInfo() method, for getting
@@ -666,20 +691,20 @@ message ComputeChecksumResponse {
 }
 
 message DeprecatedVerifyChecksumRequest {
-  optional NoopRequest deprecated = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
 
 message DeprecatedVerifyChecksumResponse {
-  optional NoopResponse deprecated = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
 
 // A RequestUnion contains exactly one of the optional requests.
 // The values added here must match those in ResponseUnion.
 //
-// WARNING: Do not remove fields from RequestUnion. Instead, replace the
-// contents of the deprecated field's type with an embedded NoopRequest and
-// prepend the type's name with "Deprecated". See
-// DeprecatedVerifyChecksumRequest for an example.
+// WARNING: Do not remove fields from RequestUnion. Instead, remove
+// all non-header fields from the request message and prepend its
+// name with "Deprecated". See DeprecatedVerifyChecksumRequest for an
+// example.
 //
 // Be cautious about deprecating fields as doing so can lead to inconsistencies
 // between replicas.
@@ -721,13 +746,10 @@ message RequestUnion {
 // A ResponseUnion contains exactly one of the optional responses.
 // The values added here must match those in RequestUnion.
 //
-// WARNING: Do not remove fields from ResponseUnion. Instead, replace the
-// contents of the deprecated field's type with an embedded NoopResponse and
-// prepend the type's name with "Deprecated". See
-// DeprecatedVerifyChecksumResponse for an example.
-//
-// Be cautious about deprecating fields as doing so can lead to inconsistencies
-// between replicas.
+// WARNING: Do not remove fields from ResponseUnion. Instead, remove
+// all non-header fields from the response message and prepend its
+// name with "Deprecated". See DeprecatedVerifyChecksumResponse for an
+// example.
 message ResponseUnion {
   option (gogoproto.onlyone) = true;
 
@@ -754,7 +776,7 @@ message ResponseUnion {
   optional RequestLeaseResponse request_lease = 20;
   optional ReverseScanResponse reverse_scan = 21;
   optional ComputeChecksumResponse compute_checksum = 22;
-  optional DeprecatedVerifyChecksumResponse deprecated_verify_response = 23;
+  optional DeprecatedVerifyChecksumResponse deprecated_verify_checksum = 23;
   optional CheckConsistencyResponse check_consistency = 24;
   optional NoopResponse noop = 25;
   optional InitPutResponse init_put = 26;
@@ -811,12 +833,15 @@ message Header {
   // If a batch limit is used with ReverseScan requests, the spans for the
   // requests must be non-overlapping and in decreasing order.
   optional int64 max_span_request_keys = 8 [(gogoproto.nullable) = false];
-  // if set, all of the spans in the batch are distinct. Note that the
+  // If set, all of the spans in the batch are distinct. Note that the
   // calculation of distinct spans does not include intents in an
   // EndTransactionRequest. Currently set conservatively: a request
   // might be composed of distinct spans yet have this field set to
   // false.
   optional bool distinct_spans = 9 [(gogoproto.nullable) = false];
+  // If set, return_range_info causes RangeInfo details to be returned with
+  // each ResponseHeader.
+  optional bool return_range_info = 10 [(gogoproto.nullable) = false];
 }
 
 

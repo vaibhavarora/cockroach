@@ -27,19 +27,13 @@ type emptyNode struct {
 	results bool
 }
 
-func (*emptyNode) Columns() ResultColumns              { return nil }
-func (*emptyNode) Ordering() orderingInfo              { return orderingInfo{} }
-func (*emptyNode) Values() parser.DTuple               { return nil }
-func (*emptyNode) ExplainTypes(_ func(string, string)) {}
-func (*emptyNode) Start() error                        { return nil }
-func (*emptyNode) SetLimitHint(_ int64, _ bool)        {}
-func (*emptyNode) MarkDebug(_ explainMode)             {}
-func (*emptyNode) expandPlan() error                   { return nil }
-func (*emptyNode) Close()                              {}
-
-func (*emptyNode) ExplainPlan(_ bool) (name, description string, children []planNode) {
-	return "empty", "-", nil
-}
+func (*emptyNode) Columns() ResultColumns       { return nil }
+func (*emptyNode) Ordering() orderingInfo       { return orderingInfo{} }
+func (*emptyNode) Values() parser.DTuple        { return nil }
+func (*emptyNode) Start() error                 { return nil }
+func (*emptyNode) SetLimitHint(_ int64, _ bool) {}
+func (*emptyNode) MarkDebug(_ explainMode)      {}
+func (*emptyNode) Close()                       {}
 
 func (e *emptyNode) DebugValues() debugValues {
 	return debugValues{

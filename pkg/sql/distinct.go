@@ -19,7 +19,6 @@ package sql
 import (
 	"bytes"
 	"fmt"
-	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
@@ -52,47 +51,9 @@ func (p *planner) Distinct(n *parser.SelectClause) *distinctNode {
 		return nil
 	}
 	d := &distinctNode{p: p}
-	d.prefixMemAcc = p.session.OpenAccount()
-	d.suffixMemAcc = p.session.OpenAccount()
+	d.prefixMemAcc = p.session.TxnState.OpenAccount()
+	d.suffixMemAcc = p.session.TxnState.OpenAccount()
 	return d
-}
-
-// wrap connects the distinctNode to its source planNode.
-// invoked by selectTopNode.expandPlan() prior
-// to invoking distinctNode.expandPlan() below.
-func (n *distinctNode) wrap(plan planNode) planNode {
-	if n == nil {
-		return plan
-	}
-	n.plan = plan
-	return n
-}
-
-func (n *distinctNode) expandPlan() error {
-	// At this point the selectTopNode has already expanded the plans
-	// upstream of distinctNode.
-	ordering := n.plan.Ordering()
-	if !ordering.isEmpty() {
-		n.columnsInOrder = make([]bool, len(n.plan.Columns()))
-		for colIdx := range ordering.exactMatchCols {
-			if colIdx >= len(n.columnsInOrder) {
-				// If the exact-match column is not part of the output, we can safely ignore it.
-				continue
-			}
-			n.columnsInOrder[colIdx] = true
-		}
-		for _, c := range ordering.ordering {
-			if c.ColIdx >= len(n.columnsInOrder) {
-				// Cannot use sort order. This happens when the
-				// columns used for sorting are not part of the output.
-				// e.g. SELECT a FROM t ORDER BY c.
-				n.columnsInOrder = nil
-				break
-			}
-			n.columnsInOrder[c.ColIdx] = true
-		}
-	}
-	return nil
 }
 
 func (n *distinctNode) Start() error {
@@ -101,10 +62,7 @@ func (n *distinctNode) Start() error {
 }
 
 // setTop connects the distinctNode back to the selectTopNode that
-// caused its existence. This is needed because the distinctNode needs
-// to refer to other nodes in the selectTopNode before its
-// expandPlan() method has ran and its child plan is known and
-// connected.
+// caused its existence.
 func (n *distinctNode) setTop(top *selectTopNode) {
 	if n != nil {
 		n.top = top
@@ -119,8 +77,15 @@ func (n *distinctNode) Columns() ResultColumns {
 	return n.top.Columns()
 }
 
-func (n *distinctNode) Values() parser.DTuple  { return n.plan.Values() }
-func (n *distinctNode) Ordering() orderingInfo { return n.plan.Ordering() }
+func (n *distinctNode) Values() parser.DTuple { return n.plan.Values() }
+
+func (n *distinctNode) Ordering() orderingInfo {
+	if n.plan != nil {
+		return n.plan.Ordering()
+	}
+	// Pre-prepare: not connected yet. Ask the top select node.
+	return n.top.Ordering()
+}
 
 func (n *distinctNode) MarkDebug(mode explainMode) {
 	if mode != explainDebug {
@@ -148,8 +113,8 @@ func (n *distinctNode) addSuffixSeen(acc WrappedMemoryAccount, sKey string) erro
 
 func (n *distinctNode) Next() (bool, error) {
 
-	prefixMemAcc := n.prefixMemAcc.W(n.p.session)
-	suffixMemAcc := n.suffixMemAcc.W(n.p.session)
+	prefixMemAcc := n.prefixMemAcc.Wtxn(n.p.session)
+	suffixMemAcc := n.suffixMemAcc.Wtxn(n.p.session)
 
 	for {
 		next, err := n.plan.Next()
@@ -233,23 +198,6 @@ func (n *distinctNode) encodeValues(values parser.DTuple) ([]byte, []byte, error
 	return prefix, suffix, err
 }
 
-func (n *distinctNode) ExplainPlan(_ bool) (string, string, []planNode) {
-	var description string
-	if n.columnsInOrder != nil {
-		columns := n.Columns()
-		strs := make([]string, 0, len(columns))
-		for i, column := range columns {
-			if n.columnsInOrder[i] {
-				strs = append(strs, column.Name)
-			}
-		}
-		description = strings.Join(strs, ",")
-	}
-	return "distinct", description, []planNode{n.plan}
-}
-
-func (n *distinctNode) ExplainTypes(_ func(string, string)) {}
-
 func (n *distinctNode) SetLimitHint(numRows int64, soft bool) {
 	// Any limit becomes a "soft" limit underneath.
 	n.plan.SetLimitHint(numRows, true)
@@ -258,7 +206,7 @@ func (n *distinctNode) SetLimitHint(numRows int64, soft bool) {
 func (n *distinctNode) Close() {
 	n.plan.Close()
 	n.prefixSeen = nil
-	n.prefixMemAcc.W(n.p.session).Close()
+	n.prefixMemAcc.Wtxn(n.p.session).Close()
 	n.suffixSeen = nil
-	n.suffixMemAcc.W(n.p.session).Close()
+	n.suffixMemAcc.Wtxn(n.p.session).Close()
 }

@@ -21,8 +21,10 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"text/tabwriter"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -30,6 +32,8 @@ import (
 
 	"github.com/olekukonko/tablewriter"
 
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/pq"
@@ -177,10 +181,31 @@ func makeSQLConn(url string) *sqlConn {
 	}
 }
 
-func makeSQLClient() (*sqlConn, error) {
+// getPasswordAndMakeSQLClient prompts for a password if running in secure mode
+// and no certificates have been supplied. security.RootUser won't be prompted
+// for a password as the only authentication method available for this user is
+// certificate authentication.
+func getPasswordAndMakeSQLClient() (*sqlConn, error) {
+	if len(connURL) != 0 {
+		return makeSQLConn(connURL), nil
+	}
+	var user *url.Userinfo
+	if !baseCfg.Insecure && connUser != security.RootUser && baseCfg.SSLCert == "" && baseCfg.SSLCertKey == "" {
+		pwd, err := security.PromptForPassword()
+		if err != nil {
+			return nil, err
+		}
+		user = url.UserPassword(connUser, pwd)
+	} else {
+		user = url.User(connUser)
+	}
+	return makeSQLClient(user)
+}
+
+func makeSQLClient(user *url.Userinfo) (*sqlConn, error) {
 	sqlURL := connURL
 	if len(connURL) == 0 {
-		u, err := sqlCtx.PGURL(connUser)
+		u, err := sqlCtx.PGURL(user)
 		if err != nil {
 			return nil, err
 		}
@@ -325,6 +350,17 @@ func printQueryOutput(w io.Writer, cols []string, allRows [][]string, tag string
 		for _, row := range allRows {
 			for i, r := range row {
 				row[i] = expandTabsAndNewLines(r)
+				if firstChar, _ := utf8.DecodeRuneInString(row[i]); unicode.IsSpace(firstChar) {
+					// table.Append below trims whitespace in order to compute
+					// the padding. This is unfortunate, since leading spaces
+					// can be usefully exploited for formatting. Disable
+					// trimming by inserting an invisible unicode character
+					// (left-to-right mark) at the start.
+					// TODO(knz) We can revisit this once
+					// https://github.com/olekukonko/tablewriter/issues/52 is
+					// fixed (or we use another table writer).
+					row[i] = "\u200C" + row[i]
+				}
 			}
 			table.Append(row)
 		}
@@ -343,7 +379,7 @@ func printQueryOutput(w io.Writer, cols []string, allRows [][]string, tag string
 			// Then print the results themselves.
 			fmt.Fprintln(w, strings.Join(cols, "\t"))
 			for _, row := range allRows {
-				fmt.Fprintln(w, strings.Join(row, "\t"))
+				fmt.Fprintln(w, strings.TrimRight(strings.Join(row, "\t"), "\t "))
 			}
 		}
 	}
@@ -390,6 +426,10 @@ func formatVal(val driver.Value, showPrintableUnicode bool, showNewLinesAndTabs 
 			}
 		}
 		return fmt.Sprintf("%+q", t)
+
+	case time.Time:
+		return t.Format(parser.TimestampNodeFormat)
 	}
+
 	return fmt.Sprint(val)
 }

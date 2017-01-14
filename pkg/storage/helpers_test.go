@@ -36,10 +36,10 @@ import (
 
 // AddReplica adds the replica to the store's replica map and to the sorted
 // replicasByKey slice. To be used only by unittests.
-func (s *Store) AddReplica(rng *Replica) error {
+func (s *Store) AddReplica(repl *Replica) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.addReplicaInternalLocked(rng); err != nil {
+	if err := s.addReplicaInternalLocked(repl); err != nil {
 		return err
 	}
 	s.metrics.ReplicaCount.Inc(1)
@@ -53,9 +53,8 @@ func (s *Store) ComputeMVCCStats() (enginepb.MVCCStats, error) {
 	var totalStats enginepb.MVCCStats
 	var err error
 
-	visitor := newStoreReplicaVisitor(s)
 	now := s.Clock().PhysicalNow()
-	visitor.Visit(func(r *Replica) bool {
+	newStoreReplicaVisitor(s).Visit(func(r *Replica) bool {
 		var stats enginepb.MVCCStats
 		stats, err = ComputeStatsForRange(r.Desc(), s.Engine(), now)
 		if err != nil {
@@ -99,6 +98,14 @@ func (s *Store) ForceRaftLogScanAndProcess() {
 // maintenance queue.
 func (s *Store) ForceTimeSeriesMaintenanceQueueProcess() {
 	forceScanAndProcess(s, s.tsMaintenanceQueue.baseQueue)
+}
+
+// ConsistencyQueueShouldQueue invokes the shouldQueue method on the
+// store's consistency queue.
+func (s *Store) ConsistencyQueueShouldQueue(
+	ctx context.Context, now hlc.Timestamp, r *Replica, cfg config.SystemConfig,
+) (bool, float64) {
+	return s.consistencyQueue.shouldQueue(ctx, now, r, cfg)
 }
 
 // GetDeadReplicas exports s.deadReplicas for tests.
@@ -159,14 +166,28 @@ func (s *Store) EnqueueRaftUpdateCheck(rangeID roachpb.RangeID) {
 	s.enqueueRaftUpdateCheck(rangeID)
 }
 
-// ManualReplicaGC processes the specified replica using the store's GC queue.
-func (s *Store) ManualReplicaGC(repl *Replica) error {
+func manualQueue(s *Store, q queueImpl, repl *Replica) error {
 	cfg, ok := s.Gossip().GetSystemConfig()
 	if !ok {
 		return fmt.Errorf("%s: system config not yet available", s)
 	}
-	ctx := s.AnnotateCtx(context.TODO())
-	return s.gcQueue.process(ctx, s.Clock().Now(), repl, cfg)
+	ctx := repl.AnnotateCtx(context.TODO())
+	return q.process(ctx, repl, cfg)
+}
+
+// ManualGC processes the specified replica using the store's GC queue.
+func (s *Store) ManualGC(repl *Replica) error {
+	return manualQueue(s, s.gcQueue, repl)
+}
+
+// ManualReplicaGC processes the specified replica using the store's replica
+// GC queue.
+func (s *Store) ManualReplicaGC(repl *Replica) error {
+	return manualQueue(s, s.replicaGCQueue, repl)
+}
+
+func (s *Store) ReservationCount() int {
+	return len(s.snapshotApplySem)
 }
 
 func (r *Replica) RaftLock() {
@@ -199,11 +220,27 @@ func (r *Replica) GetTimestampCacheLowWater() hlc.Timestamp {
 	return r.mu.tsCache.lowWater
 }
 
+// GetRaftLogSize returns the raft log size.
+func (r *Replica) GetRaftLogSize() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.mu.raftLogSize
+}
+
+func (r *Replica) IsRaftGroupInitialized() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.mu.internalRaftGroup != nil
+}
+
+// StorePoolNodeLivenessTrue is a NodeLivenessFunc which always returns true.
+func StorePoolNodeLivenessTrue(_ roachpb.NodeID, _ time.Time, _ time.Duration) bool {
+	return true
+}
+
 // GetStoreList is the same function as GetStoreList exposed for tests only.
-func (sp *StorePool) GetStoreList(
-	constraints config.Constraints, deterministic bool,
-) (StoreList, int, int) {
-	return sp.getStoreList(constraints, deterministic)
+func (sp *StorePool) GetStoreList(rangeID roachpb.RangeID) (StoreList, int, int) {
+	return sp.getStoreList(rangeID)
 }
 
 // IsQuiescent returns whether the replica is quiescent or not.
@@ -213,11 +250,20 @@ func (r *Replica) IsQuiescent() bool {
 	return r.mu.quiescent
 }
 
+// GetQueueLastProcessed returns the last processed timestamp for the
+// specified queue, or the zero timestamp if not available.
+func (r *Replica) GetQueueLastProcessed(ctx context.Context, queue string) (hlc.Timestamp, error) {
+	return r.getQueueLastProcessed(ctx, queue)
+}
+
+func (r *Replica) RaftTransferLeader(ctx context.Context, target roachpb.ReplicaID) {
+	r.maybeTransferRaftLeadership(ctx, target)
+}
+
 func GetGCQueueTxnCleanupThreshold() time.Duration {
 	return txnCleanupThreshold
 }
 
-// StopHeartbeat ends the heartbeat loop.
-func (nl *NodeLiveness) StopHeartbeat() {
-	close(nl.stopHeartbeat)
+func ProposerEvaluatedKVEnabled() bool {
+	return propEvalKV
 }

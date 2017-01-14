@@ -272,7 +272,7 @@ export function queryMetrics<S>(id: string, query: TSRequestMessage) {
       return queuePromise;
     }
 
-    queuePromise = new Promise<void>((resolve, reject) => {
+    queuePromise = new Promise<void>((resolve, _reject) => {
       setTimeout(() => {
         // Increment in-flight counter.
         dispatch(fetchMetrics());
@@ -331,6 +331,11 @@ export function queryMetrics<S>(id: string, query: TSRequestMessage) {
   };
 }
 
-function timespanKey(query: TSRequestMessage): string {
-  return query.start_nanos.toString() + ":" + query.end_nanos.toString();
+interface SimpleTimespan {
+  start_nanos?: Long;
+  end_nanos?: Long;
+}
+
+function timespanKey(timewindow: SimpleTimespan): string {
+  return (timewindow.start_nanos && timewindow.start_nanos.toString()) + ":" + (timewindow.end_nanos && timewindow.end_nanos.toString());
 }

@@ -114,22 +114,20 @@ type Context struct {
 func NewContext(
 	ambient log.AmbientContext, baseCtx *base.Config, hlcClock *hlc.Clock, stopper *stop.Stopper,
 ) *Context {
+	if hlcClock == nil {
+		panic("nil clock is forbidden")
+	}
 	ctx := &Context{
-		Config: baseCtx,
-	}
-	if hlcClock != nil {
-		ctx.localClock = hlcClock
-	} else {
-		ctx.localClock = hlc.NewClock(hlc.UnixNano)
-	}
-	ctx.breakerClock = breakerClock{
-		clock: ctx.localClock,
+		Config:     baseCtx,
+		localClock: hlcClock,
+		breakerClock: breakerClock{
+			clock: hlcClock,
+		},
 	}
 	var cancel context.CancelFunc
 	ctx.masterCtx, cancel = context.WithCancel(ambient.AnnotateCtx(context.Background()))
 	ctx.Stopper = stopper
-	ctx.RemoteClocks = newRemoteClockMonitor(
-		ctx.masterCtx, ctx.localClock, 10*defaultHeartbeatInterval)
+	ctx.RemoteClocks = newRemoteClockMonitor(ctx.localClock, 10*defaultHeartbeatInterval)
 	ctx.HeartbeatInterval = defaultHeartbeatInterval
 	ctx.HeartbeatTimeout = 2 * defaultHeartbeatInterval
 	ctx.conns.cache = make(map[string]*connMeta)
@@ -201,14 +199,21 @@ func (ctx *Context) GRPCDial(target string, opts ...grpc.DialOption) (*grpc.Clie
 	ctx.conns.Unlock()
 
 	meta.Do(func() {
-		dialOpt, err := ctx.GRPCDialOption()
-		if err != nil {
-			meta.err = err
-			return
+		var dialOpt grpc.DialOption
+		if ctx.Insecure {
+			dialOpt = grpc.WithInsecure()
+		} else {
+			tlsConfig, err := ctx.GetClientTLSConfig()
+			if err != nil {
+				meta.err = err
+				return
+			}
+			dialOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 		}
 
-		dialOpts := make([]grpc.DialOption, 0, 1+len(opts))
+		dialOpts := make([]grpc.DialOption, 0, 2+len(opts))
 		dialOpts = append(dialOpts, dialOpt)
+		dialOpts = append(dialOpts, grpc.WithBackoffMaxDelay(maxBackoff))
 		dialOpts = append(dialOpts, opts...)
 
 		if log.V(1) {
@@ -236,21 +241,6 @@ func (ctx *Context) GRPCDial(target string, opts ...grpc.DialOption) (*grpc.Clie
 	})
 
 	return meta.conn, meta.err
-}
-
-// GRPCDialOption returns the GRPC dialing option appropriate for the context.
-func (ctx *Context) GRPCDialOption() (grpc.DialOption, error) {
-	var dialOpt grpc.DialOption
-	if ctx.Insecure {
-		dialOpt = grpc.WithInsecure()
-	} else {
-		tlsConfig, err := ctx.GetClientTLSConfig()
-		if err != nil {
-			return dialOpt, err
-		}
-		dialOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
-	}
-	return dialOpt, nil
 }
 
 // NewBreaker creates a new circuit breaker properly configured for RPC
@@ -326,7 +316,7 @@ func (ctx *Context) runHeartbeat(cc *grpc.ClientConn, remoteAddr string) error {
 				remoteTimeNow := time.Unix(0, response.ServerTime).Add(pingDuration / 2)
 				request.Offset.Offset = remoteTimeNow.Sub(receiveTime).Nanoseconds()
 			}
-			ctx.RemoteClocks.UpdateOffset(remoteAddr, request.Offset)
+			ctx.RemoteClocks.UpdateOffset(ctx.masterCtx, remoteAddr, request.Offset)
 
 			if cb := ctx.HeartbeatCB; cb != nil {
 				cb()

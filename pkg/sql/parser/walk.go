@@ -16,7 +16,12 @@
 
 package parser
 
-import "reflect"
+import (
+	"bytes"
+	"fmt"
+	"reflect"
+	"strings"
+)
 
 // Visitor defines methods that are called for nodes during an expression or statement walk.
 type Visitor interface {
@@ -46,6 +51,17 @@ func (expr *AndExpr) Walk(v Visitor) Expr {
 		exprCopy := *expr
 		exprCopy.Left = left
 		exprCopy.Right = right
+		return &exprCopy
+	}
+	return expr
+}
+
+// Walk implements the Expr interface.
+func (expr *AnnotateTypeExpr) Walk(v Visitor) Expr {
+	e, changed := WalkExpr(v, expr.Expr)
+	if changed {
+		exprCopy := *expr
+		exprCopy.Expr = e
 		return &exprCopy
 	}
 	return expr
@@ -122,7 +138,7 @@ func (expr *CastExpr) Walk(v Visitor) Expr {
 }
 
 // Walk implements the Expr interface.
-func (expr *AnnotateTypeExpr) Walk(v Visitor) Expr {
+func (expr *CollateExpr) Walk(v Visitor) Expr {
 	e, changed := WalkExpr(v, expr.Expr)
 	if changed {
 		exprCopy := *expr
@@ -135,7 +151,7 @@ func (expr *AnnotateTypeExpr) Walk(v Visitor) Expr {
 // CopyNode makes a copy of this Expr without recursing in any child Exprs.
 func (expr *CoalesceExpr) CopyNode() *CoalesceExpr {
 	exprCopy := *expr
-	exprCopy.Exprs = Exprs(append([]Expr(nil), exprCopy.Exprs...))
+	exprCopy.Exprs = append(Exprs(nil), exprCopy.Exprs...)
 	return &exprCopy
 }
 
@@ -181,7 +197,17 @@ func (expr *ExistsExpr) Walk(v Visitor) Expr {
 // CopyNode makes a copy of this Expr without recursing in any child Exprs.
 func (expr *FuncExpr) CopyNode() *FuncExpr {
 	exprCopy := *expr
-	exprCopy.Exprs = Exprs(append([]Expr(nil), exprCopy.Exprs...))
+	exprCopy.Exprs = append(Exprs(nil), exprCopy.Exprs...)
+	if windowDef := exprCopy.WindowDef; windowDef != nil {
+		windowDef.Partitions = append(Exprs(nil), windowDef.Partitions...)
+		if len(windowDef.OrderBy) > 0 {
+			newOrderBy := make(OrderBy, len(windowDef.OrderBy))
+			for i, o := range windowDef.OrderBy {
+				newOrderBy[i] = &Order{Expr: o.Expr, Direction: o.Direction}
+			}
+			windowDef.OrderBy = newOrderBy
+		}
+	}
 	return &exprCopy
 }
 
@@ -195,6 +221,35 @@ func (expr *FuncExpr) Walk(v Visitor) Expr {
 				ret = expr.CopyNode()
 			}
 			ret.Exprs[i] = e
+		}
+	}
+	if expr.WindowDef != nil {
+		for i := range expr.WindowDef.Partitions {
+			e, changed := WalkExpr(v, expr.WindowDef.Partitions[i])
+			if changed {
+				if ret == expr {
+					ret = expr.CopyNode()
+				}
+				ret.WindowDef.Partitions[i] = e
+			}
+		}
+		for i := range expr.WindowDef.OrderBy {
+			e, changed := WalkExpr(v, expr.WindowDef.OrderBy[i].Expr)
+			if changed {
+				if ret == expr {
+					ret = expr.CopyNode()
+				}
+				ret.WindowDef.OrderBy[i].Expr = e
+			}
+		}
+	}
+	if expr.Filter != nil {
+		e, changed := WalkExpr(v, expr.Filter)
+		if changed {
+			if ret == expr {
+				ret = expr.CopyNode()
+			}
+			ret.Filter = e
 		}
 	}
 	return ret
@@ -213,6 +268,67 @@ func (expr *IfExpr) Walk(v Visitor) Expr {
 		return &exprCopy
 	}
 	return expr
+}
+
+// CopyNode makes a copy of this Expr without recursing in any child Exprs.
+func (expr *IndirectionExpr) CopyNode() *IndirectionExpr {
+	exprCopy := *expr
+	exprCopy.Indirection = append(UnresolvedName(nil), exprCopy.Indirection...)
+	for i, part := range exprCopy.Indirection {
+		switch t := part.(type) {
+		case Name:
+		case UnqualifiedStar:
+		case *ArraySubscript:
+			subscriptCopy := *t
+			exprCopy.Indirection[i] = &subscriptCopy
+		default:
+			panic(fmt.Sprintf("unexpected NamePart type %T", t))
+		}
+	}
+	return &exprCopy
+}
+
+// Walk implements the Expr interface.
+func (expr *IndirectionExpr) Walk(v Visitor) Expr {
+	ret := expr
+
+	e, changed := WalkExpr(v, expr.Expr)
+	if changed {
+		if ret == expr {
+			ret = expr.CopyNode()
+		}
+		ret.Expr = e
+	}
+
+	for i, part := range expr.Indirection {
+		switch t := part.(type) {
+		case Name:
+		case UnqualifiedStar:
+		case *ArraySubscript:
+			if t.Begin != nil {
+				e, changed := WalkExpr(v, t.Begin)
+				if changed {
+					if ret == expr {
+						ret = expr.CopyNode()
+					}
+					ret.Indirection[i].(*ArraySubscript).Begin = e
+				}
+			}
+			if t.End != nil {
+				e, changed := WalkExpr(v, t.End)
+				if changed {
+					if ret == expr {
+						ret = expr.CopyNode()
+					}
+					ret.Indirection[i].(*ArraySubscript).End = e
+				}
+			}
+		default:
+			panic(fmt.Sprintf("unexpected NamePart type %T", t))
+		}
+	}
+
+	return ret
 }
 
 // Walk implements the Expr interface.
@@ -325,20 +441,31 @@ func walkExprSlice(v Visitor, slice []Expr) ([]Expr, bool) {
 }
 
 // Walk implements the Expr interface.
-func (expr *Array) Walk(v Visitor) Expr {
-	exprs, changed := walkExprSlice(v, expr.Exprs)
-	if changed {
-		return &Array{exprs}
-	}
-	return expr
-}
-
-// Walk implements the Expr interface.
 func (expr *Tuple) Walk(v Visitor) Expr {
 	exprs, changed := walkExprSlice(v, expr.Exprs)
 	if changed {
 		exprCopy := *expr
 		exprCopy.Exprs = exprs
+		return &exprCopy
+	}
+	return expr
+}
+
+// Walk implements the Expr interface.
+func (expr *Array) Walk(v Visitor) Expr {
+	if exprs, changed := walkExprSlice(v, expr.Exprs); changed {
+		exprCopy := *expr
+		exprCopy.Exprs = exprs
+		return &exprCopy
+	}
+	return expr
+}
+
+// Walk implements the Expr interface.
+func (expr *ArrayFlatten) Walk(v Visitor) Expr {
+	if sq, changed := WalkExpr(v, expr.Subquery); changed {
+		exprCopy := *expr
+		exprCopy.Subquery = sq
 		return &exprCopy
 	}
 	return expr
@@ -400,6 +527,9 @@ func (expr dNull) Walk(_ Visitor) Expr { return expr }
 func (expr *DString) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
+func (expr *DCollatedString) Walk(_ Visitor) Expr { return expr }
+
+// Walk implements the Expr interface.
 func (expr *DTimestamp) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
@@ -407,6 +537,12 @@ func (expr *DTimestampTZ) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
 func (expr *DTuple) Walk(_ Visitor) Expr { return expr }
+
+// Walk implements the Expr interface.
+func (expr *DArray) Walk(_ Visitor) Expr { return expr }
+
+// Walk implements the Expr interface.
+func (expr *DTable) Walk(_ Visitor) Expr { return expr }
 
 // WalkExpr traverses the nodes in an expression.
 //
@@ -449,7 +585,7 @@ func (stmt *Delete) CopyNode() *Delete {
 		wCopy := *stmt.Where
 		stmtCopy.Where = &wCopy
 	}
-	stmtCopy.Returning = ReturningExprs(append([]SelectExpr(nil), stmt.Returning...))
+	stmtCopy.Returning = append(ReturningExprs(nil), stmt.Returning...)
 	return &stmtCopy
 }
 
@@ -495,7 +631,7 @@ func (stmt *Explain) WalkStmt(v Visitor) Statement {
 // CopyNode makes a copy of this Expr without recursing in any child Exprs.
 func (stmt *Insert) CopyNode() *Insert {
 	stmtCopy := *stmt
-	stmtCopy.Returning = ReturningExprs(append([]SelectExpr(nil), stmt.Returning...))
+	stmtCopy.Returning = append(ReturningExprs(nil), stmt.Returning...)
 	return &stmtCopy
 }
 
@@ -598,16 +734,16 @@ func (stmt *Select) WalkStmt(v Visitor) Statement {
 // CopyNode makes a copy of this Expr without recursing in any child Exprs.
 func (stmt *SelectClause) CopyNode() *SelectClause {
 	stmtCopy := *stmt
-	stmtCopy.Exprs = SelectExprs(append([]SelectExpr(nil), stmt.Exprs...))
+	stmtCopy.Exprs = append(SelectExprs(nil), stmt.Exprs...)
 	stmtCopy.From = &From{
-		Tables: TableExprs(append([]TableExpr(nil), stmt.From.Tables...)),
+		Tables: append(TableExprs(nil), stmt.From.Tables...),
 		AsOf:   stmt.From.AsOf,
 	}
 	if stmt.Where != nil {
 		wCopy := *stmt.Where
 		stmtCopy.Where = &wCopy
 	}
-	stmtCopy.GroupBy = GroupBy(append([]Expr(nil), stmt.GroupBy...))
+	stmtCopy.GroupBy = append(GroupBy(nil), stmt.GroupBy...)
 	if stmt.Having != nil {
 		hCopy := *stmt.Having
 		stmtCopy.Having = &hCopy
@@ -695,7 +831,7 @@ func (stmt *SelectClause) WalkStmt(v Visitor) Statement {
 // CopyNode makes a copy of this Expr without recursing in any child Exprs.
 func (stmt *Set) CopyNode() *Set {
 	stmtCopy := *stmt
-	stmtCopy.Values = Exprs(append([]Expr(nil), stmt.Values...))
+	stmtCopy.Values = append(Exprs(nil), stmt.Values...)
 	return &stmtCopy
 }
 
@@ -717,7 +853,7 @@ func (stmt *Set) WalkStmt(v Visitor) Statement {
 // CopyNode makes a copy of this Expr without recursing in any child Exprs.
 func (stmt *Update) CopyNode() *Update {
 	stmtCopy := *stmt
-	stmtCopy.Exprs = UpdateExprs(make([]*UpdateExpr, len(stmt.Exprs)))
+	stmtCopy.Exprs = make(UpdateExprs, len(stmt.Exprs))
 	for i, e := range stmt.Exprs {
 		eCopy := *e
 		stmtCopy.Exprs[i] = &eCopy
@@ -726,7 +862,7 @@ func (stmt *Update) CopyNode() *Update {
 		wCopy := *stmt.Where
 		stmtCopy.Where = &wCopy
 	}
-	stmtCopy.Returning = ReturningExprs(append([]SelectExpr(nil), stmt.Returning...))
+	stmtCopy.Returning = append(ReturningExprs(nil), stmt.Returning...)
 	return &stmtCopy
 }
 
@@ -843,3 +979,45 @@ func SimpleVisit(expr Expr, preFn SimpleVisitFn) (Expr, error) {
 	}
 	return newExpr, nil
 }
+
+type debugVisitor struct {
+	buf   bytes.Buffer
+	level int
+}
+
+var _ Visitor = &debugVisitor{}
+
+func (v *debugVisitor) VisitPre(expr Expr) (recurse bool, newExpr Expr) {
+	v.level++
+	fmt.Fprintf(&v.buf, "%*s", 2*v.level, " ")
+	str := fmt.Sprintf("%#v\n", expr)
+	// Remove "parser." to make the string more compact.
+	str = strings.Replace(str, "parser.", "", -1)
+	v.buf.WriteString(str)
+	return true, expr
+}
+
+func (v *debugVisitor) VisitPost(expr Expr) Expr {
+	v.level--
+	return expr
+}
+
+// ExprDebugString generates a multi-line debug string with one node per line in
+// Go format.
+func ExprDebugString(expr Expr) string {
+	v := debugVisitor{}
+	WalkExprConst(&v, expr)
+	return v.buf.String()
+}
+
+// StmtDebugString generates multi-line debug strings in Go format for the
+// expressions that are part of the given statement.
+func StmtDebugString(stmt Statement) string {
+	v := debugVisitor{}
+	WalkStmt(&v, stmt)
+	return v.buf.String()
+}
+
+// Silence any warnings if these functions are not used.
+var _ = ExprDebugString
+var _ = StmtDebugString

@@ -357,6 +357,8 @@ func TestVmoduleGlob(t *testing.T) {
 }
 
 func TestListLogFiles(t *testing.T) {
+	s := Scope(t, "")
+	defer s.Close(t)
 	setFlags()
 
 	methods := map[Severity]func(context.Context, ...interface{}){
@@ -399,6 +401,9 @@ func TestListLogFiles(t *testing.T) {
 }
 
 func TestGetLogReader(t *testing.T) {
+	s := Scope(t, "")
+	defer s.Close(t)
+
 	setFlags()
 	Warning(context.Background(), "x")
 	warn, ok := logging.file[Severity_WARNING].(*syncBuffer)
@@ -416,7 +421,11 @@ func TestGetLogReader(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	otherFile, err := os.Create(filepath.Join(logDir, "other.txt"))
+	dir, err := logDir.get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherFile, err := os.Create(filepath.Join(dir, "other.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,17 +437,17 @@ func TestGetLogReader(t *testing.T) {
 		expErrUnrestricted string
 	}{
 		// File is not specified (trying to open a directory instead).
-		{logDir, "pathnames must be basenames", "not a regular file"},
+		{dir, "pathnames must be basenames", "not a regular file"},
 		// Absolute filename is specified.
 		{warn.file.Name(), "pathnames must be basenames", ""},
 		// Symlink to a log file.
-		{filepath.Join(logDir, removePeriods(program)+".WARNING"), "pathnames must be basenames", ""},
+		{filepath.Join(dir, removePeriods(program)+".WARNING"), "pathnames must be basenames", ""},
 		// Symlink relative to logDir.
 		{removePeriods(program) + ".WARNING", "malformed log filename", ""},
 		// Non-log file.
 		{"other.txt", "malformed log filename", "malformed log filename"},
 		// Non-existent file matching RE.
-		{"cockroach.roach0.root.log.ERROR.2015-09-25T19_24_19Z.1", "no such file", "no such file"},
+		{"cockroach.roach0.root.2015-09-25T19_24_19Z.00000.ERROR.log", "no such file", "no such file"},
 		// Base filename is specified.
 		{warnName, "", ""},
 		// Relative path with directory components.
@@ -476,6 +485,9 @@ func TestGetLogReader(t *testing.T) {
 }
 
 func TestRollover(t *testing.T) {
+	s := Scope(t, "")
+	defer s.Close(t)
+
 	setFlags()
 	var err error
 	defer func(previous func(error)) { logExitFunc = previous }(logExitFunc)
@@ -483,7 +495,7 @@ func TestRollover(t *testing.T) {
 		err = e
 	}
 	defer func(previous uint64) { MaxSize = previous }(MaxSize)
-	MaxSize = 1024
+	MaxSize = 2048
 
 	Info(context.Background(), "x") // Be sure we have a file.
 	info, ok := logging.file[Severity_INFO].(*syncBuffer)
@@ -501,11 +513,6 @@ func TestRollover(t *testing.T) {
 
 	// Make sure the next log file gets a file name with a different
 	// time stamp.
-	//
-	// TODO: determine whether we need to support subsecond log
-	// rotation.  C++ does not appear to handle this case (nor does it
-	// handle Daylight Savings Time properly).
-	time.Sleep(1 * time.Second)
 
 	Info(context.Background(), "x") // create a new file
 	if err != nil {
@@ -521,6 +528,9 @@ func TestRollover(t *testing.T) {
 }
 
 func TestLogBacktraceAt(t *testing.T) {
+	s := Scope(t, "")
+	defer s.Close(t)
+
 	setFlags()
 	defer logging.swap(logging.newBuffers())
 	// The peculiar style of this code simplifies line counting and maintenance of the
@@ -563,6 +573,9 @@ func TestLogBacktraceAt(t *testing.T) {
 // in the future clog and this test can be adapted to actually test that;
 // right now clog writes straight to os.StdErr.
 func TestFatalStacktraceStderr(t *testing.T) {
+	s := Scope(t, "")
+	defer s.Close(t)
+
 	setFlags()
 	logging.stderrThreshold = Severity_NONE
 	logging.toStderr = false

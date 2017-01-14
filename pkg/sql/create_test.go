@@ -183,10 +183,16 @@ func createTestTable(
 			val INT
 		)`, id)
 
-	if _, err := db.Exec(tableSQL); err != nil {
-		t.Errorf("table %d: could not be created: %s", id, err)
-	} else {
+	for {
+		if _, err := db.Exec(tableSQL); err != nil {
+			if testutils.IsSQLRetryableError(err) {
+				continue
+			}
+			t.Errorf("table %d: could not be created: %v", id, err)
+			return
+		}
 		completed <- id
+		break
 	}
 }
 
@@ -246,9 +252,6 @@ func TestParallelCreateTables(t *testing.T) {
 
 	tc := testcluster.StartTestCluster(t, numberOfNodes, base.TestClusterArgs{})
 	defer tc.Stopper().Stop()
-	if err := tc.WaitForFullReplication(); err != nil {
-		t.Fatal(err)
-	}
 
 	if _, err := tc.ServerConn(0).Exec(`CREATE DATABASE "test"`); err != nil {
 		t.Fatal(err)
@@ -302,9 +305,6 @@ func TestParallelCreateConflictingTables(t *testing.T) {
 
 	tc := testcluster.StartTestCluster(t, numberOfNodes, base.TestClusterArgs{})
 	defer tc.Stopper().Stop()
-	if err := tc.WaitForFullReplication(); err != nil {
-		t.Fatal(err)
-	}
 
 	if _, err := tc.ServerConn(0).Exec(`CREATE DATABASE "test"`); err != nil {
 		t.Fatal(err)

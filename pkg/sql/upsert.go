@@ -98,7 +98,7 @@ func (p *planner) makeUpsertHelper(
 			if t, ok := updateExpr.Expr.(*parser.Tuple); ok {
 				for _, e := range t.Exprs {
 					typ := updateCols[i].Type.ToDatumType()
-					e := fillDefault(e, typ, i, defaultExprs)
+					e = fillDefault(e, typ, i, defaultExprs)
 					untupledExprs = append(untupledExprs, e)
 					i++
 				}
@@ -124,7 +124,7 @@ func (p *planner) makeUpsertHelper(
 	ivarHelper := parser.MakeIndexedVarHelper(helper, len(sourceInfo.sourceColumns)+len(excludedSourceInfo.sourceColumns))
 	sources := multiSourceInfo{sourceInfo, excludedSourceInfo}
 	for _, expr := range untupledExprs {
-		normExpr, err := p.analyzeExpr(expr, sources, ivarHelper, parser.NoTypePreference, false, "")
+		normExpr, err := p.analyzeExpr(expr, sources, ivarHelper, parser.TypeAny, false, "")
 		if err != nil {
 			return nil, err
 		}
@@ -141,8 +141,8 @@ func (p *planner) makeUpsertHelper(
 			break
 		}
 		if len(c.Selector) > 0 ||
-			!sqlbase.EqualName(c.TableName.TableName, upsertExcludedTable.TableName) ||
-			sqlbase.NormalizeName(c.ColumnName) != sqlbase.ReNormalizeName(updateCols[i].Name) {
+			!c.TableName.TableName.Equal(upsertExcludedTable.TableName) ||
+			c.ColumnName.Normalize() != parser.ReNormalizeName(updateCols[i].Name) {
 			helper.allExprsIdentity = false
 			break
 		}
@@ -151,22 +151,10 @@ func (p *planner) makeUpsertHelper(
 	return helper, nil
 }
 
-func (uh *upsertHelper) expand() error {
-	for _, evalExpr := range uh.evalExprs {
-		if err := uh.p.expandSubqueryPlans(evalExpr); err != nil {
-			return err
-		}
+func (uh *upsertHelper) walkExprs(walk func(desc string, index int, expr parser.TypedExpr)) {
+	for i, evalExpr := range uh.evalExprs {
+		walk("eval", i, evalExpr)
 	}
-	return nil
-}
-
-func (uh *upsertHelper) start() error {
-	for _, evalExpr := range uh.evalExprs {
-		if err := uh.p.startSubqueryPlans(evalExpr); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // eval returns the values for the update case of an upsert, given the row
@@ -234,7 +222,7 @@ func upsertExprsAndIndex(
 			return false
 		}
 		for i, colName := range index.ColumnNames {
-			if sqlbase.ReNormalizeName(colName) != sqlbase.NormalizeName(onConflict.Columns[i]) {
+			if parser.ReNormalizeName(colName) != onConflict.Columns[i].Normalize() {
 				return false
 			}
 		}

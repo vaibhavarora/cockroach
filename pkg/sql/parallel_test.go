@@ -28,6 +28,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,6 +42,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -74,7 +76,7 @@ func (t *parallelTest) processTestFile(path string, nodeIdx int, db *gosql.DB, c
 
 	// Set up a dummy logicTest structure to use that code.
 	l := &logicTest{
-		T:       t.T,
+		t:       t.T,
 		srv:     t.cluster.Server(nodeIdx),
 		db:      db,
 		user:    security.RootUser,
@@ -90,8 +92,8 @@ func (t *parallelTest) getClient(nodeIdx, clientIdx int) *gosql.DB {
 		// Add a client.
 		pgURL, cleanupFunc := sqlutils.PGUrl(t.T,
 			t.cluster.Server(nodeIdx).ServingAddr(),
-			security.RootUser,
-			"TestParallel")
+			"TestParallel",
+			url.User(security.RootUser))
 		db, err := gosql.Open("postgres", pgURL.String())
 		if err != nil {
 			t.Fatal(err)
@@ -139,8 +141,7 @@ func (t *parallelTest) run(dir string) {
 	}
 
 	if spec.SkipReason != "" {
-		log.Warningf(t.ctx, "Skipping test %s: %s", dir, spec.SkipReason)
-		return
+		t.Skip(spec.SkipReason)
 	}
 
 	log.Infof(t.ctx, "Running test %s", dir)
@@ -186,7 +187,6 @@ func (t *parallelTest) setup(spec *parTestSpec) {
 
 	args := base.TestClusterArgs{
 		ServerArgs: base.TestServerArgs{
-			MaxOffset: logicMaxOffset,
 			Knobs: base.TestingKnobs{
 				SQLExecutor: &sql.ExecutorTestingKnobs{
 					WaitForGossipUpdate:   true,
@@ -226,14 +226,6 @@ func (t *parallelTest) setup(spec *parTestSpec) {
 		sqlutils.MakeSQLRunner(t, t.clients[i][0]).Exec("SET DATABASE = test")
 	}
 
-	if spec.ClusterSize >= 3 {
-		if testing.Verbose() || log.V(1) {
-			log.Infof(t.ctx, "Waiting for full replication")
-		}
-		if err := t.cluster.WaitForFullReplication(); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if testing.Verbose() || log.V(1) {
 		log.Infof(t.ctx, "Test setup done")
 	}
@@ -241,6 +233,10 @@ func (t *parallelTest) setup(spec *parTestSpec) {
 
 func TestParallel(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+
+	if testutils.Stress() {
+		t.Skip()
+	}
 
 	glob := string(*paralleltestdata)
 	paths, err := filepath.Glob(glob)
@@ -251,10 +247,12 @@ func TestParallel(t *testing.T) {
 		t.Fatalf("No testfiles found (glob: %s)", glob)
 	}
 	total := 0
-	for _, p := range paths {
-		pt := parallelTest{T: t, ctx: context.Background()}
-		pt.run(p)
-		total++
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			pt := parallelTest{T: t, ctx: context.Background()}
+			pt.run(path)
+			total++
+		})
 	}
 	log.Infof(context.Background(), "%d parallel tests passed", total)
 }

@@ -667,24 +667,20 @@ func NewTransaction(
 	now hlc.Timestamp,
 	maxOffset int64,
 ) *Transaction {
-	// Compute priority by adjusting based on userPriority factor.
-	priority := MakePriority(userPriority)
-	// Compute timestamp and max timestamp.
-	max := now
-	max.WallTime += maxOffset
+	u := uuid.MakeV4()
 
 	return &Transaction{
 		TxnMeta: enginepb.TxnMeta{
 			Key:       baseKey,
-			ID:        uuid.NewV4(),
+			ID:        &u,
 			Isolation: isolation,
 			Timestamp: now,
-			Priority:  priority,
+			Priority:  MakePriority(userPriority),
 			Sequence:  1,
 		},
 		Name:          name,
 		OrigTimestamp: now,
-		MaxTimestamp:  max,
+		MaxTimestamp:  now.Add(maxOffset, 0),
 	}
 }
 
@@ -918,7 +914,7 @@ func (t Transaction) String() string {
 		fmt.Fprintf(&buf, "%q ", t.Name)
 	}
 	fmt.Fprintf(&buf, "id=%s key=%s rw=%t pri=%.8f iso=%s stat=%s epo=%d ts=%s orig=%s max=%s wto=%t rop=%t",
-		t.ID.Short(), Key(t.Key), t.Writing, floatPri, t.Isolation, t.Status, t.Epoch, t.Timestamp,
+		t.Short(), Key(t.Key), t.Writing, floatPri, t.Isolation, t.Status, t.Epoch, t.Timestamp,
 		t.OrigTimestamp, t.MaxTimestamp, t.WriteTooOld, t.RetryOnPush)
 	return buf.String()
 }
@@ -953,24 +949,67 @@ func (t Transaction) GetObservedTimestamp(nodeID NodeID) (hlc.Timestamp, bool) {
 var _ fmt.Stringer = &Lease{}
 
 func (l Lease) String() string {
-	start := time.Unix(0, l.Start.WallTime).UTC()
-	expiration := time.Unix(0, l.Expiration.WallTime).UTC()
-	return fmt.Sprintf("replica %s %s %s", l.Replica, start, expiration.Sub(start))
-}
-
-// Covers returns true if the given timestamp can be served by the Lease.
-// This is the case if the timestamp precedes the Lease's stasis period.
-// Note that the fact that a lease covers a timestamp is not enough for the
-// holder of the lease to be able to serve a read with that timestamp;
-// pendingLeaderLeaseRequest.TransferInProgress() should also be consulted to
-// account for possible lease transfers.
-func (l Lease) Covers(timestamp hlc.Timestamp) bool {
-	return timestamp.Less(l.StartStasis)
+	var proposedSuffix string
+	if l.ProposedTS != nil {
+		proposedSuffix = fmt.Sprintf(" pro=%s", l.ProposedTS)
+	}
+	if l.Type() == LeaseExpiration {
+		return fmt.Sprintf("repl=%s start=%s exp=%s%s", l.Replica, l.Start, l.Expiration, proposedSuffix)
+	}
+	return fmt.Sprintf("repl=%s start=%s epo=%d%s", l.Replica, l.Start, *l.Epoch, proposedSuffix)
 }
 
 // OwnedBy returns whether the given store is the lease owner.
 func (l Lease) OwnedBy(storeID StoreID) bool {
 	return l.Replica.StoreID == storeID
+}
+
+// LeaseType describes the type of lease.
+type LeaseType int
+
+const (
+	// LeaseNone specifies no lease, to be used as a default value.
+	LeaseNone LeaseType = iota
+	// LeaseExpiration allows range operations while the wall clock is
+	// within the expiration timestamp.
+	LeaseExpiration
+	// LeaseEpoch allows range operations while the node liveness epoch
+	// is equal to the lease epoch.
+	LeaseEpoch
+)
+
+// Type returns the lease type.
+func (l Lease) Type() LeaseType {
+	if l.Epoch == nil {
+		return LeaseExpiration
+	}
+	return LeaseEpoch
+}
+
+// Equivalent determines whether ol is considered the same lease
+// for the purposes of matching leases when executing a command.
+// For expiration-based leases, extensions are allowed.
+// Ignore proposed timestamps for lease verification; for epoch-
+// based leases, the start time of the lease is sufficient to
+// avoid using an older lease with same epoch.
+func (l Lease) Equivalent(ol Lease) error {
+	// Ignore proposed timestamp & deprecated start stasis.
+	l.ProposedTS, ol.ProposedTS = nil, nil
+	l.DeprecatedStartStasis = ol.DeprecatedStartStasis
+	// If both leases are epoch-based, we must dereference the epochs
+	// and then set to nil.
+	if l.Type() == LeaseEpoch && ol.Type() == LeaseEpoch && *l.Epoch == *ol.Epoch {
+		l.Epoch, ol.Epoch = nil, nil
+	}
+	// For expiration-based leases, extensions are considered equivalent.
+	if l.Type() == LeaseExpiration && ol.Type() == LeaseExpiration &&
+		l.Expiration.Less(ol.Expiration) {
+		l.Expiration = ol.Expiration
+	}
+	if l == ol {
+		return nil
+	}
+	return errors.Errorf("leases %+v and %+v are not equivalent", l, ol)
 }
 
 // AsIntents takes a slice of spans and returns it as a slice of intents for
@@ -1027,8 +1066,9 @@ func (rs RSpan) ContainsKey(key RKey) bool {
 	return bytes.Compare(key, rs.Key) >= 0 && bytes.Compare(key, rs.EndKey) < 0
 }
 
-// ContainsExclusiveEndKey returns whether this span contains the specified (exclusive) end key
-// (e.g., span ["a", b") contains "b" as exclusive end key).
+// ContainsExclusiveEndKey returns whether this span contains the specified key.
+// A span is considered to include its EndKey (e.g., span ["a", b") contains
+// "b" according to this function, but does not contain "a").
 func (rs RSpan) ContainsExclusiveEndKey(key RKey) bool {
 	return bytes.Compare(key, rs.Key) > 0 && bytes.Compare(key, rs.EndKey) <= 0
 }
@@ -1051,11 +1091,9 @@ func (rs RSpan) ContainsKeyRange(start, end RKey) bool {
 // Intersect returns the intersection of the current span and the
 // descriptor's range. Returns an error if the span and the
 // descriptor's range do not overlap.
-// TODO(nvanbenschoten) Investigate why this returns an endKey when
-// rs.EndKey is nil. This gives the method unexpected behavior.
 func (rs RSpan) Intersect(desc *RangeDescriptor) (RSpan, error) {
 	if !rs.Key.Less(desc.EndKey) || !desc.StartKey.Less(rs.EndKey) {
-		return rs, errors.Errorf("span and descriptor's range do not overlap")
+		return rs, errors.Errorf("span and descriptor's range do not overlap: %s vs %s", rs, desc)
 	}
 
 	key := rs.Key
@@ -1063,7 +1101,7 @@ func (rs RSpan) Intersect(desc *RangeDescriptor) (RSpan, error) {
 		key = desc.StartKey
 	}
 	endKey := rs.EndKey
-	if !desc.ContainsKeyRange(desc.StartKey, endKey) || endKey == nil {
+	if !desc.ContainsKeyRange(desc.StartKey, endKey) {
 		endKey = desc.EndKey
 	}
 	return RSpan{key, endKey}, nil

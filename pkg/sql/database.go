@@ -100,11 +100,6 @@ type DatabaseAccessor interface {
 	// returning an error if the descriptor is not found.
 	mustGetDatabaseDesc(name string) (*sqlbase.DatabaseDescriptor, error)
 
-	// getCachedDatabaseDesc looks up the database descriptor from
-	// the descriptor cache, given its name.
-	// TODO(nvanbenschoten) This method doesn't belong in the interface.
-	getCachedDatabaseDesc(name string) (*sqlbase.DatabaseDescriptor, error)
-
 	// getAllDatabaseDescs looks up and returns all available database
 	// descriptors.
 	getAllDatabaseDescs() ([]*sqlbase.DatabaseDescriptor, error)
@@ -128,22 +123,35 @@ type DatabaseAccessor interface {
 
 var _ DatabaseAccessor = &planner{}
 
-// getDatabaseDesc implements the DatabaseAccessor interface.
 func (p *planner) getDatabaseDesc(name string) (*sqlbase.DatabaseDescriptor, error) {
-	if virtual := p.virtualSchemas().getVirtualDatabaseDesc(name); virtual != nil {
+	return getDatabaseDesc(p.txn, &p.session.virtualSchemas, name)
+}
+
+func getDatabaseDesc(
+	txn *client.Txn, vt VirtualTabler, name string,
+) (*sqlbase.DatabaseDescriptor, error) {
+	if virtual := vt.getVirtualDatabaseDesc(name); virtual != nil {
 		return virtual, nil
 	}
 	desc := &sqlbase.DatabaseDescriptor{}
-	found, err := p.getDescriptor(databaseKey{name}, desc)
+	found, err := getDescriptor(txn, databaseKey{name}, desc)
 	if !found {
 		return nil, err
 	}
 	return desc, err
 }
 
-// getDatabaseDesc implements the DatabaseAccessor interface.
+// mustGetDatabaseDesc implements the DatabaseAccessor interface.
 func (p *planner) mustGetDatabaseDesc(name string) (*sqlbase.DatabaseDescriptor, error) {
-	desc, err := p.getDatabaseDesc(name)
+	return MustGetDatabaseDesc(p.txn, &p.session.virtualSchemas, name)
+}
+
+// MustGetDatabaseDesc looks up the database descriptor given its name,
+// returning an error if the descriptor is not found.
+func MustGetDatabaseDesc(
+	txn *client.Txn, vt VirtualTabler, name string,
+) (*sqlbase.DatabaseDescriptor, error) {
+	desc, err := getDatabaseDesc(txn, vt, name)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +161,8 @@ func (p *planner) mustGetDatabaseDesc(name string) (*sqlbase.DatabaseDescriptor,
 	return desc, nil
 }
 
-// getCachedDatabaseDesc implements the DatabaseAccessor interface.
+// getCachedDatabaseDesc looks up the database descriptor from the descriptor cache,
+// given its name.
 func (p *planner) getCachedDatabaseDesc(name string) (*sqlbase.DatabaseDescriptor, error) {
 	if name == sqlbase.SystemDB.Name {
 		return &sqlbase.SystemDB, nil
@@ -207,7 +216,7 @@ func (p *planner) getAllDatabaseDescs() ([]*sqlbase.DatabaseDescriptor, error) {
 
 // getDatabaseID implements the DatabaseAccessor interface.
 func (p *planner) getDatabaseID(name string) (sqlbase.ID, error) {
-	if virtual := p.virtualSchemas().getVirtualDatabaseDesc(name); virtual != nil {
+	if virtual := p.session.virtualSchemas.getVirtualDatabaseDesc(name); virtual != nil {
 		return virtual.GetID(), nil
 	}
 
@@ -236,7 +245,7 @@ func (p *planner) getDatabaseID(name string) (sqlbase.ID, error) {
 
 // createDatabase implements the DatabaseAccessor interface.
 func (p *planner) createDatabase(desc *sqlbase.DatabaseDescriptor, ifNotExists bool) (bool, error) {
-	if p.virtualSchemas().isVirtualDatabase(desc.Name) {
+	if p.session.virtualSchemas.isVirtualDatabase(desc.Name) {
 		if ifNotExists {
 			// Noop.
 			return false, nil
@@ -252,7 +261,7 @@ func (p *planner) renameDatabase(oldDesc *sqlbase.DatabaseDescriptor, newName st
 		return fmt.Errorf("the new database name %q already exists", newName)
 	}
 
-	if p.virtualSchemas().isVirtualDatabase(newName) {
+	if p.session.virtualSchemas.isVirtualDatabase(newName) {
 		return onAlreadyExists()
 	}
 

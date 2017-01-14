@@ -19,19 +19,20 @@ package storage_test
 import (
 	"testing"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/pkg/errors"
 )
 
 func TestComputeStatsForKeySpan(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	mtc := startMultiTestContext(t, 3)
+	mtc := &multiTestContext{}
 	defer mtc.Stop()
+	mtc.Start(t, 3)
 
 	// Create a number of ranges using splits.
 	splitKeys := []string{"a", "c", "e", "g", "i"}
@@ -42,13 +43,13 @@ func TestComputeStatsForKeySpan(t *testing.T) {
 		header := roachpb.Header{
 			RangeID: repl.RangeID,
 		}
-		if _, err := client.SendWrappedWith(context.Background(), mtc.stores[0], header, &args); err != nil {
+		if _, err := client.SendWrappedWith(context.Background(), mtc.stores[0], header, args); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Wait for splits to finish.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		repl := mtc.stores[0].LookupReplica(roachpb.RKey("z"), nil)
 		if actualRSpan := repl.Desc().RSpan(); !actualRSpan.Key.Equal(roachpb.RKey("i")) {
 			return errors.Errorf("expected range %s to begin at key 'i'", repl)

@@ -37,7 +37,7 @@ type loop struct {
 	stallThresh   inf.Dec // The maximum |delta| to be considered a stall.
 }
 
-var digitsToBitsRatio = 1 / math.Log10(2)
+const digitsToBitsRatio = math.Ln10 / math.Ln2
 
 // newLoop returns a new loop checker. The arguments are the name
 // of the function being evaluated, the argument to the function,
@@ -48,6 +48,9 @@ func newLoop(name string, x *inf.Dec, s inf.Scale, itersPerBit int) *loop {
 	incrPrec := s - x.Scale()
 	if incrPrec > 0 {
 		bits += int(float64(incrPrec) * digitsToBitsRatio)
+	}
+	if scaleBits := int(float64(s) * digitsToBitsRatio); scaleBits > bits {
+		bits = scaleBits
 	}
 	l := &loop{
 		name:          name,

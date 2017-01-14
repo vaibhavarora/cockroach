@@ -21,17 +21,13 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"math/rand"
-	"path/filepath"
 	"testing"
 
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
-	"github.com/cockroachdb/cockroach/pkg/rpc"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/pkg/errors"
 )
@@ -58,23 +54,18 @@ func newKVNative(b *testing.B) kvInterface {
 	enableTracing := tracing.Disable()
 	s, _, _ := serverutils.StartServer(b, base.TestServerArgs{})
 
-	// TestServer.DB() returns the TxnCoordSender wrapped client. But that isn't
-	// a fair comparison with SQL as we want these client requests to be sent
-	// over the network.
-	sender, err := client.NewSender(
-		rpc.NewContext(log.AmbientContext{}, &base.Config{
-			User:       security.NodeUser,
-			SSLCA:      filepath.Join(security.EmbeddedCertsDir, security.EmbeddedCACert),
-			SSLCert:    filepath.Join(security.EmbeddedCertsDir, "node.crt"),
-			SSLCertKey: filepath.Join(security.EmbeddedCertsDir, "node.key"),
-		}, nil, s.Stopper()),
-		s.ServingAddr())
+	// TestServer.KVClient() returns the TxnCoordSender wrapped client. But that
+	// isn't a fair comparison with SQL as we want these client requests to be
+	// sent over the network.
+	rpcContext := s.RPCContext()
+
+	conn, err := rpcContext.GRPCDial(s.ServingAddr())
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	return &kvNative{
-		db: client.NewDB(sender),
+		db: client.NewDB(client.NewSender(conn)),
 		doneFn: func() {
 			s.Stopper().Stop()
 			enableTracing()
@@ -88,7 +79,7 @@ func (kv *kvNative) insert(rows, run int) error {
 	err := kv.db.Txn(context.TODO(), func(txn *client.Txn) error {
 		b := txn.NewBatch()
 		for i := firstRow; i < lastRow; i++ {
-			b.Put(fmt.Sprintf("%s%06d", kv.prefix, i), i)
+			b.Put(fmt.Sprintf("%s%08d", kv.prefix, i), i)
 		}
 		return txn.CommitInBatch(b)
 	})
@@ -101,7 +92,7 @@ func (kv *kvNative) update(rows, run int) error {
 		// Read all values in a batch.
 		b := txn.NewBatch()
 		for i := 0; i < rows; i++ {
-			b.Get(fmt.Sprintf("%s%06d", kv.prefix, perm[i]))
+			b.Get(fmt.Sprintf("%s%08d", kv.prefix, perm[i]))
 		}
 		if err := txn.Run(b); err != nil {
 			return err
@@ -110,7 +101,7 @@ func (kv *kvNative) update(rows, run int) error {
 		wb := txn.NewBatch()
 		for i, result := range b.Results {
 			v := result.Rows[0].ValueInt()
-			wb.Put(fmt.Sprintf("%s%06d", kv.prefix, perm[i]), v+1)
+			wb.Put(fmt.Sprintf("%s%08d", kv.prefix, perm[i]), v+1)
 		}
 		return txn.CommitInBatch(wb)
 	})
@@ -123,7 +114,7 @@ func (kv *kvNative) del(rows, run int) error {
 	err := kv.db.Txn(context.TODO(), func(txn *client.Txn) error {
 		b := txn.NewBatch()
 		for i := firstRow; i < lastRow; i++ {
-			b.Del(fmt.Sprintf("%s%06d", kv.prefix, i))
+			b.Del(fmt.Sprintf("%s%08d", kv.prefix, i))
 		}
 		return txn.CommitInBatch(b)
 	})
@@ -134,7 +125,7 @@ func (kv *kvNative) scan(rows, run int) error {
 	var kvs []client.KeyValue
 	err := kv.db.Txn(context.TODO(), func(txn *client.Txn) error {
 		var err error
-		kvs, err = txn.Scan(fmt.Sprintf("%s%06d", kv.prefix, 0), fmt.Sprintf("%s%06d", kv.prefix, rows), int64(rows))
+		kvs, err = txn.Scan(fmt.Sprintf("%s%08d", kv.prefix, 0), fmt.Sprintf("%s%08d", kv.prefix, rows), int64(rows))
 		return err
 	})
 	if len(kvs) != rows {
@@ -152,7 +143,7 @@ func (kv *kvNative) prep(rows int, initData bool) error {
 	err := kv.db.Txn(context.TODO(), func(txn *client.Txn) error {
 		b := txn.NewBatch()
 		for i := 0; i < rows; i++ {
-			b.Put(fmt.Sprintf("%s%06d", kv.prefix, i), i)
+			b.Put(fmt.Sprintf("%s%08d", kv.prefix, i), i)
 		}
 		return txn.CommitInBatch(b)
 	})
@@ -195,7 +186,7 @@ func (kv *kvSQL) insert(rows, run int) error {
 		if i > 0 {
 			buf.WriteString(", ")
 		}
-		fmt.Fprintf(&buf, "('%06d', %d)", i+firstRow, i)
+		fmt.Fprintf(&buf, "('%08d', %d)", i+firstRow, i)
 	}
 	_, err := kv.db.Exec(buf.String())
 	return err
@@ -209,7 +200,7 @@ func (kv *kvSQL) update(rows, run int) error {
 		if j > 0 {
 			buf.WriteString(", ")
 		}
-		fmt.Fprintf(&buf, `'%06d'`, perm[j])
+		fmt.Fprintf(&buf, `'%08d'`, perm[j])
 	}
 	buf.WriteString(`)`)
 	_, err := kv.db.Exec(buf.String())
@@ -224,7 +215,7 @@ func (kv *kvSQL) del(rows, run int) error {
 		if j > 0 {
 			buf.WriteString(", ")
 		}
-		fmt.Fprintf(&buf, `'%06d'`, j+firstRow)
+		fmt.Fprintf(&buf, `'%08d'`, j+firstRow)
 	}
 	buf.WriteString(`)`)
 	_, err := kv.db.Exec(buf.String())
@@ -273,7 +264,7 @@ CREATE TABLE IF NOT EXISTS bench.kv (
 		if i > 0 {
 			buf.WriteString(", ")
 		}
-		fmt.Fprintf(&buf, "('%06d', %d)", i, i)
+		fmt.Fprintf(&buf, "('%08d', %d)", i, i)
 	}
 	_, err := kv.db.Exec(buf.String())
 	return err

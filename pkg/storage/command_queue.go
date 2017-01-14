@@ -17,11 +17,16 @@
 package storage
 
 import (
+	"bytes"
 	"container/heap"
 	"fmt"
 
+	"golang.org/x/net/context"
+
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/interval"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 // A CommandQueue maintains an interval tree of keys or key ranges for
@@ -52,6 +57,16 @@ type CommandQueue struct {
 	wRg, rwRg interval.RangeGroup // avoids allocating in GetWait
 	oHeap     overlapHeap         // avoids allocating in GetWait
 	overlaps  []*cmd              // avoids allocating in getOverlaps
+
+	coveringOptimization bool // if true, use covering span optimization
+
+	// Used to temporarily store metrics local to a single CommandQueue. These
+	// will periodically be processed by the Store.
+	localMetrics struct {
+		readCommands    int64
+		writeCommands   int64
+		maxOverlapsSeen int64 // will be reset to 0 during metrics processing.
+	}
 }
 
 type cmd struct {
@@ -73,14 +88,70 @@ func (c *cmd) Range() interval.Range {
 	return c.key
 }
 
-// NewCommandQueue returns a new command queue.
-func NewCommandQueue() *CommandQueue {
+// cmdCount returns the number of spans in c, taking into account the
+// "covering" optimization (see CommandQueue.add). If a cmd was added to the
+// CommandQueue with only a single span, it will have 0 children, behaving like
+// the optimization does not exist. If a cmd was added to the CommandQueue with
+// multiple spans, each span will be retained as a child command in a covering cmd,
+// even if the covering cmd is expanded. As a result, len(c.children) will never be 1.
+func (c *cmd) cmdCount() int {
+	if len(c.children) == 0 {
+		return 1
+	}
+	return len(c.children)
+}
+
+func (c *cmd) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	var buf bytes.Buffer
+	var readOnly string
+	if c.readOnly {
+		readOnly = " readonly"
+	}
+	fmt.Fprintf(&buf, "%d%s [%s", c.id, readOnly, roachpb.Key(c.key.Start))
+	if !roachpb.Key(c.key.End).Equal(roachpb.Key(c.key.Start).Next()) {
+		fmt.Fprintf(&buf, ",%s", roachpb.Key(c.key.End))
+	}
+	fmt.Fprintf(&buf, ")")
+
+	if !c.expanded {
+		for i := range c.children {
+			fmt.Fprintf(&buf, "\n    %d: %s", i, &c.children[i])
+		}
+	}
+	return buf.String()
+}
+
+// NewCommandQueue returns a new command queue. The boolean specifies whether
+// to enable the covering span optimization. With this optimization, whenever
+// a command consisting of multiple spans is added, a covering span is computed
+// and only that covering span inserted. The individual spans are inserted
+// (i.e. the covering span expanded) only when required by a later overlapping
+// command, the hope being that that occurs infrequently, and that in the
+// common case savings are made due to the reduced number of spans active in
+// the tree.
+// As such, the optimization makes sense for workloads in which commands
+// typically contain many spans, but are spatially disjoint.
+func NewCommandQueue(coveringOptimization bool) *CommandQueue {
 	cq := &CommandQueue{
-		tree: interval.Tree{Overlapper: interval.Range.OverlapExclusive},
-		wRg:  interval.NewRangeTree(),
-		rwRg: interval.NewRangeTree(),
+		tree:                 interval.Tree{Overlapper: interval.Range.OverlapExclusive},
+		wRg:                  interval.NewRangeTree(),
+		rwRg:                 interval.NewRangeTree(),
+		coveringOptimization: coveringOptimization,
 	}
 	return cq
+}
+
+// String dumps the contents of the command queue for testing.
+func (cq *CommandQueue) String() string {
+	var buf bytes.Buffer
+	cq.tree.Do(func(i interval.Interface) bool {
+		fmt.Fprintf(&buf, "  %s\n", i)
+		return false
+	})
+	return buf.String()
 }
 
 // prepareSpans ensures the spans all have an end key. Note that this function
@@ -94,6 +165,28 @@ func prepareSpans(spans ...roachpb.Span) {
 			spans[i] = span
 		}
 	}
+}
+
+// expand replaces the command with its children, returning true if work was
+// done in the process. The boolean parameter must be true if the covering span
+// was previously inserted into the tree.
+func (cq *CommandQueue) expand(c *cmd, isInserted bool) bool {
+	if c.expanded || len(c.children) == 0 {
+		return false
+	}
+	c.expanded = true
+	if isInserted {
+		if err := cq.tree.Delete(c, false /* !fast */); err != nil {
+			panic(err)
+		}
+	}
+	for i := range c.children {
+		child := &c.children[i]
+		if err := cq.tree.Insert(child, false /* !fast */); err != nil {
+			panic(err)
+		}
+	}
+	return true
 }
 
 // GetWait returns a slice of the pending channels of executing commands which
@@ -126,24 +219,17 @@ func (cq *CommandQueue) getWait(readOnly bool, spans ...roachpb.Span) (chans []<
 		// entries. If we encounter a covering entry, we remove it from the
 		// interval tree and add all of its children.
 		restart := false
-		for _, cmd := range overlaps {
-			if !cmd.expanded && len(cmd.children) != 0 {
-				restart = true
-				cmd.expanded = true
-				if err := cq.tree.Delete(cmd, false /* !fast */); err != nil {
-					panic(err)
-				}
-				for i := range cmd.children {
-					child := &cmd.children[i]
-					if err := cq.tree.Insert(child, false /* !fast */); err != nil {
-						panic(err)
-					}
-				}
-			}
+		for _, c := range overlaps {
+			// Operand order matters: call cq.expand() for its side effects
+			// even if `restart` is already true.
+			restart = cq.expand(c, true /* isInserted */) || restart
 		}
 		if restart {
 			i--
 			continue
+		}
+		if overlapCount := int64(len(overlaps)); overlapCount > cq.localMetrics.maxOverlapsSeen {
+			cq.localMetrics.maxOverlapsSeen = overlapCount
 		}
 
 		// Sort overlapping commands by command ID and iterate from latest to earliest,
@@ -352,9 +438,17 @@ func (o *overlapHeap) PopOverlap() *cmd {
 // key for the command queue and must be re-supplied on subsequent invocation
 // of remove().
 //
+// Either all supplied spans must be range-global or range-local. Failure to
+// obey with this restriction results in a fatal error.
+//
+// Returns a nil `cmd` when no spans are given.
+//
 // add should be invoked after waiting on already-executing, overlapping
 // commands via the WaitGroup initialized through getWait().
 func (cq *CommandQueue) add(readOnly bool, spans ...roachpb.Span) *cmd {
+	if len(spans) == 0 {
+		return nil
+	}
 	prepareSpans(spans...)
 
 	// Compute the min and max key that covers all of the spans.
@@ -369,15 +463,21 @@ func (cq *CommandQueue) add(readOnly bool, spans ...roachpb.Span) *cmd {
 		}
 	}
 
+	if keys.IsLocal(minKey) != keys.IsLocal(maxKey) {
+		log.Fatalf(
+			context.TODO(),
+			"mixed range-global and range-local keys: %s and %s",
+			minKey, maxKey,
+		)
+	}
+
 	numCmds := 1
 	if len(spans) > 1 {
 		numCmds += len(spans)
 	}
 	cmds := make([]cmd, numCmds)
 
-	// Create the covering entry. Note that this may have an "illegal" key range
-	// spanning from range-local to range-global, but that's acceptable here as
-	// long as we're careful in the future.
+	// Create the covering entry.
 	cmd := &cmds[0]
 	cmd.id = cq.nextID()
 	cmd.key = interval.Range{
@@ -402,8 +502,18 @@ func (cq *CommandQueue) add(readOnly bool, spans ...roachpb.Span) *cmd {
 		}
 	}
 
-	if err := cq.tree.Insert(cmd, false /* !fast */); err != nil {
-		panic(err)
+	if cmd.readOnly {
+		cq.localMetrics.readCommands += int64(cmd.cmdCount())
+	} else {
+		cq.localMetrics.writeCommands += int64(cmd.cmdCount())
+	}
+
+	if cq.coveringOptimization || len(spans) == 1 {
+		if err := cq.tree.Insert(cmd, false /* !fast */); err != nil {
+			panic(err)
+		}
+	} else {
+		cq.expand(cmd, false /* !isInserted */)
 	}
 	return cmd
 }
@@ -412,9 +522,17 @@ func (cq *CommandQueue) add(readOnly bool, spans ...roachpb.Span) *cmd {
 // specified key has completed and should be removed. Any pending
 // commands waiting on this command will be signaled if this is the
 // only command upon which they are still waiting.
+//
+// Removing a `nil` cmd is a no-op.
 func (cq *CommandQueue) remove(cmd *cmd) {
 	if cmd == nil {
 		return
+	}
+
+	if cmd.readOnly {
+		cq.localMetrics.readCommands -= int64(cmd.cmdCount())
+	} else {
+		cq.localMetrics.writeCommands -= int64(cmd.cmdCount())
 	}
 
 	if !cmd.expanded {
@@ -448,4 +566,8 @@ func (cq *CommandQueue) remove(cmd *cmd) {
 func (cq *CommandQueue) nextID() int64 {
 	cq.idAlloc++
 	return cq.idAlloc
+}
+
+func (cq *CommandQueue) treeSize() int {
+	return cq.tree.Len()
 }

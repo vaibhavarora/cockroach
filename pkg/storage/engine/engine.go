@@ -131,6 +131,10 @@ type Writer interface {
 	// Note that clear actually removes entries from the storage
 	// engine, rather than inserting tombstones.
 	Clear(key MVCCKey) error
+	// ClearRange removes a set of entries, from start (inclusive) to end
+	// (exclusive). Similar to Clear, this method actually removes entries from
+	// the storage engine.
+	ClearRange(iter Iterator, start, end MVCCKey) error
 	// Merge is a high-performance write operation used for values which are
 	// accumulated over several writes. Multiple values can be merged
 	// sequentially into a single key; a subsequent read will return a "merged"
@@ -160,10 +164,6 @@ type Engine interface {
 	ReadWriter
 	// Attrs returns the engine/store attributes.
 	Attrs() roachpb.Attributes
-	// Checkpoint creates a point-in-time snapshot of the on-disk state of the
-	// key/value store, hard-linking and copying files into the specified
-	// directory.
-	Checkpoint(dir string) error
 	// Capacity returns capacity details for the engine's available storage.
 	Capacity() (roachpb.StoreCapacity, error)
 	// Flush causes the engine to write all in-memory data to disk
@@ -175,14 +175,21 @@ type Engine interface {
 	// this engine. Batched engines accumulate all mutations and apply
 	// them atomically on a call to Commit().
 	NewBatch() Batch
+	// NewWriteOnlyBatch returns a new instance of a batched engine which wraps
+	// this engine. A write-only batch accumulates all mutations and applies them
+	// atomically on a call to Commit(). Read operations return an error.
+	//
+	// TODO(peter): This should return a WriteBatch interface, but there are mild
+	// complications in both defining that interface and implementing it. In
+	// particular, Batch.Close would no longer come from Reader and we'd need to
+	// refactor a bunch of code in rocksDBBatch.
+	NewWriteOnlyBatch() Batch
 	// NewSnapshot returns a new instance of a read-only snapshot
 	// engine. Snapshots are instantaneous and, as long as they're
 	// released relatively quickly, inexpensive. Snapshots are released
 	// by invoking Close(). Note that snapshots must not be used after the
 	// original engine has been stopped.
 	NewSnapshot() Reader
-	// Open initializes the engine.
-	Open() error
 }
 
 // Batch is the interface for batch specific operations.
@@ -259,24 +266,4 @@ func Scan(engine Reader, start, end MVCCKey, max int64) ([]MVCCKeyValue, error) 
 		return false, nil
 	})
 	return kvs, err
-}
-
-// ClearRange removes a set of entries, from start (inclusive) to end
-// (exclusive). This function returns the number of entries
-// removed. Either all entries within the range will be deleted, or
-// none, and an error will be returned. Note that this function
-// actually removes entries from the storage engine, rather than
-// inserting tombstones, as with deletion through the MVCC.
-func ClearRange(engine ReadWriter, start, end MVCCKey) (int, error) {
-	count := 0
-	if err := engine.Iterate(start, end, func(kv MVCCKeyValue) (bool, error) {
-		if err := engine.Clear(kv.Key); err != nil {
-			return false, err
-		}
-		count++
-		return false, nil
-	}); err != nil {
-		return 0, err
-	}
-	return count, nil
 }

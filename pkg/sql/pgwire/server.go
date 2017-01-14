@@ -23,10 +23,15 @@ import (
 	"net"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/mon"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/pkg/errors"
@@ -56,6 +61,14 @@ const (
 
 const drainMaxWait = 10 * time.Second
 
+// baseSQLMemoryBudget is the amount of memory pre-allocated in each connection.
+var baseSQLMemoryBudget = envutil.EnvOrDefaultInt64("COCKROACH_BASE_SQL_MEMORY_BUDGET",
+	int64(2.1*float64(mon.DefaultPoolAllocationSize)))
+
+// connReservationBatchSize determines for how many connections memory
+// is pre-reserved at once.
+var connReservationBatchSize = 5
+
 var (
 	sslSupported   = []byte{'S'}
 	sslUnsupported = []byte{'N'}
@@ -63,8 +76,9 @@ var (
 
 // Server implements the server side of the PostgreSQL wire protocol.
 type Server struct {
-	context  *base.Config
-	executor *sql.Executor
+	AmbientCtx log.AmbientContext
+	cfg        *base.Config
+	executor   *sql.Executor
 
 	metrics ServerMetrics
 
@@ -72,30 +86,70 @@ type Server struct {
 		syncutil.Mutex
 		draining bool
 	}
+
+	sqlMemoryPool mon.MemoryMonitor
+	connMonitor   mon.MemoryMonitor
 }
 
 // ServerMetrics is the set of metrics for the pgwire server.
 type ServerMetrics struct {
-	BytesInCount  *metric.Counter
-	BytesOutCount *metric.Counter
-	Conns         *metric.Counter
+	BytesInCount   *metric.Counter
+	BytesOutCount  *metric.Counter
+	Conns          *metric.Counter
+	ConnMemMetrics sql.MemoryMetrics
+	SQLMemMetrics  sql.MemoryMetrics
+
+	internalMemMetrics *sql.MemoryMetrics
 }
 
-func makeServerMetrics() ServerMetrics {
+func makeServerMetrics(internalMemMetrics *sql.MemoryMetrics) ServerMetrics {
 	return ServerMetrics{
-		Conns:         metric.NewCounter(MetaConns),
-		BytesInCount:  metric.NewCounter(MetaBytesIn),
-		BytesOutCount: metric.NewCounter(MetaBytesOut),
+		Conns:              metric.NewCounter(MetaConns),
+		BytesInCount:       metric.NewCounter(MetaBytesIn),
+		BytesOutCount:      metric.NewCounter(MetaBytesOut),
+		ConnMemMetrics:     sql.MakeMemMetrics("conns"),
+		SQLMemMetrics:      sql.MakeMemMetrics("client"),
+		internalMemMetrics: internalMemMetrics,
 	}
 }
+
+// noteworthySQLMemoryUsageBytes is the minimum size tracked by the
+// client SQL pool before the pool start explicitly logging overall
+// usage growth in the log.
+var noteworthySQLMemoryUsageBytes = envutil.EnvOrDefaultInt64("COCKROACH_NOTEWORTHY_SQL_MEMORY_USAGE", 100*1024*1024)
+
+// noteworthyConnMemoryUsageBytes is the minimum size tracked by the
+// connection monitor before the monitor start explicitly logging overall
+// usage growth in the log.
+var noteworthyConnMemoryUsageBytes = envutil.EnvOrDefaultInt64("COCKROACH_NOTEWORTHY_CONN_MEMORY_USAGE", 2*1024*1024)
 
 // MakeServer creates a Server.
-func MakeServer(context *base.Config, executor *sql.Executor) *Server {
-	return &Server{
-		context:  context,
-		executor: executor,
-		metrics:  makeServerMetrics(),
+func MakeServer(
+	ambientCtx log.AmbientContext,
+	cfg *base.Config,
+	executor *sql.Executor,
+	internalMemMetrics *sql.MemoryMetrics,
+	maxSQLMem int64,
+) *Server {
+	server := &Server{
+		AmbientCtx: ambientCtx,
+		cfg:        cfg,
+		executor:   executor,
+		metrics:    makeServerMetrics(internalMemMetrics),
 	}
+	server.sqlMemoryPool = mon.MakeMonitor("sql",
+		server.metrics.SQLMemMetrics.CurBytesCount,
+		server.metrics.SQLMemMetrics.MaxBytesHist,
+		0, noteworthySQLMemoryUsageBytes)
+	server.sqlMemoryPool.Start(context.Background(), nil, mon.MakeStandaloneBudget(maxSQLMem))
+
+	server.connMonitor = mon.MakeMonitor("conn",
+		server.metrics.ConnMemMetrics.CurBytesCount,
+		server.metrics.ConnMemMetrics.MaxBytesHist,
+		int64(connReservationBatchSize)*baseSQLMemoryBudget, noteworthyConnMemoryUsageBytes)
+	server.connMonitor.Start(context.Background(), &server.sqlMemoryPool, mon.BoundAccount{})
+
+	return server
 }
 
 // Match returns true if rd appears to be a Postgres connection.
@@ -151,7 +205,7 @@ func (s *Server) SetDraining(drain bool) error {
 
 // ServeConn serves a single connection, driving the handshake process
 // and delegating to the appropriate connection type.
-func (s *Server) ServeConn(conn net.Conn) error {
+func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 	var draining bool
 	{
 		s.mu.Lock()
@@ -184,7 +238,7 @@ func (s *Server) ServeConn(conn net.Conn) error {
 			return errors.Errorf("unexpected data after SSLRequest: %q", buf.msg)
 		}
 
-		if s.context.Insecure {
+		if s.cfg.Insecure {
 			if _, err := conn.Write(sslUnsupported); err != nil {
 				return err
 			}
@@ -192,7 +246,7 @@ func (s *Server) ServeConn(conn net.Conn) error {
 			if _, err := conn.Write(sslSupported); err != nil {
 				return err
 			}
-			tlsConfig, err := s.context.GetServerTLSConfig()
+			tlsConfig, err := s.cfg.GetServerTLSConfig()
 			if err != nil {
 				return err
 			}
@@ -208,20 +262,21 @@ func (s *Server) ServeConn(conn net.Conn) error {
 		if err != nil {
 			return err
 		}
-	} else if !s.context.Insecure {
+	} else if !s.cfg.Insecure {
 		errSSLRequired = true
 	}
 
 	if version == version30 {
-		sessionArgs, argsErr := parseOptions(buf.msg)
-		// We make a connection regardless of argsErr. If there was an error parsing
-		// the args, the connection will only be used to send a report of that
-		// error.
-		v3conn := makeV3Conn(conn, s.executor, s.metrics, sessionArgs)
-		defer v3conn.finish()
-		if argsErr != nil {
-			return v3conn.sendInternalError(argsErr.Error())
+		// We make a connection before anything. If there is an error
+		// parsing the connection arguments, the connection will only be
+		// used to send a report of that error.
+		v3conn := makeV3Conn(conn, &s.metrics, &s.sqlMemoryPool, s.executor)
+		defer v3conn.finish(ctx)
+
+		if v3conn.sessionArgs, err = parseOptions(buf.msg); err != nil {
+			return v3conn.sendInternalError(err.Error())
 		}
+
 		if errSSLRequired {
 			return v3conn.sendInternalError(ErrSSLRequired)
 		}
@@ -231,15 +286,27 @@ func (s *Server) ServeConn(conn net.Conn) error {
 			return v3conn.sendInternalError(ErrDraining)
 		}
 
-		if tlsConn, ok := conn.(*tls.Conn); ok {
-			tlsState := tlsConn.ConnectionState()
-			authenticationHook, err := security.UserAuthHook(s.context.Insecure, &tlsState)
-			if err != nil {
-				return v3conn.sendInternalError(err.Error())
-			}
-			return v3conn.serve(authenticationHook)
+		v3conn.sessionArgs.User = parser.Name(v3conn.sessionArgs.User).Normalize()
+		if err := v3conn.handleAuthentication(ctx, s.cfg.Insecure); err != nil {
+			return v3conn.sendInternalError(err.Error())
 		}
-		return v3conn.serve(nil)
+
+		// Reserve some memory for this connection using the server's
+		// monitor. This reduces pressure on the shared pool because the
+		// server monitor allocates in chunks from the shared pool and
+		// these chunks should be larger than baseSQLMemoryBudget.
+		//
+		// We only reserve memory to the connection monitor after
+		// authentication has completed successfully, so as to prevent a DoS
+		// attack: many open-but-unauthenticated connections that exhaust
+		// the memory available to connections already open.
+		acc := s.connMonitor.MakeBoundAccount(ctx)
+		if err := acc.Grow(baseSQLMemoryBudget); err != nil {
+			return errors.Errorf("unable to pre-allocate %d bytes for this connection: %v",
+				baseSQLMemoryBudget, err)
+		}
+
+		return v3conn.serve(ctx, acc)
 	}
 
 	return errors.Errorf("unknown protocol version %d", version)

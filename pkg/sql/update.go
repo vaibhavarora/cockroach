@@ -17,7 +17,6 @@
 package sql
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -87,30 +86,15 @@ func (r *editNodeRun) initEditNode(
 	return nil
 }
 
-func (r *editNodeRun) expandEditNodePlan(en *editNodeBase, tw tableWriter) error {
-	if err := en.rh.expandPlans(); err != nil {
-		return err
-	}
-
+func (r *editNodeRun) startEditNode(en *editNodeBase, tw tableWriter) error {
 	if sqlbase.IsSystemConfigID(en.tableDesc.GetID()) {
 		// Mark transaction as operating on the system DB.
 		en.p.txn.SetSystemConfigTrigger()
 	}
 
-	if err := tw.expand(); err != nil {
-		return err
-	}
-
 	r.tw = tw
-	return r.rows.expandPlan()
-}
 
-func (r *editNodeRun) startEditNode() error {
-	if err := r.tw.start(); err != nil {
-		return err
-	}
-
-	return r.rows.Start()
+	return en.p.startPlan(r.rows)
 }
 
 type updateNode struct {
@@ -204,13 +188,16 @@ func (p *planner) Update(
 	// Remember the index where the targets for exprs start.
 	exprTargetIdx := len(targets)
 	desiredTypesFromSelect := make([]parser.Type, len(targets), len(targets)+len(exprs))
+	for i := range targets {
+		desiredTypesFromSelect[i] = parser.TypeAny
+	}
 	for _, expr := range exprs {
 		if expr.Tuple {
 			switch t := expr.Expr.(type) {
 			case (*parser.Tuple):
 				for _, e := range t.Exprs {
 					typ := updateCols[i].Type.ToDatumType()
-					e := fillDefault(e, typ, i, defaultExprs)
+					e = fillDefault(e, typ, i, defaultExprs)
 					targets = append(targets, parser.SelectExpr{Expr: e})
 					desiredTypesFromSelect = append(desiredTypesFromSelect, typ)
 					i++
@@ -241,7 +228,7 @@ func (p *planner) Update(
 	// types are inferred. For the simpler case ("SET a = $1"), populate them
 	// using checkColumnType. This step also verifies that the expression
 	// types match the column types.
-	sel := rows.(*selectTopNode).source.(*selectNode)
+	sel := rows.(*selectTopNode).source.(*renderNode)
 	for i, target := range sel.render[exprTargetIdx:] {
 		// DefaultVal doesn't implement TypeCheck
 		if _, ok := target.(parser.DefaultVal); ok {
@@ -279,19 +266,10 @@ func (p *planner) Update(
 	return un, nil
 }
 
-func (u *updateNode) expandPlan() error {
-	return u.run.expandEditNodePlan(&u.editNodeBase, &u.tw)
-}
-
 func (u *updateNode) Start() error {
-	if err := u.rh.startPlans(); err != nil {
+	if err := u.run.startEditNode(&u.editNodeBase, &u.tw); err != nil {
 		return err
 	}
-
-	if err := u.run.startEditNode(); err != nil {
-		return err
-	}
-
 	return u.run.tw.init(u.p.txn)
 }
 
@@ -416,43 +394,6 @@ func (u *updateNode) DebugValues() debugValues {
 	return u.run.rows.DebugValues()
 }
 
-func (u *updateNode) Ordering() orderingInfo {
-	return u.run.rows.Ordering()
-}
-
-func (u *updateNode) ExplainPlan(v bool) (name, description string, children []planNode) {
-	var buf bytes.Buffer
-	if v {
-		fmt.Fprintf(&buf, "set %s (", u.tableDesc.Name)
-		for i, col := range u.tw.ru.updateCols {
-			if i > 0 {
-				fmt.Fprintf(&buf, ", ")
-			}
-			fmt.Fprintf(&buf, "%s", col.Name)
-		}
-		fmt.Fprintf(&buf, ") returning (")
-		for i, col := range u.rh.columns {
-			if i > 0 {
-				fmt.Fprintf(&buf, ", ")
-			}
-			fmt.Fprintf(&buf, "%s", col.Name)
-		}
-		fmt.Fprintf(&buf, ")")
-	}
-
-	subplans := []planNode{u.run.rows}
-	for _, e := range u.rh.exprs {
-		subplans = u.p.collectSubqueryPlans(e, subplans)
-	}
-
-	return "update", buf.String(), subplans
-}
-
-func (u *updateNode) ExplainTypes(regTypes func(string, string)) {
-	cols := u.rh.columns
-	for i, rexpr := range u.rh.exprs {
-		regTypes(fmt.Sprintf("returning %s", cols[i].Name), parser.AsStringWithFlags(rexpr, parser.FmtShowTypes))
-	}
-}
+func (u *updateNode) Ordering() orderingInfo { return orderingInfo{} }
 
 func (u *updateNode) SetLimitHint(numRows int64, soft bool) {}

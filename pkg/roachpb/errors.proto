@@ -43,6 +43,11 @@ message NotLeaseHolderError {
   optional Lease lease = 4;
   optional int64 range_id = 3 [(gogoproto.nullable) = false,
       (gogoproto.customname) = "RangeID", (gogoproto.casttype) = "RangeID"];
+  // If set, the Error() method will return this instead of composing its
+  // regular spiel. Useful because we reuse this error when rejecting a command
+  // because the lease under which its application was attempted is different
+  // than the lease under which it had been proposed.
+  optional string custom_msg = 5 [(gogoproto.nullable) = false];
 }
 
 // A NodeUnavailableError indicates that the sending gateway can
@@ -176,6 +181,13 @@ message SendError {
   reserved 2;
 }
 
+// An AmbiguousResultError indicates that an EndTransaction request
+// may have succeeded or failed, but the response was not received and
+// the final result is ambiguous.
+message AmbiguousResultError {
+  optional string message = 1 [(gogoproto.nullable) = false];
+}
+
 // A RaftGroupDeletedError indicates a raft group has been deleted for
 // the replica.
 message RaftGroupDeletedError {
@@ -194,6 +206,16 @@ message ReplicaCorruptionError {
 // recipient of the raft message believes the sender of the raft
 // message to have been removed from the raft group
 message ReplicaTooOldError {
+  // replica_id is the ID of the replica that is too old.
+  optional int32 replica_id = 1 [(gogoproto.nullable) = false,
+      (gogoproto.customname) = "ReplicaID", (gogoproto.casttype) = "ReplicaID"];
+}
+
+// A StoreNotFoundError indicates that a command was sent to a store
+// which is not hosted on this node.
+message StoreNotFoundError {
+  optional int64 store_id = 1 [(gogoproto.nullable) = false,
+      (gogoproto.customname) = "StoreID", (gogoproto.casttype) = "StoreID"];
 }
 
 // ErrorDetail is a union type containing all available errors.
@@ -217,6 +239,8 @@ message ErrorDetail {
   optional NodeUnavailableError node_unavailable = 14;
   optional SendError send = 15;
   optional RangeFrozenError range_frozen = 25;
+  optional AmbiguousResultError ambiguous_result = 26;
+  optional StoreNotFoundError store_not_found = 27;
 
   // TODO(kaneda): Following are added to preserve the type when
   // converting Go errors from/to proto Errors. Revisit this design.

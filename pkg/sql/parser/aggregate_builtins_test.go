@@ -104,6 +104,10 @@ func TestMinBoolResultDeepCopy(t *testing.T) {
 	testAggregateResultDeepCopy(t, newMinAggregate, makeBoolTestDatum(10))
 }
 
+func TestSumSmallIntResultDeepCopy(t *testing.T) {
+	testAggregateResultDeepCopy(t, newSmallIntSumAggregate, makeIntTestDatum(10))
+}
+
 func TestSumIntResultDeepCopy(t *testing.T) {
 	testAggregateResultDeepCopy(t, newIntSumAggregate, makeIntTestDatum(10))
 }
@@ -128,16 +132,16 @@ func TestVarianceDecimalResultDeepCopy(t *testing.T) {
 	testAggregateResultDeepCopy(t, newDecimalVarianceAggregate, makeDecimalTestDatum(10))
 }
 
-func TestStddevIntResultDeepCopy(t *testing.T) {
-	testAggregateResultDeepCopy(t, newIntStddevAggregate, makeIntTestDatum(10))
+func TestStdDevIntResultDeepCopy(t *testing.T) {
+	testAggregateResultDeepCopy(t, newIntStdDevAggregate, makeIntTestDatum(10))
 }
 
-func TestStddevFloatResultDeepCopy(t *testing.T) {
-	testAggregateResultDeepCopy(t, newFloatStddevAggregate, makeFloatTestDatum(10))
+func TestStdDevFloatResultDeepCopy(t *testing.T) {
+	testAggregateResultDeepCopy(t, newFloatStdDevAggregate, makeFloatTestDatum(10))
 }
 
-func TestStddevDecimalResultDeepCopy(t *testing.T) {
-	testAggregateResultDeepCopy(t, newDecimalStddevAggregate, makeDecimalTestDatum(10))
+func TestStdDevDecimalResultDeepCopy(t *testing.T) {
+	testAggregateResultDeepCopy(t, newDecimalStdDevAggregate, makeDecimalTestDatum(10))
 }
 
 func makeIntTestDatum(count int) []Datum {
@@ -234,6 +238,10 @@ func BenchmarkCountAggregate1K(b *testing.B) {
 	runBenchmarkAggregate(b, newCountAggregate, makeIntTestDatum(1000))
 }
 
+func BenchmarkSumIntAggregateInt1K(b *testing.B) {
+	runBenchmarkAggregate(b, newSmallIntSumAggregate, makeSmallIntTestDatum(1000))
+}
+
 func BenchmarkSumAggregateInt1K(b *testing.B) {
 	runBenchmarkAggregate(b, newIntSumAggregate, makeIntTestDatum(1000))
 }
@@ -286,14 +294,14 @@ func BenchmarkVarianceAggregateDecimal1K(b *testing.B) {
 	runBenchmarkAggregate(b, newDecimalVarianceAggregate, makeDecimalTestDatum(1000))
 }
 
-func BenchmarkStddevAggregateInt1K(b *testing.B) {
-	runBenchmarkAggregate(b, newIntStddevAggregate, makeIntTestDatum(1000))
+func BenchmarkStdDevAggregateInt1K(b *testing.B) {
+	runBenchmarkAggregate(b, newIntStdDevAggregate, makeIntTestDatum(1000))
 }
 
-func BenchmarkStddevAggregateFloat1K(b *testing.B) {
-	runBenchmarkAggregate(b, newFloatStddevAggregate, makeFloatTestDatum(1000))
+func BenchmarkStdDevAggregateFloat1K(b *testing.B) {
+	runBenchmarkAggregate(b, newFloatStdDevAggregate, makeFloatTestDatum(1000))
 }
 
-func BenchmarkStddevAggregateDecimal1K(b *testing.B) {
-	runBenchmarkAggregate(b, newDecimalStddevAggregate, makeDecimalTestDatum(1000))
+func BenchmarkStdDevAggregateDecimal1K(b *testing.B) {
+	runBenchmarkAggregate(b, newDecimalStdDevAggregate, makeDecimalTestDatum(1000))
 }

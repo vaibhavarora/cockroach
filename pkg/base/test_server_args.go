@@ -19,6 +19,8 @@ package base
 import (
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
@@ -39,6 +41,9 @@ type TestServerArgs struct {
 	// is always set to true when the server is started via a TestCluster.
 	PartOfCluster bool
 
+	// Addr (if nonempty) is the address to use for the test server.
+	Addr string
+
 	// JoinAddr (if nonempty) is the address of a node we are joining.
 	JoinAddr string
 
@@ -48,16 +53,19 @@ type TestServerArgs struct {
 	// will be used.
 	StoreSpecs []StoreSpec
 
-	// Fields copied to the server.Context.
-	Insecure              bool
-	MetricsSampleInterval time.Duration
-	MaxOffset             time.Duration
-	SocketFile            string
-	ScanInterval          time.Duration
-	ScanMaxIdleTime       time.Duration
-	SSLCA                 string
-	SSLCert               string
-	SSLCertKey            string
+	// Fields copied to the server.Config.
+	Insecure                 bool
+	RetryOptions             retry.Options
+	MetricsSampleInterval    time.Duration
+	RaftTickInterval         time.Duration
+	RaftElectionTimeoutTicks int
+	SocketFile               string
+	ScanInterval             time.Duration
+	ScanMaxIdleTime          time.Duration
+	SSLCA                    string
+	SSLCert                  string
+	SSLCertKey               string
+	TimeSeriesQueryWorkerMax int
 
 	// If set, this will be appended to the Postgres URL by functions that
 	// automatically open a connection to the server. That's equivalent to running
@@ -76,9 +84,10 @@ type TestServerArgs struct {
 // cluster. It contains a TestServerArgs instance which will be copied over to
 // every server.
 //
-// The zero value means "full replication".
+// The zero value means "ReplicationAuto".
 type TestClusterArgs struct {
-	// ServerArgs will be copied to each constituent TestServer.
+	// ServerArgs will be copied to each constituent TestServer. Used for all the
+	// servers not overridden in ServerArgsPerNode.
 	ServerArgs TestServerArgs
 	// ReplicationMode controls how replication is to be done in the cluster.
 	ReplicationMode TestClusterReplicationMode
@@ -104,11 +113,15 @@ const (
 	// ReplicationAuto means that ranges are replicated according to the
 	// production default zone config. Replication is performed as in
 	// production, by the replication queue.
-	// TestCluster.WaitForFullReplication() can be used to wait for
-	// replication to be stable at any point in a test.
 	ReplicationAuto TestClusterReplicationMode = iota
 	// ReplicationManual means that the split and replication queues of all
 	// servers are stopped, and the test must manually control splitting and
 	// replication through the TestServer.
 	ReplicationManual
 )
+
+// ReplicationTarget identifies a node/store pair.
+type ReplicationTarget struct {
+	NodeID  roachpb.NodeID
+	StoreID roachpb.StoreID
+}

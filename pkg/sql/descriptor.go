@@ -102,7 +102,9 @@ func (d descriptorAlreadyExistsErr) Error() string {
 	return fmt.Sprintf("%s %q already exists", d.desc.TypeName(), d.name)
 }
 
-func generateUniqueDescID(txn *client.Txn) (sqlbase.ID, error) {
+// GenerateUniqueDescID returns the next available Descriptor ID and increments
+// the counter.
+func GenerateUniqueDescID(txn *client.Txn) (sqlbase.ID, error) {
 	// Increment unique descriptor counter.
 	ir, err := txn.Inc(keys.DescIDGenerator, 1)
 	if err != nil {
@@ -135,7 +137,7 @@ func (p *planner) createDescriptor(
 		return false, err
 	}
 
-	id, err := generateUniqueDescID(p.txn)
+	id, err := GenerateUniqueDescID(p.txn)
 	if err != nil {
 		return false, err
 	}
@@ -191,7 +193,13 @@ func (p *planner) createDescriptorWithID(
 func (p *planner) getDescriptor(
 	plainKey sqlbase.DescriptorKey, descriptor sqlbase.DescriptorProto,
 ) (bool, error) {
-	gr, err := p.txn.Get(plainKey.Key())
+	return getDescriptor(p.txn, plainKey, descriptor)
+}
+
+func getDescriptor(
+	txn *client.Txn, plainKey sqlbase.DescriptorKey, descriptor sqlbase.DescriptorProto,
+) (bool, error) {
+	gr, err := txn.Get(plainKey.Key())
 	if err != nil {
 		return false, err
 	}
@@ -201,23 +209,23 @@ func (p *planner) getDescriptor(
 
 	descKey := sqlbase.MakeDescMetadataKey(sqlbase.ID(gr.ValueInt()))
 	desc := &sqlbase.Descriptor{}
-	if err := p.txn.GetProto(descKey, desc); err != nil {
+	if err := txn.GetProto(descKey, desc); err != nil {
 		return false, err
 	}
 
 	switch t := descriptor.(type) {
 	case *sqlbase.TableDescriptor:
 		table := desc.GetTable()
+		if table == nil {
+			return false, errors.Errorf("%q is not a table", plainKey.Name())
+		}
 		table.MaybeUpgradeFormatVersion()
 		// TODO(dan): Write the upgraded TableDescriptor back to kv. This will break
 		// the ability to use a previous version of cockroach with the on-disk data,
 		// but it's worth it to avoid having to do the upgrade every time the
 		// descriptor is fetched. Our current test for this enforces compatibility
 		// backward and forward, so that'll have to be extended before this is done.
-		if table == nil {
-			return false, errors.Errorf("%q is not a table", plainKey.Name())
-		}
-		if err := table.Validate(p.txn); err != nil {
+		if err := table.Validate(txn); err != nil {
 			return false, err
 		}
 		*t = *table

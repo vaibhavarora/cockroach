@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,7 +43,29 @@ func TestGauge(t *testing.T) {
 	if v := g.Value(); v != 10 {
 		t.Fatalf("unexpected value: %d", v)
 	}
+	var wg sync.WaitGroup
+	for i := int64(0); i < 10; i++ {
+		wg.Add(2)
+		go func(i int64) { g.Inc(i); wg.Done() }(i)
+		go func(i int64) { g.Dec(i); wg.Done() }(i)
+	}
+	wg.Wait()
+	if v := g.Value(); v != 10 {
+		t.Fatalf("unexpected value: %d", v)
+	}
 	testMarshal(t, g, "10")
+}
+
+func TestFunctionalGauge(t *testing.T) {
+	valToReturn := int64(10)
+	g := NewFunctionalGauge(emptyMetadata, func() int64 { return valToReturn })
+	if v := g.Value(); v != 10 {
+		t.Fatalf("unexpected value: %d", v)
+	}
+	valToReturn = 15
+	if v := g.Value(); v != 15 {
+		t.Fatalf("unexpected value: %d", v)
+	}
 }
 
 func TestGaugeFloat64(t *testing.T) {

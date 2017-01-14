@@ -18,41 +18,30 @@ package acceptance
 // and run tests against dedicated test clusters.
 //
 // Required setup:
-// 1. Have a GCE account.
-// 2. Have someone grant permissions (for new *and* existing objects) for the
-//    GCS bucket referenced in `archivedStoreURL`. You'll want permissions
-//    granted to the following email addresses:
-//      a. The email address you use to log into Google Cloud Console.
-//      b. Your default Google Compute Engine service account (it'll look like
-//         111111111111-compute@developer.gserviceaccount.com)
-// 3. Set the environment variable GOOGLE_PROJECT to the name of the Google
-//    Project you want Terraform to use.
+// 1. Have an Azure account.
+// 2. Passphrase-less SSH key in ~/.ssh/{azure,azure.pub}.
+// 3. Set the ARM_SUBSCRIPTION_ID, ARM_CLIENT_ID, ARM_CLIENT_SECRET, and
+//    ARM_TENANT_ID variables as documented here:
+//    https://www.terraform.io/docs/providers/azurerm/#argument-reference
 //
 // Example use:
 //
-// build/builder.sh make build && make test \
+// make test \
 //	 TESTTIMEOUT=48h \
 //	 PKG=./pkg/acceptance \
 //	 TESTS=Rebalance_3To5Small \
-//	 TESTFLAGS='-v -remote -key-name google_compute_engine -cwd terraform -tf.keep-cluster=failed -tf.cockroach-binary=../../cockroach'
+//	 TESTFLAGS='-v -remote -key-name azure -cwd terraform/azure -tf.keep-cluster=failed'
 //
 // Things to note:
-// - You must use an SSH key without a passphrase. It is recommended that you
-//   create a neww key for this purpose named google_compute_engine so that
-//   gcloud and related tools can use it too. Create the key with:
-//     ssh-keygen -f ~/.ssh/google_compute_engine
-// - Your SSH key (-key-name) for Google Cloud Platform must be in
-//   ~/.ssh/google_compute_engine
+// - You must use an SSH key without a passphrase. This is a Terraform
+//   requirement.
 // - If you want to manually fiddle with a test cluster, start the test with
 //   `-tf.keep-cluster=failed". After the cluster has been created, press
 //   Control-C and the cluster will remain up.
 // - These tests rely on a specific Terraform config that's specified using the
 //   -cwd test flag.
 // - You *must* set the TESTTIMEOUT high enough for any of these tests to
-//   finish. To be safe, specify a timeout of at least 24 hours.
-// - Your Google Cloud credentials must be accessible by Terraform, as described
-//   here:
-//   https://www.terraform.io/docs/providers/google/
+//   finish. To be really safe, specify a timeout of at least 24 hours.
 // - There are various flags that start with `tf.` that control the
 //   of Terrafarm and allocator tests, respectively. For example, you can add
 //   "-tf.cockroach-binary" to TESTFLAGS to specify a custom Linux CockroachDB
@@ -64,7 +53,8 @@ package acceptance
 //
 // Troubleshooting:
 // - The minimum recommended version of Terraform is 0.7.2. If you see strange
-//   Terraform errors, upgrade your install of Terraform.
+//   Terraform errors, upgrade your install of Terraform. Terraform 0.8.x or
+//   later might not work because of breaking changes to Terraform.
 // - Adding `-tf.keep-cluster=always` to your TESTFLAGS allows the cluster to
 //   stay around after the test completes.
 
@@ -82,12 +72,14 @@ import (
 	"github.com/montanaflynn/stats"
 	"github.com/pkg/errors"
 
+	"sync"
+
 	"github.com/cockroachdb/cockroach/pkg/acceptance/terrafarm"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
@@ -121,6 +113,8 @@ type allocatorTest struct {
 	// Terraform configs. This must be in GB, because Terraform only accepts
 	// disk size for GCE in GB.
 	CockroachDiskSizeGB int
+	// Run some schema changes during the rebalancing.
+	RunSchemaChanges bool
 
 	f *terrafarm.Farmer
 }
@@ -134,32 +128,32 @@ func (at *allocatorTest) Cleanup(t *testing.T) {
 	}
 }
 
-func (at *allocatorTest) Run(t *testing.T) {
-	at.f = farmer(t, at.Prefix)
+func (at *allocatorTest) Run(ctx context.Context, t *testing.T) {
+	at.f = MakeFarmer(t, at.Prefix, stopper)
 
 	if at.CockroachDiskSizeGB != 0 {
 		at.f.AddVars["cockroach_disk_size"] = strconv.Itoa(at.CockroachDiskSizeGB)
 	}
 
-	log.Infof(context.Background(), "creating cluster with %d node(s)", at.StartNodes)
+	log.Infof(ctx, "creating cluster with %d node(s)", at.StartNodes)
 	if err := at.f.Resize(at.StartNodes); err != nil {
 		t.Fatal(err)
 	}
-	checkGossip(t, at.f, longWaitTime, hasPeers(at.StartNodes))
-	at.f.Assert(t)
-	log.Info(context.Background(), "initial cluster is up")
+	CheckGossip(ctx, t, at.f, longWaitTime, HasPeers(at.StartNodes))
+	at.f.Assert(ctx, t)
+	log.Info(ctx, "initial cluster is up")
 
 	// We must stop the cluster because a) `nodectl` pokes at the data directory
 	// and, more importantly, b) we don't want the cluster above and the cluster
 	// below to ever talk to each other (see #7224).
-	log.Info(context.Background(), "stopping cluster")
+	log.Info(ctx, "stopping cluster")
 	for i := 0; i < at.f.NumNodes(); i++ {
-		if err := at.f.Kill(i); err != nil {
+		if err := at.f.Kill(ctx, i); err != nil {
 			t.Fatalf("error stopping node %d: %s", i, err)
 		}
 	}
 
-	log.Info(context.Background(), "downloading archived stores from Google Cloud Storage in parallel")
+	log.Info(ctx, "downloading archived stores from Google Cloud Storage in parallel")
 	errors := make(chan error, at.f.NumNodes())
 	for i := 0; i < at.f.NumNodes(); i++ {
 		go func(nodeNum int) {
@@ -172,39 +166,139 @@ func (at *allocatorTest) Run(t *testing.T) {
 		}
 	}
 
-	log.Info(context.Background(), "restarting cluster with archived store(s)")
+	log.Info(ctx, "restarting cluster with archived store(s)")
 	for i := 0; i < at.f.NumNodes(); i++ {
-		if err := at.f.Restart(i); err != nil {
+		if err := at.f.Restart(ctx, i); err != nil {
 			t.Fatalf("error restarting node %d: %s", i, err)
 		}
 	}
-	at.f.Assert(t)
+	at.f.Assert(ctx, t)
 
-	log.Infof(context.Background(), "resizing cluster to %d nodes", at.EndNodes)
+	log.Infof(ctx, "resizing cluster to %d nodes", at.EndNodes)
 	if err := at.f.Resize(at.EndNodes); err != nil {
 		t.Fatal(err)
 	}
-	checkGossip(t, at.f, longWaitTime, hasPeers(at.EndNodes))
-	at.f.Assert(t)
 
-	log.Info(context.Background(), "waiting for rebalance to finish")
-	if err := at.WaitForRebalance(t); err != nil {
+	CheckGossip(ctx, t, at.f, longWaitTime, HasPeers(at.EndNodes))
+	at.f.Assert(ctx, t)
+
+	log.Infof(ctx, "starting load on cluster")
+	if err := at.f.StartLoad(ctx, "block_writer", *flagCLTWriters); err != nil {
 		t.Fatal(err)
 	}
-	at.f.Assert(t)
+	if err := at.f.StartLoad(ctx, "photos", *flagCLTWriters); err != nil {
+		t.Fatal(err)
+	}
+
+	if at.RunSchemaChanges {
+		log.Info(ctx, "running schema changes while cluster is rebalancing")
+		if err := at.runSchemaChanges(ctx, t); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	log.Info(ctx, "waiting for rebalance to finish")
+	if err := at.WaitForRebalance(ctx, t); err != nil {
+		t.Fatal(err)
+	}
+
+	at.f.Assert(ctx, t)
 }
 
-func (at *allocatorTest) RunAndCleanup(t *testing.T) {
+func (at *allocatorTest) RunAndCleanup(ctx context.Context, t *testing.T) {
+	s := log.Scope(t, "AllocatorTest-"+at.Prefix)
+	defer s.Close(t)
+
 	defer at.Cleanup(t)
-	at.Run(t)
+	at.Run(ctx, t)
+}
+
+func (at *allocatorTest) runSchemaChanges(ctx context.Context, t *testing.T) error {
+	db, err := gosql.Open("postgres", at.f.PGUrl(ctx, 0))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	const tableName = "datablocks.blocks"
+	schemaChanges := []string{
+		"ALTER TABLE %s ADD COLUMN newcol DECIMAL DEFAULT (DECIMAL '1.4')",
+		"CREATE INDEX foo ON %s (block_id)",
+	}
+	var wg sync.WaitGroup
+	wg.Add(len(schemaChanges))
+	for i := range schemaChanges {
+		go func(i int) {
+			start := timeutil.Now()
+			cmd := fmt.Sprintf(schemaChanges[i], tableName)
+			log.Infof(ctx, "starting schema change: %s", cmd)
+			if _, err := db.Exec(cmd); err != nil {
+				log.Infof(ctx, "hit schema change error: %s, for %s, in %s", err, cmd, timeutil.Since(start))
+				t.Error(err)
+				return
+			}
+			log.Infof(ctx, "completed schema change: %s, in %s", cmd, timeutil.Since(start))
+			wg.Done()
+			// TODO(vivek): Monitor progress of schema changes and log progress.
+		}(i)
+	}
+	wg.Wait()
+
+	log.Info(ctx, "validate applied schema changes")
+	if err := at.ValidateSchemaChanges(ctx, t); err != nil {
+		t.Fatal(err)
+	}
+	return nil
+}
+
+func (at *allocatorTest) ValidateSchemaChanges(ctx context.Context, t *testing.T) error {
+	db, err := gosql.Open("postgres", at.f.PGUrl(ctx, 0))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	const tableName = "datablocks.blocks"
+	var now string
+	if err := db.QueryRow("SELECT cluster_logical_timestamp()").Scan(&now); err != nil {
+		t.Fatal(err)
+	}
+	var eCount int64
+	q := fmt.Sprintf(`SELECT COUNT(*) FROM %s AS OF SYSTEM TIME %s`, tableName, now)
+	if err := db.QueryRow(q).Scan(&eCount); err != nil {
+		return err
+	}
+	log.Infof(ctx, "%s: %d rows", q, eCount)
+
+	// Validate the different schema changes
+	validationQueries := []string{
+		"SELECT COUNT(newcol) FROM %s AS OF SYSTEM TIME %s",
+		"SELECT COUNT(block_id) FROM %s@foo AS OF SYSTEM TIME %s",
+	}
+	for i := range validationQueries {
+		var count int64
+		q := fmt.Sprintf(validationQueries[i], tableName, now)
+		if err := db.QueryRow(q).Scan(&count); err != nil {
+			return err
+		}
+		log.Infof(ctx, "query: %s, found %d rows", q, count)
+		if count != eCount {
+			t.Fatalf("%s: %d rows found, expected %d rows", q, count, eCount)
+		}
+	}
+	return nil
 }
 
 func (at *allocatorTest) stdDev() (float64, error) {
-	host := at.f.Nodes()[0]
+	host := at.f.Hostname(0)
 	var client http.Client
 	var nodesResp serverpb.NodesResponse
 	url := fmt.Sprintf("http://%s:%s/_status/nodes", host, adminPort)
-	if err := util.GetJSON(client, url, &nodesResp); err != nil {
+	if err := httputil.GetJSON(client, url, &nodesResp); err != nil {
 		return 0, err
 	}
 	var replicaCounts stats.Float64Data
@@ -261,7 +355,7 @@ func (at *allocatorTest) printRebalanceStats(db *gosql.DB, host string) error {
 	if err != nil {
 		return err
 	}
-	log.Infof(context.Background(), "stddev(replica count) = %.2f", stdDev)
+	log.Infof(context.Background(), "stdDev(replica count) = %.2f", stdDev)
 
 	return nil
 }
@@ -329,10 +423,10 @@ func (at *allocatorTest) allocatorStats(db *gosql.DB) (s replicationStats, err e
 //
 // This method is crude but necessary. If we were to wait until range counts
 // were just about even, we'd miss potential post-rebalance thrashing.
-func (at *allocatorTest) WaitForRebalance(t *testing.T) error {
+func (at *allocatorTest) WaitForRebalance(ctx context.Context, t *testing.T) error {
 	const statsInterval = 20 * time.Second
 
-	db, err := gosql.Open("postgres", at.f.PGUrl(0))
+	db, err := gosql.Open("postgres", at.f.PGUrl(ctx, 0))
 	if err != nil {
 		return err
 	}
@@ -355,9 +449,9 @@ func (at *allocatorTest) WaitForRebalance(t *testing.T) error {
 				return err
 			}
 
-			log.Info(context.Background(), stats)
+			log.Info(ctx, stats)
 			if StableInterval <= stats.ElapsedSinceLastEvent {
-				host := at.f.Nodes()[0]
+				host := at.f.Hostname(0)
 				log.Infof(context.Background(), "replica count = %f, max = %f", stats.ReplicaCountStdDev, *flagATMaxStdDev)
 				if stats.ReplicaCountStdDev > *flagATMaxStdDev {
 					_ = at.printRebalanceStats(db, host)
@@ -371,9 +465,9 @@ func (at *allocatorTest) WaitForRebalance(t *testing.T) error {
 			statsTimer.Reset(statsInterval)
 		case <-assertTimer.C:
 			assertTimer.Read = true
-			at.f.Assert(t)
+			at.f.Assert(ctx, t)
 			assertTimer.Reset(time.Minute)
-		case <-stopper:
+		case <-stopper.ShouldStop():
 			return errors.New("interrupted")
 		}
 	}
@@ -382,30 +476,48 @@ func (at *allocatorTest) WaitForRebalance(t *testing.T) error {
 // TestUpreplicate_1To3Small tests up-replication, starting with 1 node
 // containing 10 GiB of data and growing to 3 nodes.
 func TestUpreplicate_1To3Small(t *testing.T) {
+	ctx := context.Background()
 	at := allocatorTest{
 		StartNodes: 1,
 		EndNodes:   3,
 		StoreURL:   urlStore1s,
 		Prefix:     "uprep-1to3s",
 	}
-	at.RunAndCleanup(t)
+	at.RunAndCleanup(ctx, t)
+}
+
+// TestRebalance3to5Small_WithSchemaChanges tests rebalancing in
+// the midst of schema changes, starting with 3 nodes (each
+// containing 10 GiB of data) and growing to 5 nodes.
+func TestRebalance_3To5Small_WithSchemaChanges(t *testing.T) {
+	ctx := context.Background()
+	at := allocatorTest{
+		StartNodes:       3,
+		EndNodes:         5,
+		StoreURL:         urlStore3s,
+		Prefix:           "rebal-3to5s",
+		RunSchemaChanges: true,
+	}
+	at.RunAndCleanup(ctx, t)
 }
 
 // TestRebalance3to5Small tests rebalancing, starting with 3 nodes (each
 // containing 10 GiB of data) and growing to 5 nodes.
 func TestRebalance_3To5Small(t *testing.T) {
+	ctx := context.Background()
 	at := allocatorTest{
 		StartNodes: 3,
 		EndNodes:   5,
 		StoreURL:   urlStore3s,
 		Prefix:     "rebal-3to5s",
 	}
-	at.RunAndCleanup(t)
+	at.RunAndCleanup(ctx, t)
 }
 
 // TestUpreplicate_1To3Medium tests up-replication, starting with 1 node
 // containing 108 GiB of data and growing to 3 nodes.
 func TestUpreplicate_1To3Medium(t *testing.T) {
+	ctx := context.Background()
 	at := allocatorTest{
 		StartNodes:          1,
 		EndNodes:            3,
@@ -413,13 +525,14 @@ func TestUpreplicate_1To3Medium(t *testing.T) {
 		Prefix:              "uprep-1to3m",
 		CockroachDiskSizeGB: 250, // GB
 	}
-	at.RunAndCleanup(t)
+	at.RunAndCleanup(ctx, t)
 }
 
 // TestUpreplicate_1To6Medium tests up-replication (and, to a lesser extent,
 // rebalancing), starting with 1 node containing 108 GiB of data and growing to
 // 6 nodes.
 func TestUpreplicate_1To6Medium(t *testing.T) {
+	ctx := context.Background()
 	at := allocatorTest{
 		StartNodes:          1,
 		EndNodes:            6,
@@ -427,7 +540,7 @@ func TestUpreplicate_1To6Medium(t *testing.T) {
 		Prefix:              "uprep-1to6m",
 		CockroachDiskSizeGB: 250, // GB
 	}
-	at.RunAndCleanup(t)
+	at.RunAndCleanup(ctx, t)
 }
 
 // TestSteady_6Medium is useful for creating a medium-size balanced cluster
@@ -435,6 +548,7 @@ func TestUpreplicate_1To6Medium(t *testing.T) {
 // TODO(tschottdorf): use for tests which run schema changes or drop large
 // amounts of data.
 func TestSteady_6Medium(t *testing.T) {
+	ctx := context.Background()
 	at := allocatorTest{
 		StartNodes:          6,
 		EndNodes:            6,
@@ -442,5 +556,5 @@ func TestSteady_6Medium(t *testing.T) {
 		Prefix:              "steady-6m",
 		CockroachDiskSizeGB: 250, // GB
 	}
-	at.RunAndCleanup(t)
+	at.RunAndCleanup(ctx, t)
 }

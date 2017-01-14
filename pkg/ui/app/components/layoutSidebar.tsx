@@ -1,11 +1,7 @@
 import * as React from "react";
 import { ListLink, LinkProps } from "./listLink";
 import * as Icons from "./icons";
-
-function trustIcon(iconSvg: string) {
-  "use strict";
-  return {__html: iconSvg};
-}
+import { trustIcon } from "../util/trust";
 
 interface IconLinkProps extends LinkProps {
   icon?: string;
@@ -23,7 +19,7 @@ class IconLink extends React.Component<IconLinkProps, {}> {
       className: this.props.className,
     };
     return <ListLink {...passProps} >
-      <div className=".image-container"
+      <div className="image-container"
            dangerouslySetInnerHTML={trustIcon(this.props.icon)}/>
       <div>{this.props.title}</div>
     </ListLink>;
@@ -37,16 +33,15 @@ class IconLink extends React.Component<IconLinkProps, {}> {
  */
 export default class extends React.Component<{}, {}> {
   render() {
-    return <div id="header">
-      <header>
-        <ul className="nav">
-          <IconLink to="/" icon={Icons.cockroachIcon} className="cockroach" />
-          <IconLink to="/cluster" icon={Icons.clusterIcon} title="Cluster"/>
-          <IconLink to="/nodes" icon={Icons.nodesIcon} title="Nodes"/>
-          <IconLink to="/databases" icon={Icons.databaseIcon} title="Databases"/>
-          <IconLink to="/help-us/reporting" icon={Icons.cockroachIconSmall} title="Help Us"/>
-        </ul>
-      </header>
-    </div>;
+    return <nav className="navigation-bar">
+      <ul className="navigation-bar__list">
+        <IconLink to="/cluster" icon={Icons.clusterIcon} title="Cluster" />
+        <IconLink to="/databases" icon={Icons.databaseIcon} title="Databases"/>
+        <IconLink to="/help-us/reporting" icon={Icons.cockroachIconSmall} title="Help Us"/>
+      </ul>
+      <ul className="navigation-bar__list navigation-bar__list--bottom">
+        <IconLink to="/" icon={Icons.cockroachIcon} className="cockroach" />
+      </ul>
+    </nav>;
   }
 }

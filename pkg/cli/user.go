@@ -17,8 +17,6 @@
 package cli
 
 import (
-	"bufio"
-	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -26,7 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 )
 
-var password string
+var password bool
 
 // A getUserCmd command displays the config for the specified username.
 var getUserCmd = &cobra.Command{
@@ -36,14 +34,14 @@ var getUserCmd = &cobra.Command{
 Fetches and displays the user for <username>.
 `,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runGetUser),
+	RunE:         MaybeDecorateGRPCError(runGetUser),
 }
 
 func runGetUser(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return usageAndError(cmd)
 	}
-	conn, err := makeSQLClient()
+	conn, err := getPasswordAndMakeSQLClient()
 	if err != nil {
 		return err
 	}
@@ -60,16 +58,16 @@ var lsUsersCmd = &cobra.Command{
 List all users.
 `,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runLsUsers),
+	RunE:         MaybeDecorateGRPCError(runLsUsers),
 }
 
 func runLsUsers(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		return usageAndError(cmd)
 	}
-	conn, err := makeSQLClient()
+	conn, err := getPasswordAndMakeSQLClient()
 	if err != nil {
-		panic(err)
+		return err
 	}
 	defer conn.Close()
 	return runQueryAndFormatResults(conn, os.Stdout,
@@ -84,14 +82,14 @@ var rmUserCmd = &cobra.Command{
 Remove an existing user by username.
 `,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runRmUser),
+	RunE:         MaybeDecorateGRPCError(runRmUser),
 }
 
 func runRmUser(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return usageAndError(cmd)
 	}
-	conn, err := makeSQLClient()
+	conn, err := getPasswordAndMakeSQLClient()
 	if err != nil {
 		return err
 	}
@@ -109,7 +107,7 @@ Create or update a user for the specified username, prompting
 for the password.
 `,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runSetUser),
+	RunE:         MaybeDecorateGRPCError(runSetUser),
 }
 
 // runSetUser prompts for a password, then inserts the user and hash
@@ -122,50 +120,22 @@ func runSetUser(cmd *cobra.Command, args []string) error {
 	}
 	var err error
 	var hashed []byte
-	switch password {
-	case "":
+	if password {
 		hashed, err = security.PromptForPasswordAndHash()
 		if err != nil {
 			return err
 		}
-	case "-":
-		scanner := bufio.NewScanner(os.Stdin)
-		if scanner.Scan() {
-			if b := scanner.Bytes(); len(b) > 0 {
-				hashed, err = security.HashPassword(b)
-				if err != nil {
-					return err
-				}
-				if scanner.Scan() {
-					return errors.New("multiline passwords are not permitted")
-				}
-				if err := scanner.Err(); err != nil {
-					return err
-				}
-
-				break // Success.
-			}
-		} else {
-			if err := scanner.Err(); err != nil {
-				return err
-			}
-		}
-
-		panic("empty passwords are not permitted")
-	default:
-		hashed, err = security.HashPassword([]byte(password))
-		if err != nil {
-			return err
-		}
 	}
-	conn, err := makeSQLClient()
+
+	conn, err := getPasswordAndMakeSQLClient()
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	// TODO(marc): switch to UPSERT.
+	// TODO(asubiotto): Implement appropriate server-side authorization rules
+	// for users to be able to change their own passwords.
 	return runQueryAndFormatResults(conn, os.Stdout,
-		makeQuery(`INSERT INTO system.users VALUES ($1, $2)`, args[0], hashed), cliCtx.prettyFmt)
+		makeQuery(`UPSERT INTO system.users VALUES ($1, $2)`, args[0], hashed), cliCtx.prettyFmt)
 }
 
 var userCmds = []*cobra.Command{

@@ -27,7 +27,6 @@ export function AccumulateMetrics(dest: StatusMetrics, ...srcs: StatusMetrics[])
  * for all current usages of NodeStatus in the UI.
  */
 export function RollupStoreMetrics(ns: NodeStatus): void {
-  "use strict";
   AccumulateMetrics(ns.metrics, ..._.map(ns.store_statuses, (ss) => ss.metrics));
 }
 
@@ -40,8 +39,9 @@ export namespace MetricConstants {
   export const replicas: string = "replicas";
   export const raftLeaders: string = "replicas.leaders";
   export const leaseHolders: string = "replicas.leaseholders";
-  export const availableRanges: string = "ranges.available";
-  export const replicatedRanges: string  = "ranges.allocator.noop";
+  export const ranges: string = "ranges";
+  export const unavailableRanges: string = "ranges.unavailable";
+  export const underReplicatedRanges: string  = "ranges.underreplicated";
   export const liveBytes: string = "livebytes";
   export const keyBytes: string = "keybytes";
   export const valBytes: string = "valbytes";

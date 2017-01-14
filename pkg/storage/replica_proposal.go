@@ -17,12 +17,13 @@
 package storage
 
 import (
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/context"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -33,34 +34,97 @@ import (
 	"github.com/pkg/errors"
 )
 
-// LocalProposalData is data belonging to a proposal that is only relevant
-// on the node on which the command was proposed.
+// leaseMetricsType is used to distinguish between various lease
+// operations and potentially outcomes.
+type leaseMetricsType int
+
+const (
+	leaseRequestSuccess leaseMetricsType = iota
+	leaseRequestError
+	leaseTransferSuccess
+	leaseTransferError
+)
+
+// ProposalData is data about a command which allows it to be
+// evaluated, proposed to raft, and for the result of the command to
+// be returned to the caller.
+type ProposalData struct {
+	// The caller's context, used for logging proposals and reproposals.
+	ctx context.Context
+
+	// idKey uniquely identifies this proposal.
+	// TODO(andreimatei): idKey is legacy at this point: We could easily key
+	// commands by their MaxLeaseIndex, and doing so should be ok with a stop-
+	// the-world migration. However, various test facilities depend on the
+	// command ID for e.g. replay protection.
+	idKey storagebase.CmdIDKey
+
+	// proposedAtTicks is the (logical) time at which this command was
+	// last (re-)proposed.
+	proposedAtTicks int
+
+	// command is serialized and proposed to raft. In the event of
+	// reproposals its MaxLeaseIndex field is mutated.
+	command storagebase.RaftCommand
+
+	// endCmds.finish is called after command execution to update the timestamp cache &
+	// command queue.
+	endCmds *endCmds
+
+	// doneCh is used to signal the waiting RPC handler (the contents of
+	// proposalResult come from LocalEvalResult)
+	doneCh chan proposalResult
+
+	// Local contains the results of evaluating the request in
+	// propEvalKV, tying the upstream evaluation of the request to the
+	// downstream application of the command. If propEvalKV is false,
+	// Local is nil.
+	Local *LocalEvalResult
+
+	// Request is the client's original BatchRequest.
+	// TODO(tschottdorf): tests which use TestingCommandFilter use this.
+	// Decide how that will work in the future, presumably the
+	// CommandFilter would run at proposal time or we allow an opaque
+	// struct to be attached to a proposal which is then available as it
+	// applies. Other than tests, we only need a few bits of the request
+	// here; this could be replaced with isLease and isChangeReplicas
+	// booleans.
+	Request *roachpb.BatchRequest
+}
+
+// finish first invokes the endCmds function and then sends the
+// specified proposalResult on the proposal's done channel. endCmds is
+// invoked here in order to allow the original client to be cancelled
+// and possibly no longer listening to this done channel, and so can't
+// be counted on to invoke endCmds itself.
+func (proposal *ProposalData) finish(pr proposalResult) {
+	if proposal.endCmds != nil {
+		proposal.endCmds.done(pr.Reply, pr.Err, pr.ProposalRetry)
+		proposal.endCmds = nil
+	}
+	proposal.doneCh <- pr
+	close(proposal.doneCh)
+}
+
+// LocalEvalResult is data belonging to an evaluated command that is
+// only used on the node on which the command was proposed. Note that
+// the proposing node may die before the local results are processed,
+// so any side effects here are only best-effort.
 //
 // TODO(tschottdorf): once the WriteBatch is available in the replicated
 // proposal data (i.e. once we really do proposer-evaluted KV), experiment with
 // holding on to the proposer's constructed engine.Batch in this struct, which
 // could give a performance gain.
-type LocalProposalData struct {
-	// TODO(andreimatei): idKey is legacy at this point: We could easily key
-	// commands by their MaxLeaseIndex, and doing so should be ok with a stop-
-	// the-world migration. However, various test facilities depend on the
-	// command ID for e.g. replay protection.
-	idKey           storagebase.CmdIDKey
-	proposedAtTicks int
-	ctx             context.Context
-
+type LocalEvalResult struct {
+	// The error resulting from the proposal. Most failing proposals will
+	// fail-fast, i.e. will return an error to the client above Raft. However,
+	// some proposals need to commit data even on error, and in that case we
+	// treat the proposal like a successful one, except that the error stored
+	// here will be sent to the client when the associated batch commits. In
+	// the common case, this field is nil.
 	Err   *roachpb.Error
 	Reply *roachpb.BatchResponse
-	done  chan roachpb.ResponseWithError // Used to signal waiting RPC handler
 
-	Batch engine.Batch
-	// The stats delta that the application of the Raft command would cause.
-	// On a split, contains only the contributions to the left-hand side.
-	delta enginepb.MVCCStats
-
-	// The new (estimated, i.e. not necessarily consistently replicated)
-	// raftLogSize.
-	raftLogSize *int64
 	// intents stores any intents encountered but not conflicted with. They
 	// should be handed off to asynchronous intent processing on the proposer,
 	// so that an attempt to resolve them is made.
@@ -71,10 +135,13 @@ type LocalProposalData struct {
 	// all) values to be compared.
 	intents *[]intentsWithArg
 	// Whether we successfully or non-successfully requested a lease.
-	leaseMetricsResult *bool
-
-	// TODO(tschottdorf): there is no need to ever have these actions below
-	// taken on the followers, correct?
+	//
+	// TODO(tschottdorf): Update this counter correctly with prop-eval'ed KV
+	// in the following case:
+	// - proposal does not fail fast and goes through Raft
+	// - downstream-of-Raft logic identifies a conflict and returns an error
+	// The downstream-of-Raft logic does not exist at time of writing.
+	leaseMetricsResult *leaseMetricsType
 
 	// When set (in which case we better be the first range), call
 	// gossipFirstRange if the Replica holds the lease.
@@ -83,125 +150,158 @@ type LocalProposalData struct {
 	maybeGossipSystemConfig bool
 	// Call maybeAddToSplitQueue.
 	maybeAddToSplitQueue bool
-	// Call maybeAddToReplicaGCQueue.
-	addToReplicaGCQueue bool
 	// Call maybeGossipNodeLiveness with the specified Span, if set.
 	maybeGossipNodeLiveness *roachpb.Span
 }
 
-// ProposalData is the result of preparing a Raft proposal. That is, the
+func (lResult *LocalEvalResult) detachIntents() []intentsWithArg {
+	if lResult == nil || lResult.intents == nil {
+		return nil
+	}
+	intents := *lResult.intents
+	lResult.intents = nil
+	return intents
+}
+
+// EvalResult is the result of evaluating a KV request. That is, the
 // proposer (which holds the lease, at least in the case in which the command
-// will complete successfully) has evaluated the proposal and is holding on to:
+// will complete successfully) has evaluated the request and is holding on to:
 //
 // a) changes to be written to disk when applying the command
 // b) changes to the state which may require special handling (i.e. code
 //    execution) on all Replicas
 // c) data which isn't sent to the followers but the proposer needs for tasks
 //    it must run when the command has applied (such as resolving intents).
-type ProposalData struct {
-	LocalProposalData
-	storagebase.ReplicatedProposalData
+type EvalResult struct {
+	Local      LocalEvalResult
+	Replicated storagebase.ReplicatedEvalResult
+	WriteBatch *storagebase.WriteBatch
 }
 
-func coalesceBool(lhs *bool, rhs bool) {
-	*lhs = *lhs || rhs
+// coalesceBool ORs rhs into lhs and then zeroes rhs.
+func coalesceBool(lhs *bool, rhs *bool) {
+	*lhs = *lhs || *rhs
+	*rhs = false
 }
 
-// MergeAndDestroy absorbs the supplied ProposalData while validating that the
-// resulting ProposalData makes sense. For example, it is forbidden to absorb
+// MergeAndDestroy absorbs the supplied EvalResult while validating that the
+// resulting EvalResult makes sense. For example, it is forbidden to absorb
 // two lease updates or log truncations, or multiple splits and/or merges.
 //
-// The passed ProposalData must not be used once passed to Merge.
-func (p *ProposalData) MergeAndDestroy(q ProposalData) error {
-	// ==================
-	// ReplicatedProposalData.
-	// ==================
-	if q.State.RaftAppliedIndex != 0 {
+// The passed EvalResult must not be used once passed to Merge.
+func (p *EvalResult) MergeAndDestroy(q EvalResult) error {
+	if q.Replicated.State.RaftAppliedIndex != 0 {
 		return errors.New("must not specify RaftApplyIndex")
 	}
-	if q.State.LeaseAppliedIndex != 0 {
+	if q.Replicated.State.LeaseAppliedIndex != 0 {
 		return errors.New("must not specify RaftApplyIndex")
 	}
-	if p.State.Desc == nil {
-		p.State.Desc = q.State.Desc
-	} else if q.State.Desc != nil {
+	if p.Replicated.State.Desc == nil {
+		p.Replicated.State.Desc = q.Replicated.State.Desc
+	} else if q.Replicated.State.Desc != nil {
 		return errors.New("conflicting RangeDescriptor")
 	}
-	if p.State.Lease == nil {
-		p.State.Lease = q.State.Lease
-	} else if q.State.Lease != nil {
+	q.Replicated.State.Desc = nil
+
+	if p.Replicated.State.Lease == nil {
+		p.Replicated.State.Lease = q.Replicated.State.Lease
+	} else if q.Replicated.State.Lease != nil {
 		return errors.New("conflicting Lease")
 	}
-	if p.State.TruncatedState == nil {
-		p.State.TruncatedState = q.State.TruncatedState
-	} else if q.State.TruncatedState != nil {
+	q.Replicated.State.Lease = nil
+
+	if p.Replicated.State.TruncatedState == nil {
+		p.Replicated.State.TruncatedState = q.Replicated.State.TruncatedState
+	} else if q.Replicated.State.TruncatedState != nil {
 		return errors.New("conflicting TruncatedState")
 	}
-	p.State.GCThreshold.Forward(q.State.GCThreshold)
-	p.State.TxnSpanGCThreshold.Forward(q.State.TxnSpanGCThreshold)
-	if (q.State.Stats != enginepb.MVCCStats{}) {
+	q.Replicated.State.TruncatedState = nil
+
+	p.Replicated.State.GCThreshold.Forward(q.Replicated.State.GCThreshold)
+	q.Replicated.State.GCThreshold = hlc.ZeroTimestamp
+	p.Replicated.State.TxnSpanGCThreshold.Forward(q.Replicated.State.TxnSpanGCThreshold)
+	q.Replicated.State.TxnSpanGCThreshold = hlc.ZeroTimestamp
+
+	if (q.Replicated.State.Stats != enginepb.MVCCStats{}) {
 		return errors.New("must not specify Stats")
 	}
-	if p.State.Frozen == storagebase.ReplicaState_FROZEN_UNSPECIFIED {
-		p.State.Frozen = q.State.Frozen
-	} else if q.State.Frozen != storagebase.ReplicaState_FROZEN_UNSPECIFIED {
+
+	if p.Replicated.State.Frozen == storagebase.ReplicaState_FROZEN_UNSPECIFIED {
+		p.Replicated.State.Frozen = q.Replicated.State.Frozen
+	} else if q.Replicated.State.Frozen != storagebase.ReplicaState_FROZEN_UNSPECIFIED {
 		return errors.New("conflicting FrozenStatus")
 	}
+	q.Replicated.State.Frozen = storagebase.ReplicaState_FROZEN_UNSPECIFIED
 
-	p.BlockReads = p.BlockReads || q.BlockReads
+	p.Replicated.BlockReads = p.Replicated.BlockReads || q.Replicated.BlockReads
+	q.Replicated.BlockReads = false
 
-	if p.Split == nil {
-		p.Split = q.Split
-	} else if q.Split != nil {
+	if p.Replicated.Split == nil {
+		p.Replicated.Split = q.Replicated.Split
+	} else if q.Replicated.Split != nil {
 		return errors.New("conflicting Split")
 	}
+	q.Replicated.Split = nil
 
-	if p.Merge == nil {
-		p.Merge = q.Merge
-	} else if q.Merge != nil {
+	if p.Replicated.Merge == nil {
+		p.Replicated.Merge = q.Replicated.Merge
+	} else if q.Replicated.Merge != nil {
 		return errors.New("conflicting Merge")
 	}
+	q.Replicated.Merge = nil
 
-	if p.ComputeChecksum == nil {
-		p.ComputeChecksum = q.ComputeChecksum
-	} else if q.ComputeChecksum != nil {
+	if p.Replicated.ChangeReplicas == nil {
+		p.Replicated.ChangeReplicas = q.Replicated.ChangeReplicas
+	} else if q.Replicated.ChangeReplicas != nil {
+		return errors.New("conflicting ChangeReplicas")
+	}
+	q.Replicated.ChangeReplicas = nil
+
+	if p.Replicated.ComputeChecksum == nil {
+		p.Replicated.ComputeChecksum = q.Replicated.ComputeChecksum
+	} else if q.Replicated.ComputeChecksum != nil {
 		return errors.New("conflicting ComputeChecksum")
 	}
+	q.Replicated.ComputeChecksum = nil
 
-	// ==================
-	// LocalProposalData.
-	// ==================
-
-	if p.raftLogSize == nil {
-		p.raftLogSize = q.raftLogSize
-	} else if q.raftLogSize != nil {
-		return errors.New("conflicting raftLogSize")
+	if p.Replicated.RaftLogDelta == nil {
+		p.Replicated.RaftLogDelta = q.Replicated.RaftLogDelta
+	} else if q.Replicated.RaftLogDelta != nil {
+		return errors.New("conflicting RaftLogDelta")
 	}
+	q.Replicated.RaftLogDelta = nil
 
-	if q.intents != nil {
-		if p.intents == nil {
-			p.intents = q.intents
+	if q.Local.intents != nil {
+		if p.Local.intents == nil {
+			p.Local.intents = q.Local.intents
 		} else {
-			*p.intents = append(*p.intents, *q.intents...)
+			*p.Local.intents = append(*p.Local.intents, *q.Local.intents...)
 		}
 	}
+	q.Local.intents = nil
 
-	if p.leaseMetricsResult == nil {
-		p.leaseMetricsResult = q.leaseMetricsResult
-	} else if q.leaseMetricsResult != nil {
+	if p.Local.leaseMetricsResult == nil {
+		p.Local.leaseMetricsResult = q.Local.leaseMetricsResult
+	} else if q.Local.leaseMetricsResult != nil {
 		return errors.New("conflicting leaseMetricsResult")
 	}
+	q.Local.leaseMetricsResult = nil
 
-	if p.maybeGossipNodeLiveness == nil {
-		p.maybeGossipNodeLiveness = q.maybeGossipNodeLiveness
-	} else if q.maybeGossipNodeLiveness != nil {
+	if p.Local.maybeGossipNodeLiveness == nil {
+		p.Local.maybeGossipNodeLiveness = q.Local.maybeGossipNodeLiveness
+	} else if q.Local.maybeGossipNodeLiveness != nil {
 		return errors.New("conflicting maybeGossipNodeLiveness")
 	}
+	q.Local.maybeGossipNodeLiveness = nil
 
-	coalesceBool(&p.gossipFirstRange, q.gossipFirstRange)
-	coalesceBool(&p.maybeGossipSystemConfig, q.maybeGossipSystemConfig)
-	coalesceBool(&p.maybeAddToSplitQueue, q.maybeAddToSplitQueue)
-	coalesceBool(&p.addToReplicaGCQueue, q.addToReplicaGCQueue)
+	coalesceBool(&p.Local.gossipFirstRange, &q.Local.gossipFirstRange)
+	coalesceBool(&p.Local.maybeGossipSystemConfig, &q.Local.maybeGossipSystemConfig)
+	coalesceBool(&p.Local.maybeAddToSplitQueue, &q.Local.maybeAddToSplitQueue)
+
+	if (q != EvalResult{}) {
+		log.Fatalf(context.TODO(), "unhandled EvalResult: %s", pretty.Diff(q, EvalResult{}))
+	}
+
 	return nil
 }
 
@@ -288,8 +388,10 @@ func (r *Replica) leasePostApply(
 		// requests, this is kosher). This means that we don't use the old
 		// lease's expiration but instead use the new lease's start to initialize
 		// the timestamp cache low water.
-		log.Infof(ctx, "new range lease %s following %s [physicalTime=%s]",
-			newLease, prevLease, r.store.Clock().PhysicalTime())
+		if log.V(1) {
+			log.Infof(ctx, "new range lease %s following %s [physicalTime=%s]",
+				newLease, prevLease, r.store.Clock().PhysicalTime())
+		}
 		r.mu.Lock()
 		r.mu.tsCache.SetLowWater(newLease.Start)
 		r.mu.Unlock()
@@ -297,7 +399,7 @@ func (r *Replica) leasePostApply(
 		// Gossip the first range whenever its lease is acquired. We check to
 		// make sure the lease is active so that a trailing replica won't process
 		// an old lease request and attempt to gossip the first range.
-		if r.IsFirstRange() && newLease.Covers(r.store.Clock().Now()) {
+		if r.IsFirstRange() && r.IsLeaseValid(newLease, r.store.Clock().Now()) {
 			r.gossipFirstRange(ctx)
 		}
 	}
@@ -307,39 +409,60 @@ func (r *Replica) leasePostApply(
 		// lease holder. Note that we'll call SetLowWater when we next acquire
 		// the lease.
 		r.mu.Lock()
-		r.mu.tsCache.Clear(r.store.Clock())
+		r.mu.tsCache.Clear(r.store.Clock().Now())
 		r.mu.Unlock()
 	}
 
-	if !iAmTheLeaseHolder && newLease.Covers(r.store.Clock().Now()) {
+	if !iAmTheLeaseHolder && r.IsLeaseValid(newLease, r.store.Clock().Now()) {
 		// If this replica is the raft leader but it is not the new lease holder,
 		// then try to transfer the raft leadership to match the lease. We like it
 		// when leases and raft leadership are collocated because that facilitates
 		// quick command application (requests generally need to make it to both the
 		// lease holder and the raft leader before being applied by other replicas).
-		//
-		// TODO(andrei): We want to do this attempt when a lease changes hands, and
-		// then periodically check that the collocation is fine. So we keep checking
-		// it here on lease extensions, which happen periodically, but that's pretty
-		// arbitrary. There might be a more natural place elsewhere where this
-		// periodic check should happen.
-		r.maybeTransferRaftLeadership(ctx, replicaID, newLease.Replica.ReplicaID)
+		// Note that this condition is also checked periodically when computing
+		// replica metrics.
+		r.maybeTransferRaftLeadership(ctx, newLease.Replica.ReplicaID)
+	}
+
+	// Notify the store that a lease change occurred and it may need to
+	// gossip the updated store descriptor (with updated capacity).
+	if leaseChangingHands && (prevLease.OwnedBy(r.store.StoreID()) ||
+		newLease.OwnedBy(r.store.StoreID())) {
+		r.store.maybeGossipOnCapacityChange(ctx, leaseChangeEvent)
+	}
+
+	// Potentially re-gossip if the range contains system data (e.g.
+	// system config or node liveness) and the lease is changing hands
+	// or this is the first time that either system data has been
+	// gossiped.
+	if iAmTheLeaseHolder {
+		if leaseChangingHands || atomic.CompareAndSwapInt32(&r.store.haveGossipedSystemConfig, 0, 1) {
+			if err := r.maybeGossipSystemConfig(ctx); err != nil {
+				log.Error(ctx, err)
+			}
+		}
+		if leaseChangingHands || atomic.CompareAndSwapInt32(&r.store.haveGossipedNodeLiveness, 0, 1) {
+			if err := r.maybeGossipNodeLiveness(ctx, keys.NodeLivenessSpan); err != nil {
+				log.Error(ctx, err)
+			}
+		}
 	}
 }
 
-// maybeTransferRaftLeadership attempts to transfer the leadership away from
-// this node to target, if this node is the current raft leader.
-// The transfer might silently fail, particularly (only?) if the transferee is
-// behind on applying the log.
-func (r *Replica) maybeTransferRaftLeadership(
-	ctx context.Context, replicaID roachpb.ReplicaID, target roachpb.ReplicaID,
-) {
+// maybeTransferRaftLeadership attempts to transfer the leadership
+// away from this node to target, if this node is the current raft
+// leader. We don't attempt to transfer leadership if the transferee
+// is behind on applying the log.
+func (r *Replica) maybeTransferRaftLeadership(ctx context.Context, target roachpb.ReplicaID) {
 	err := r.withRaftGroup(func(raftGroup *raft.RawNode) (bool, error) {
-		if raftGroup.Status().RaftState == raft.StateLeader {
-			// Only the raft leader can attempt a leadership transfer.
-			log.Infof(ctx, "range %s: transferring raft leadership to replica ID %v",
-				r, target)
-			raftGroup.TransferLeader(uint64(target))
+		// Only the raft leader can attempt a leadership transfer.
+		if status := raftGroup.Status(); status.RaftState == raft.StateLeader {
+			// Only attempt this if the target has all the log entries.
+			if pr, ok := status.Progress[uint64(target)]; ok && pr.Match == r.mu.lastIndex {
+				log.VEventf(ctx, 1, "transferring raft leadership to replica ID %v", target)
+				r.store.metrics.RangeRaftLeaderTransfers.Inc(1)
+				raftGroup.TransferLeader(uint64(target))
+			}
 		}
 		return true, nil
 	})
@@ -355,34 +478,60 @@ func (r *Replica) maybeTransferRaftLeadership(
 	}
 }
 
-func (r *Replica) handleProposalData(
-	ctx context.Context, originReplica roachpb.ReplicaDescriptor, pd ProposalData,
-) {
-	if pd.BlockReads {
+func (r *Replica) handleReplicatedEvalResult(
+	ctx context.Context, rResult storagebase.ReplicatedEvalResult,
+) (shouldAssert bool) {
+	// Fields for which no action is taken in this method are zeroed so that
+	// they don't trigger an assertion at the end of the method (which checks
+	// that all fields were handled).
+	{
+		rResult.IsLeaseRequest = false
+		rResult.IsConsistencyRelated = false
+		rResult.IsFreeze = false
+		rResult.Timestamp = hlc.ZeroTimestamp
+	}
+
+	if rResult.BlockReads {
 		r.readOnlyCmdMu.Lock()
 		defer r.readOnlyCmdMu.Unlock()
-		pd.BlockReads = false
+		rResult.BlockReads = false
 	}
 
 	// Update MVCC stats and Raft portion of ReplicaState.
 	r.mu.Lock()
-	r.mu.state.Stats = pd.State.Stats
-	r.mu.state.RaftAppliedIndex = pd.State.RaftAppliedIndex
-	r.mu.state.LeaseAppliedIndex = pd.State.LeaseAppliedIndex
+	r.mu.state.Stats.Add(rResult.Delta)
+	if rResult.State.RaftAppliedIndex != 0 {
+		r.mu.state.RaftAppliedIndex = rResult.State.RaftAppliedIndex
+	}
+	if rResult.State.LeaseAppliedIndex != 0 {
+		r.mu.state.LeaseAppliedIndex = rResult.State.LeaseAppliedIndex
+	}
+	needsSplitBySize := r.needsSplitBySizeLocked()
 	r.mu.Unlock()
 
-	pd.State.Stats = enginepb.MVCCStats{}
-	pd.State.LeaseAppliedIndex = 0
-	pd.State.RaftAppliedIndex = 0
+	r.store.metrics.addMVCCStats(rResult.Delta)
+	rResult.Delta = enginepb.MVCCStats{}
+
+	const raftLogCheckFrequency = 1 + RaftLogQueueStaleThreshold/4
+	if rResult.State.RaftAppliedIndex%raftLogCheckFrequency == 1 {
+		r.store.raftLogQueue.MaybeAdd(r, r.store.Clock().Now())
+	}
+	if needsSplitBySize {
+		r.store.splitQueue.MaybeAdd(r, r.store.Clock().Now())
+	}
+
+	rResult.State.Stats = enginepb.MVCCStats{}
+	rResult.State.LeaseAppliedIndex = 0
+	rResult.State.RaftAppliedIndex = 0
 
 	// The above are always present, so we assert only if there are
 	// "nontrivial" actions below.
-	shouldAssert := (pd.ReplicatedProposalData != storagebase.ReplicatedProposalData{})
+	shouldAssert = (rResult != storagebase.ReplicatedEvalResult{})
 
 	// Process Split or Merge. This needs to happen after stats update because
 	// of the ContainsEstimates hack.
 
-	if pd.Split != nil {
+	if rResult.Split != nil {
 		// TODO(tschottdorf): We want to let the usual MVCCStats-delta
 		// machinery update our stats for the left-hand side. But there is no
 		// way to pass up an MVCCStats object that will clear out the
@@ -401,40 +550,34 @@ func (r *Replica) handleProposalData(
 		}
 
 		splitPostApply(
-			r.ctx,
-			pd.Split.RHSDelta,
-			&pd.Split.SplitTrigger,
+			r.AnnotateCtx(ctx),
+			rResult.Split.RHSDelta,
+			&rResult.Split.SplitTrigger,
 			r,
 		)
-		pd.Split = nil
+		rResult.Split = nil
 	}
 
-	if pd.Merge != nil {
-		r.mu.Lock()
-		r.mu.tsCache.Clear(r.store.Clock())
-		r.mu.Unlock()
-
-		if err := r.store.MergeRange(r, pd.Merge.LeftDesc.EndKey,
-			pd.Merge.RightDesc.RangeID,
+	if rResult.Merge != nil {
+		if err := r.store.MergeRange(ctx, r, rResult.Merge.LeftDesc.EndKey,
+			rResult.Merge.RightDesc.RangeID,
 		); err != nil {
 			// Our in-memory state has diverged from the on-disk state.
 			log.Fatalf(ctx, "failed to update store after merging range: %s", err)
 		}
-		pd.Merge = nil
+		rResult.Merge = nil
 	}
 
 	// Update the remaining ReplicaState.
 
-	if pd.State.Frozen != storagebase.ReplicaState_FROZEN_UNSPECIFIED {
+	if rResult.State.Frozen != storagebase.ReplicaState_FROZEN_UNSPECIFIED {
 		r.mu.Lock()
-		r.mu.state.Frozen = pd.State.Frozen
+		r.mu.state.Frozen = rResult.State.Frozen
 		r.mu.Unlock()
 	}
-	pd.State.Frozen = storagebase.ReplicaState_FrozenEnum(0)
+	rResult.State.Frozen = storagebase.ReplicaState_FROZEN_UNSPECIFIED
 
-	if newDesc := pd.State.Desc; newDesc != nil {
-		pd.State.Desc = nil // for assertion
-
+	if newDesc := rResult.State.Desc; newDesc != nil {
 		if err := r.setDesc(newDesc); err != nil {
 			// Log the error. There's not much we can do because the commit may
 			// have already occurred at this point.
@@ -444,10 +587,26 @@ func (r *Replica) handleProposalData(
 				newDesc, err,
 			)
 		}
+		rResult.State.Desc = nil
 	}
 
-	if newLease := pd.State.Lease; newLease != nil {
-		pd.State.Lease = nil // for assertion
+	if change := rResult.ChangeReplicas; change != nil {
+		if change.ChangeType == roachpb.REMOVE_REPLICA &&
+			r.store.StoreID() == change.Replica.StoreID {
+			// This wants to run as late as possible, maximizing the chances
+			// that the other nodes have finished this command as well (since
+			// processing the removal from the queue looks up the Range at the
+			// lease holder, being too early here turns this into a no-op).
+			if _, err := r.store.replicaGCQueue.Add(r, replicaGCPriorityRemoved); err != nil {
+				// Log the error; the range should still be GC'd eventually.
+				log.Errorf(ctx, "unable to add to replica GC queue: %s", err)
+			}
+		}
+		rResult.ChangeReplicas = nil
+	}
+
+	if newLease := rResult.State.Lease; newLease != nil {
+		rResult.State.Lease = nil // for assertion
 
 		r.mu.Lock()
 		replicaID := r.mu.replicaID
@@ -458,8 +617,8 @@ func (r *Replica) handleProposalData(
 		r.leasePostApply(ctx, newLease, replicaID, prevLease)
 	}
 
-	if newTruncState := pd.State.TruncatedState; newTruncState != nil {
-		pd.State.TruncatedState = nil // for assertion
+	if newTruncState := rResult.State.TruncatedState; newTruncState != nil {
+		rResult.State.TruncatedState = nil // for assertion
 		r.mu.Lock()
 		r.mu.state.TruncatedState = newTruncState
 		r.mu.Unlock()
@@ -468,54 +627,68 @@ func (r *Replica) handleProposalData(
 		r.store.raftEntryCache.clearTo(r.RangeID, newTruncState.Index+1)
 	}
 
-	if newThresh := pd.State.GCThreshold; newThresh != hlc.ZeroTimestamp {
+	if newThresh := rResult.State.GCThreshold; newThresh != hlc.ZeroTimestamp {
 		r.mu.Lock()
 		r.mu.state.GCThreshold = newThresh
 		r.mu.Unlock()
-		pd.State.GCThreshold = hlc.ZeroTimestamp
+		rResult.State.GCThreshold = hlc.ZeroTimestamp
 	}
 
-	if newThresh := pd.State.TxnSpanGCThreshold; newThresh != hlc.ZeroTimestamp {
+	if newThresh := rResult.State.TxnSpanGCThreshold; newThresh != hlc.ZeroTimestamp {
 		r.mu.Lock()
 		r.mu.state.TxnSpanGCThreshold = newThresh
 		r.mu.Unlock()
-		pd.State.TxnSpanGCThreshold = hlc.ZeroTimestamp
+		rResult.State.TxnSpanGCThreshold = hlc.ZeroTimestamp
+	}
+
+	if rResult.ComputeChecksum != nil {
+		r.computeChecksumPostApply(ctx, *rResult.ComputeChecksum)
+		rResult.ComputeChecksum = nil
+	}
+
+	if rResult.RaftLogDelta != nil {
+		r.mu.Lock()
+		r.mu.raftLogSize += *rResult.RaftLogDelta
+		if r.mu.raftLogSize < 0 {
+			// Ensure raftLogSize is not negative since it isn't persisted between
+			// server restarts.
+			r.mu.raftLogSize = 0
+		}
+		r.mu.Unlock()
+		rResult.RaftLogDelta = nil
+	}
+
+	if (rResult != storagebase.ReplicatedEvalResult{}) {
+		log.Fatalf(ctx, "unhandled field in ReplicatedEvalResult: %s", pretty.Diff(rResult, storagebase.ReplicatedEvalResult{}))
+	}
+	return shouldAssert
+}
+
+func (r *Replica) handleLocalEvalResult(
+	ctx context.Context, originReplica roachpb.ReplicaDescriptor, lResult LocalEvalResult,
+) (shouldAssert bool) {
+	// Fields for which no action is taken in this method are zeroed so that
+	// they don't trigger an assertion at the end of the method (which checks
+	// that all fields were handled).
+	{
+		lResult.Err = nil
+		lResult.Reply = nil
 	}
 
 	// ======================
 	// Non-state updates and actions.
 	// ======================
-	r.store.metrics.addMVCCStats(pd.delta)
-	pd.delta = enginepb.MVCCStats{}
 
-	if originReplica.StoreID == r.store.StoreID() {
-		// On the replica on which this command originated, resolve skipped
-		// intents asynchronously - even on failure.
-		//
-		// TODO(tschottdorf): EndTransaction will use this pathway to return
-		// intents which should immediately be resolved. However, there's
-		// a slight chance that an error between the origin of that intents
-		// slice and here still results in that intent slice arriving here
-		// without the EndTransaction having committed. We should clearly
-		// separate the part of the ProposalData which also applies on errors.
-		if pd.intents != nil {
-			r.store.intentResolver.processIntentsAsync(r, *pd.intents)
-		}
+	// The caller is required to detach and handle intents.
+	if lResult.intents != nil {
+		log.Fatalf(ctx, "LocalEvalResult.intents should be nil: %+v", lResult.intents)
 	}
-	pd.intents = nil
 
 	// The above are present too often, so we assert only if there are
 	// "nontrivial" actions below.
-	shouldAssert = shouldAssert || (pd.LocalProposalData != LocalProposalData{})
+	shouldAssert = (lResult != LocalEvalResult{})
 
-	if pd.raftLogSize != nil {
-		r.mu.Lock()
-		r.mu.raftLogSize = *pd.raftLogSize
-		r.mu.Unlock()
-		pd.raftLogSize = nil
-	}
-
-	if pd.gossipFirstRange {
+	if lResult.gossipFirstRange {
 		// We need to run the gossip in an async task because gossiping requires
 		// the range lease and we'll deadlock if we try to acquire it while
 		// holding processRaftMu. Specifically, Replica.redirectOnOrAcquireLease
@@ -534,49 +707,62 @@ func (r *Replica) handleProposalData(
 		}); err != nil {
 			log.Infof(ctx, "unable to gossip first range: %s", err)
 		}
-		pd.gossipFirstRange = false
+		lResult.gossipFirstRange = false
 	}
 
-	if pd.addToReplicaGCQueue {
-		if _, err := r.store.replicaGCQueue.Add(r, replicaGCPriorityRemoved); err != nil {
-			// Log the error; the range should still be GC'd eventually.
-			log.Errorf(ctx, "unable to add to replica GC queue: %s", err)
-		}
-		pd.addToReplicaGCQueue = false
-	}
-
-	if pd.maybeAddToSplitQueue {
+	if lResult.maybeAddToSplitQueue {
 		r.store.splitQueue.MaybeAdd(r, r.store.Clock().Now())
-		pd.maybeAddToSplitQueue = false
+		lResult.maybeAddToSplitQueue = false
 	}
 
-	if pd.maybeGossipSystemConfig {
-		r.maybeGossipSystemConfig()
-		pd.maybeGossipSystemConfig = false
+	if lResult.maybeGossipSystemConfig {
+		if err := r.maybeGossipSystemConfig(ctx); err != nil {
+			log.Error(ctx, err)
+		}
+		lResult.maybeGossipSystemConfig = false
 	}
 
 	if originReplica.StoreID == r.store.StoreID() {
-		if pd.leaseMetricsResult != nil {
-			r.store.metrics.leaseRequestComplete(*pd.leaseMetricsResult)
+		if lResult.leaseMetricsResult != nil {
+			switch metric := *lResult.leaseMetricsResult; metric {
+			case leaseRequestSuccess, leaseRequestError:
+				r.store.metrics.leaseRequestComplete(metric == leaseRequestSuccess)
+			case leaseTransferSuccess, leaseTransferError:
+				r.store.metrics.leaseTransferComplete(metric == leaseTransferSuccess)
+			}
 		}
-		if pd.maybeGossipNodeLiveness != nil {
-			r.maybeGossipNodeLiveness(*pd.maybeGossipNodeLiveness)
+		if lResult.maybeGossipNodeLiveness != nil {
+			if err := r.maybeGossipNodeLiveness(ctx, *lResult.maybeGossipNodeLiveness); err != nil {
+				log.Error(ctx, err)
+			}
 		}
 	}
 	// Satisfy the assertions for all of the items processed only on the
 	// proposer (the block just above).
-	pd.leaseMetricsResult = nil
-	pd.maybeGossipNodeLiveness = nil
+	lResult.leaseMetricsResult = nil
+	lResult.maybeGossipNodeLiveness = nil
 
-	if pd.ComputeChecksum != nil {
-		r.computeChecksumPostApply(ctx, *pd.ComputeChecksum)
-		pd.ComputeChecksum = nil
+	if (lResult != LocalEvalResult{}) {
+		log.Fatalf(ctx, "unhandled field in LocalEvalResult: %s", pretty.Diff(lResult, LocalEvalResult{}))
 	}
 
-	if (pd != ProposalData{}) {
-		log.Fatalf(context.TODO(), "unhandled field in ProposalData: %s", pretty.Diff(pd, ProposalData{}))
-	}
+	return shouldAssert
+}
 
+func (r *Replica) handleEvalResult(
+	ctx context.Context,
+	originReplica roachpb.ReplicaDescriptor,
+	lResult *LocalEvalResult,
+	rResult *storagebase.ReplicatedEvalResult,
+) {
+	// Careful: `shouldAssert = f() || g()` will not run both if `f()` is true.
+	shouldAssert := false
+	if rResult != nil {
+		shouldAssert = r.handleReplicatedEvalResult(ctx, *rResult) || shouldAssert
+	}
+	if lResult != nil {
+		shouldAssert = r.handleLocalEvalResult(ctx, originReplica, *lResult) || shouldAssert
+	}
 	if shouldAssert {
 		// Assert that the on-disk state doesn't diverge from the in-memory
 		// state as a result of the side effects.

@@ -31,16 +31,11 @@ import (
 	"github.com/pkg/errors"
 )
 
-// expressionCarrier handles expanding and starting sub-query plans
-// contained in Expr objects.
+// expressionCarrier handles visiting sub-expressions.
 type expressionCarrier interface {
-	// expand the sub-plans contained by expressions
-	// held by this object, if any.
-	expand() error
-
-	// start the sub-plans contained by expressions
-	// held by this object, if any.
-	start() error
+	// walkExprs explores all sub-expressions held by this object, if
+	// any.
+	walkExprs(func(desc string, index int, expr parser.TypedExpr))
 }
 
 // tableWriter handles writing kvs and forming table rows.
@@ -79,7 +74,7 @@ var _ tableWriter = (*tableDeleter)(nil)
 
 // tableInserter handles writing kvs and forming table rows for inserts.
 type tableInserter struct {
-	ri         rowInserter
+	ri         RowInserter
 	autoCommit bool
 
 	// Set by init.
@@ -87,13 +82,7 @@ type tableInserter struct {
 	b   *client.Batch
 }
 
-func (ti *tableInserter) expand() error {
-	return nil
-}
-
-func (ti *tableInserter) start() error {
-	return nil
-}
+func (ti *tableInserter) walkExprs(_ func(desc string, index int, expr parser.TypedExpr)) {}
 
 func (ti *tableInserter) init(txn *client.Txn) error {
 	ti.txn = txn
@@ -102,7 +91,7 @@ func (ti *tableInserter) init(txn *client.Txn) error {
 }
 
 func (ti *tableInserter) row(ctx context.Context, values parser.DTuple) (parser.DTuple, error) {
-	return nil, ti.ri.insertRow(ctx, ti.b, values, false)
+	return nil, ti.ri.InsertRow(ctx, ti.b, values, false)
 }
 
 func (ti *tableInserter) finalize(_ context.Context) error {
@@ -132,13 +121,7 @@ type tableUpdater struct {
 	b   *client.Batch
 }
 
-func (tu *tableUpdater) expand() error {
-	return nil
-}
-
-func (tu *tableUpdater) start() error {
-	return nil
-}
+func (tu *tableUpdater) walkExprs(_ func(desc string, index int, expr parser.TypedExpr)) {}
 
 func (tu *tableUpdater) init(txn *client.Txn) error {
 	tu.txn = txn
@@ -202,7 +185,7 @@ type tableUpsertEvaler interface {
 // operated on during `row`, and run during `finalize`. This is the same model
 // as the other `tableFoo`s, which are more simple than upsert.
 type tableUpserter struct {
-	ri            rowInserter
+	ri            RowInserter
 	conflictIndex sqlbase.IndexDescriptor
 
 	// These are set for ON CONFLICT DO UPDATE, but not for DO NOTHING
@@ -231,18 +214,10 @@ type tableUpserter struct {
 	indexKeyPrefix []byte
 }
 
-func (tu *tableUpserter) expand() error {
+func (tu *tableUpserter) walkExprs(walk func(desc string, index int, expr parser.TypedExpr)) {
 	if tu.evaler != nil {
-		return tu.evaler.expand()
+		tu.evaler.walkExprs(walk)
 	}
-	return nil
-}
-
-func (tu *tableUpserter) start() error {
-	if tu.evaler != nil {
-		return tu.evaler.start()
-	}
-	return nil
 }
 
 func (tu *tableUpserter) init(txn *client.Txn) error {
@@ -298,7 +273,7 @@ func (tu *tableUpserter) init(txn *client.Txn) error {
 func (tu *tableUpserter) row(ctx context.Context, row parser.DTuple) (parser.DTuple, error) {
 	if tu.fastPathBatch != nil {
 		primaryKey, _, err := sqlbase.EncodeIndexKey(
-			tu.tableDesc, &tu.tableDesc.PrimaryIndex, tu.ri.insertColIDtoRowIndex, row, tu.indexKeyPrefix)
+			tu.tableDesc, &tu.tableDesc.PrimaryIndex, tu.ri.InsertColIDtoRowIndex, row, tu.indexKeyPrefix)
 		if err != nil {
 			return nil, err
 		}
@@ -306,7 +281,7 @@ func (tu *tableUpserter) row(ctx context.Context, row parser.DTuple) (parser.DTu
 			return nil, fmt.Errorf("UPSERT/ON CONFLICT DO UPDATE command cannot affect row a second time")
 		}
 		tu.fastPathKeys[string(primaryKey)] = struct{}{}
-		err = tu.ri.insertRow(ctx, tu.fastPathBatch, row, true)
+		err = tu.ri.InsertRow(ctx, tu.fastPathBatch, row, true)
 		return nil, err
 	}
 
@@ -331,7 +306,7 @@ func (tu *tableUpserter) flush(ctx context.Context) error {
 		existingRow := existingRows[i]
 
 		if existingRow == nil {
-			err := tu.ri.insertRow(ctx, b, insertRow, false)
+			err := tu.ri.InsertRow(ctx, b, insertRow, false)
 			if err != nil {
 				return err
 			}
@@ -368,7 +343,7 @@ func (tu *tableUpserter) upsertRowPKs(ctx context.Context) ([]roachpb.Key, error
 		// conflicts.
 		for i, insertRow := range tu.insertRows {
 			upsertRowPK, _, err := sqlbase.EncodeIndexKey(
-				tu.tableDesc, &tu.conflictIndex, tu.ri.insertColIDtoRowIndex, insertRow, tu.indexKeyPrefix)
+				tu.tableDesc, &tu.conflictIndex, tu.ri.InsertColIDtoRowIndex, insertRow, tu.indexKeyPrefix)
 			if err != nil {
 				return nil, err
 			}
@@ -384,7 +359,7 @@ func (tu *tableUpserter) upsertRowPKs(ctx context.Context) ([]roachpb.Key, error
 	b := tu.txn.NewBatch()
 	for _, insertRow := range tu.insertRows {
 		entry, err := sqlbase.EncodeSecondaryIndex(
-			tu.tableDesc, &tu.conflictIndex, tu.ri.insertColIDtoRowIndex, insertRow)
+			tu.tableDesc, &tu.conflictIndex, tu.ri.InsertColIDtoRowIndex, insertRow)
 		if err != nil {
 			return nil, err
 		}
@@ -451,7 +426,7 @@ func (tu *tableUpserter) fetchExisting(ctx context.Context) ([]parser.DTuple, er
 
 	rows := make([]parser.DTuple, len(primaryKeys))
 	for {
-		row, err := tu.fetcher.NextRow()
+		row, err := tu.fetcher.NextRowDecoded()
 		if err != nil {
 			return nil, err
 		}
@@ -491,13 +466,7 @@ type tableDeleter struct {
 	b   *client.Batch
 }
 
-func (td *tableDeleter) expand() error {
-	return nil
-}
-
-func (td *tableDeleter) start() error {
-	return nil
-}
+func (td *tableDeleter) walkExprs(_ func(desc string, index int, expr parser.TypedExpr)) {}
 
 func (td *tableDeleter) init(txn *client.Txn) error {
 	td.txn = txn
@@ -658,7 +627,7 @@ func (td *tableDeleter) deleteAllRowsScan(
 	}
 
 	for i := int64(0); i < limit; i++ {
-		row, err := rf.NextRow()
+		row, err := rf.NextRowDecoded()
 		if err != nil {
 			return resume, err
 		}
@@ -750,7 +719,7 @@ func (td *tableDeleter) deleteIndexScan(
 	}
 
 	for i := int64(0); i < limit; i++ {
-		row, err := rf.NextRow()
+		row, err := rf.NextRowDecoded()
 		if err != nil {
 			return resume, err
 		}

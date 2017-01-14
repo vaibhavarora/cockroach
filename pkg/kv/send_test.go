@@ -74,9 +74,8 @@ func TestInvalidAddrLength(t *testing.T) {
 
 	// The provided replicas is nil, so its length will be always less than the
 	// specified response number
-	opts := SendOptions{ctx: context.Background()}
-	ds := &DistSender{Ctx: context.Background()}
-	ret, err := ds.sendToReplicas(opts, 0, nil, roachpb.BatchRequest{}, nil)
+	ds := &DistSender{}
+	ret, err := ds.sendToReplicas(context.Background(), SendOptions{}, 0, nil, roachpb.BatchRequest{}, nil)
 
 	// the expected return is nil and SendError
 	if _, ok := err.(*roachpb.SendError); !ok || ret != nil {
@@ -92,12 +91,11 @@ func TestSendToOneClient(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
 
-	ctx := newNodeTestContext(nil, stopper)
-	s, ln := newTestServer(t, ctx)
+	rpcContext := newNodeTestContext(hlc.NewClock(hlc.UnixNano, time.Nanosecond), stopper)
+	s, ln := newTestServer(t, rpcContext)
 	roachpb.RegisterInternalServer(s, Node(0))
 
-	opts := SendOptions{ctx: context.Background()}
-	reply, err := sendBatch(opts, []net.Addr{ln.Addr()}, ctx)
+	reply, err := sendBatch(context.Background(), SendOptions{}, []net.Addr{ln.Addr()}, rpcContext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,10 +111,10 @@ func TestRetryableError(t *testing.T) {
 
 	clientStopper := stop.NewStopper()
 	defer clientStopper.Stop()
-	clientContext := newNodeTestContext(nil, clientStopper)
+	clientContext := newNodeTestContext(hlc.NewClock(hlc.UnixNano, time.Nanosecond), clientStopper)
 
 	serverStopper := stop.NewStopper()
-	serverContext := newNodeTestContext(nil, serverStopper)
+	serverContext := newNodeTestContext(hlc.NewClock(hlc.UnixNano, time.Nanosecond), serverStopper)
 
 	s, ln := newTestServer(t, serverContext)
 	roachpb.RegisterInternalServer(s, Node(0))
@@ -126,7 +124,7 @@ func TestRetryableError(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Wait until the client becomes healthy and shut down the server.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if !clientContext.IsConnHealthy(addr) {
 			return errors.Errorf("client not yet healthy")
 		}
@@ -134,15 +132,14 @@ func TestRetryableError(t *testing.T) {
 	})
 	serverStopper.Stop()
 	// Wait until the client becomes unhealthy.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if clientContext.IsConnHealthy(addr) {
 			return errors.Errorf("client not yet unhealthy")
 		}
 		return nil
 	})
 
-	opts := SendOptions{ctx: context.Background()}
-	if _, err := sendBatch(opts, []net.Addr{ln.Addr()}, clientContext); err == nil {
+	if _, err := sendBatch(context.Background(), SendOptions{}, []net.Addr{ln.Addr()}, clientContext); err == nil {
 		t.Fatalf("Unexpected success")
 	}
 }
@@ -158,9 +155,12 @@ func (c *channelSaveTransport) IsExhausted() bool {
 	return c.remaining <= 0
 }
 
-func (c *channelSaveTransport) SendNext(done chan<- BatchCall) {
+func (c *channelSaveTransport) SendNext(_ context.Context, done chan<- BatchCall) {
 	c.remaining--
 	c.ch <- done
+}
+
+func (*channelSaveTransport) MoveToFront(roachpb.ReplicaDescriptor) {
 }
 
 func (*channelSaveTransport) Close() {
@@ -178,7 +178,7 @@ func (*channelSaveTransport) Close() {
 // distinguishing them and just send a single channel.
 func setupSendNextTest(t *testing.T) ([]chan<- BatchCall, chan BatchCall, *stop.Stopper) {
 	stopper := stop.NewStopper()
-	nodeContext := newNodeTestContext(nil, stopper)
+	nodeContext := newNodeTestContext(hlc.NewClock(hlc.UnixNano, time.Nanosecond), stopper)
 
 	addrs := []net.Addr{
 		util.NewUnresolvedAddr("dummy", "1"),
@@ -189,7 +189,6 @@ func setupSendNextTest(t *testing.T) ([]chan<- BatchCall, chan BatchCall, *stop.
 	doneChanChan := make(chan chan<- BatchCall, len(addrs))
 
 	opts := SendOptions{
-		ctx:             context.Background(),
 		SendNextTimeout: 1 * time.Millisecond,
 		transportFactory: func(_ SendOptions,
 			_ *rpc.Context,
@@ -207,7 +206,7 @@ func setupSendNextTest(t *testing.T) ([]chan<- BatchCall, chan BatchCall, *stop.
 	go func() {
 		// Send the batch. This will block until we signal one of the done
 		// channels.
-		br, err := sendBatch(opts, addrs, nodeContext)
+		br, err := sendBatch(context.Background(), opts, addrs, nodeContext)
 		sendChan <- BatchCall{br, err}
 	}()
 
@@ -406,7 +405,7 @@ func (f *firstNErrorTransport) IsExhausted() bool {
 	return f.numSent >= len(f.replicas)
 }
 
-func (f *firstNErrorTransport) SendNext(done chan<- BatchCall) {
+func (f *firstNErrorTransport) SendNext(_ context.Context, done chan<- BatchCall) {
 	call := BatchCall{
 		Reply: &roachpb.BatchResponse{},
 	}
@@ -415,6 +414,9 @@ func (f *firstNErrorTransport) SendNext(done chan<- BatchCall) {
 	}
 	f.numSent++
 	done <- call
+}
+
+func (*firstNErrorTransport) MoveToFront(roachpb.ReplicaDescriptor) {
 }
 
 func (*firstNErrorTransport) Close() {
@@ -428,7 +430,7 @@ func TestComplexScenarios(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
 
-	nodeContext := newNodeTestContext(nil, stopper)
+	nodeContext := newNodeTestContext(hlc.NewClock(hlc.UnixNano, time.Nanosecond), stopper)
 
 	// TODO(bdarnell): the retryable flag is no longer used for RPC errors.
 	// Rework this test to incorporate application-level errors carried in
@@ -458,8 +460,8 @@ func TestComplexScenarios(t *testing.T) {
 		}
 
 		opts := SendOptions{
-			ctx: context.Background(),
-			transportFactory: func(_ SendOptions,
+			transportFactory: func(
+				_ SendOptions,
 				_ *rpc.Context,
 				replicas ReplicaSlice,
 				args roachpb.BatchRequest,
@@ -472,7 +474,7 @@ func TestComplexScenarios(t *testing.T) {
 			},
 		}
 
-		reply, err := sendBatch(opts, serverAddrs, nodeContext)
+		reply, err := sendBatch(context.Background(), opts, serverAddrs, nodeContext)
 		if test.success {
 			if err != nil {
 				t.Errorf("%d: unexpected error: %s", i, err)
@@ -563,8 +565,9 @@ func makeReplicas(addrs ...net.Addr) ReplicaSlice {
 
 // sendBatch sends Batch requests to specified addresses using send.
 func sendBatch(
-	opts SendOptions, addrs []net.Addr, rpcContext *rpc.Context,
+	ctx context.Context, opts SendOptions, addrs []net.Addr, rpcContext *rpc.Context,
 ) (*roachpb.BatchResponse, error) {
-	ds := &DistSender{Ctx: context.Background()}
-	return ds.sendToReplicas(opts, 0, makeReplicas(addrs...), roachpb.BatchRequest{}, rpcContext)
+	ds := NewDistSender(DistSenderConfig{}, nil)
+	opts.metrics = &ds.metrics
+	return ds.sendToReplicas(ctx, opts, 0, makeReplicas(addrs...), roachpb.BatchRequest{}, rpcContext)
 }

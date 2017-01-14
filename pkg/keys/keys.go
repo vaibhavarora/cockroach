@@ -69,10 +69,10 @@ func NodeStatusKey(nodeID roachpb.NodeID) roachpb.Key {
 	return key
 }
 
-// NodeLastUsageReportKey returns the key for accessing the node last update check
-// time (when version check or usage reporting was done).
+// NodeLastUsageReportKey returns the key for accessing last usage report time
+// for a given node.
 func NodeLastUsageReportKey(nodeID roachpb.NodeID) roachpb.Key {
-	prefix := append([]byte(nil), UpdateCheckPrefix...)
+	prefix := append([]byte(nil), ReportUsagePrefix...)
 	return encoding.EncodeUvarintAscending(prefix, uint64(nodeID))
 }
 
@@ -138,7 +138,7 @@ func DecodeRangeIDKey(
 // AbortCacheKey returns a range-local key by Range ID for an
 // abort cache entry, with detail specified by encoding the
 // supplied transaction ID.
-func AbortCacheKey(rangeID roachpb.RangeID, txnID *uuid.UUID) roachpb.Key {
+func AbortCacheKey(rangeID roachpb.RangeID, txnID uuid.UUID) roachpb.Key {
 	key := MakeRangeIDReplicatedKey(rangeID, LocalAbortCacheSuffix, nil)
 	key = encoding.EncodeBytesAscending(key, txnID.GetBytes())
 	return key
@@ -146,22 +146,22 @@ func AbortCacheKey(rangeID roachpb.RangeID, txnID *uuid.UUID) roachpb.Key {
 
 // DecodeAbortCacheKey decodes the provided abort cache entry,
 // returning the transaction ID.
-func DecodeAbortCacheKey(key roachpb.Key, dest []byte) (*uuid.UUID, error) {
+func DecodeAbortCacheKey(key roachpb.Key, dest []byte) (uuid.UUID, error) {
 	_, _, suffix, detail, err := DecodeRangeIDKey(key)
 	if err != nil {
-		return nil, err
+		return uuid.UUID{}, err
 	}
 	if !bytes.Equal(suffix, LocalAbortCacheSuffix) {
-		return nil, errors.Errorf("key %s does not contain the abort cache suffix %s",
+		return uuid.UUID{}, errors.Errorf("key %s does not contain the abort cache suffix %s",
 			key, LocalAbortCacheSuffix)
 	}
 	// Decode the id.
 	detail, idBytes, err := encoding.DecodeBytesAscending(detail, dest)
 	if err != nil {
-		return nil, err
+		return uuid.UUID{}, err
 	}
 	if len(detail) > 0 {
-		return nil, errors.Errorf("key %q has leftover bytes after decode: %s; indicates corrupt key", key, detail)
+		return uuid.UUID{}, errors.Errorf("key %q has leftover bytes after decode: %s; indicates corrupt key", key, detail)
 	}
 	txnID, err := uuid.FromBytes(idBytes)
 	return txnID, err
@@ -331,12 +331,32 @@ func RangeDescriptorKey(key roachpb.RKey) roachpb.Key {
 // TransactionKey returns a transaction key based on the provided
 // transaction key and ID. The base key is encoded in order to
 // guarantee that all transaction records for a range sort together.
-func TransactionKey(key roachpb.Key, txnID *uuid.UUID) roachpb.Key {
+func TransactionKey(key roachpb.Key, txnID uuid.UUID) roachpb.Key {
 	rk, err := Addr(key)
 	if err != nil {
 		panic(err)
 	}
-	return MakeRangeKey(rk, localTransactionSuffix, roachpb.RKey(txnID.GetBytes()))
+	return MakeRangeKey(rk, LocalTransactionSuffix, roachpb.RKey(txnID.GetBytes()))
+}
+
+// QueueLastProcessedKey returns a range-local key for last processed
+// timestamps for the named queue. These keys represent per-range last
+// processed times.
+func QueueLastProcessedKey(key roachpb.RKey, queue string) roachpb.Key {
+	return MakeRangeKey(key, LocalQueueLastProcessedSuffix, roachpb.RKey(queue))
+}
+
+// IsLocal performs a cheap check that returns true iff a range-local key is
+// passed, that is, a key for which `Addr` would return a non-identical RKey
+// (or a decoding error).
+//
+// TODO(tschottdorf): we need a better name for these keys as only some of
+// them are local and it's been identified as an area that is not understood
+// by many of the team's developers. An obvious suggestion is "system" (as
+// opposed to "user") keys, but unfortunately that name has already been
+// claimed by a related (but not identical) concept.
+func IsLocal(k roachpb.Key) bool {
+	return bytes.HasPrefix(k, localPrefix)
 }
 
 // Addr returns the address for the key, used to lookup the range containing
@@ -354,7 +374,7 @@ func TransactionKey(key roachpb.Key, txnID *uuid.UUID) roachpb.Key {
 // incorporating the Range ID are not (e.g. abort cache entries, and range
 // stats).
 func Addr(k roachpb.Key) (roachpb.RKey, error) {
-	if !bytes.HasPrefix(k, localPrefix) {
+	if !IsLocal(k) {
 		return roachpb.RKey(k), nil
 	}
 
@@ -375,7 +395,7 @@ func Addr(k roachpb.Key) (roachpb.RKey, error) {
 		if _, k, err = encoding.DecodeBytesAscending(k, nil); err != nil {
 			return nil, err
 		}
-		if !bytes.HasPrefix(k, localPrefix) {
+		if !IsLocal(k) {
 			break
 		}
 	}
@@ -403,7 +423,7 @@ func AddrUpperBound(k roachpb.Key) (roachpb.RKey, error) {
 	if err != nil {
 		return rk, err
 	}
-	if bytes.HasPrefix(k, localPrefix) {
+	if IsLocal(k) {
 		// The upper bound for a range-local key that addresses to key k
 		// is the key directly after k.
 		rk = rk.Next()

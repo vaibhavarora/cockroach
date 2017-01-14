@@ -19,16 +19,19 @@ package storage_test
 import (
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/server"
-	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/server"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
 func TestEagerReplication(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	store, stopper, _ := createTestStore(t)
+	stopper := stop.NewStopper()
 	defer stopper.Stop()
+	store, _ := createTestStore(t, stopper)
 
 	// Disable the replica scanner so that we rely on the eager replication code
 	// path that occurs after splits.
@@ -43,7 +46,7 @@ func TestEagerReplication(t *testing.T) {
 	// replicateQueue after a split occurs happens after the update of the
 	// descriptors in meta2 leaving a tiny window of time in which the newly
 	// split replica will not have been added to purgatory. Thus we loop.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		// After the initial splits have been performed, all of the resulting ranges
 		// should be present in replicate queue purgatory (because we only have a
 		// single store in the test and thus replication cannot succeed).

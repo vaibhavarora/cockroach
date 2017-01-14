@@ -35,21 +35,23 @@ import (
 func TestPartitionNemesis(t *testing.T) {
 	t.Skip("only enabled for manually playing with the partitioning agent")
 	SkipUnlessLocal(t)
-	runTestOnConfigs(t, func(t *testing.T, c cluster.Cluster, cfg cluster.TestConfig) {
-		s := stop.NewStopper()
-		defer s.Stop()
-		s.RunWorker(func() {
-			BidirectionalPartitionNemesis(t, s.ShouldQuiesce(), c)
+
+	s := log.Scope(t, "")
+	defer s.Close(t)
+
+	runTestOnConfigs(t, func(ctx context.Context, t *testing.T, c cluster.Cluster, cfg cluster.TestConfig) {
+		stopper.RunWorker(func() {
+			BidirectionalPartitionNemesis(ctx, t, c, stopper)
 		})
 		select {
 		case <-time.After(*flagDuration):
-		case <-stopper:
+		case <-stopper.ShouldStop():
 		}
 	})
 }
 
 func TestPartitionBank(t *testing.T) {
-	t.Skip("#7978")
+	t.Skip("#12654")
 	SkipUnlessPrivileged(t)
 	runTestOnConfigs(t, testBankWithNemesis(BidirectionalPartitionNemesis))
 }
@@ -73,8 +75,8 @@ func NewBank(t *testing.T, c cluster.Cluster) *Bank {
 	return &Bank{Cluster: c, T: t}
 }
 
-func (b *Bank) exec(query string, vars ...interface{}) error {
-	db := makePGClient(b.T, b.PGUrl(0))
+func (b *Bank) exec(ctx context.Context, query string, vars ...interface{}) error {
+	db := makePGClient(b.T, b.PGUrl(ctx, 0))
 	defer db.Close()
 	_, err := db.Exec(query, vars...)
 	return err
@@ -84,25 +86,26 @@ func (b *Bank) exec(query string, vars ...interface{}) error {
 // receiving a deposit of the given amount.
 // This should be called before any nemeses are active; it will fail the test
 // if unsuccessful.
-func (b *Bank) Init(numAccounts, initialBalance int) {
+func (b *Bank) Init(ctx context.Context, numAccounts, initialBalance int) {
 	b.accounts = numAccounts
 	b.initialBalance = initialBalance
 
-	b.must(b.exec(`CREATE DATABASE IF NOT EXISTS bank`))
-	b.must(b.exec(`DROP TABLE IF EXISTS bank.accounts`))
+	b.must(b.exec(ctx, `CREATE DATABASE IF NOT EXISTS bank`))
+	b.must(b.exec(ctx, `DROP TABLE IF EXISTS bank.accounts`))
 	const schema = `CREATE TABLE bank.accounts (id INT PRIMARY KEY, balance INT NOT NULL)`
-	b.must(b.exec(schema))
+	b.must(b.exec(ctx, schema))
 	for i := 0; i < numAccounts; i++ {
-		b.must(b.exec(`INSERT INTO bank.accounts (id, balance) VALUES ($1, $2)`,
+		b.must(b.exec(ctx, `INSERT INTO bank.accounts (id, balance) VALUES ($1, $2)`,
 			i, initialBalance))
 	}
 }
 
 // Verify makes sure that the total amount of money in the system has not
 // changed.
-func (b *Bank) Verify() {
+func (b *Bank) Verify(ctx context.Context) {
+	log.Info(ctx, "verifying")
 	exp := b.accounts * b.initialBalance
-	db := makePGClient(b.T, b.PGUrl(0))
+	db := makePGClient(b.T, b.PGUrl(ctx, 0))
 	defer db.Close()
 	r := db.QueryRow(`SELECT SUM(balance) FROM bank.accounts`)
 	var act int
@@ -123,7 +126,7 @@ func (b *Bank) logSuccess(i int, from, to, amount int) {
 }
 
 // Invoke transfers a random amount of money between random accounts.
-func (b *Bank) Invoke(i int) {
+func (b *Bank) Invoke(ctx context.Context, i int) {
 	handle := func(err error) {
 		if err != nil {
 			panic(err)
@@ -144,7 +147,7 @@ func (b *Bank) Invoke(i int) {
 		}
 	}()
 
-	db := makePGClient(b.T, b.PGUrl(i%b.NumNodes()))
+	db := makePGClient(b.T, b.PGUrl(ctx, i%b.NumNodes()))
 	defer db.Close()
 	txn, err := db.Begin()
 	handle(err)
@@ -163,44 +166,55 @@ func (b *Bank) Invoke(i int) {
 	handle(err)
 	_, err = txn.Exec(`UPDATE bank.accounts SET balance = $1 WHERE id = $2`, bTo+amount, to)
 	handle(err)
+	handle(txn.Commit())
 }
 
 func testBankWithNemesis(nemeses ...NemesisFn) configTestRunner {
-	return func(t *testing.T, c cluster.Cluster, cfg cluster.TestConfig) {
-		const (
-			concurrency = 5
-			accounts    = 10
-		)
-		deadline := timeutil.Now().Add(cfg.Duration)
-		s := stop.NewStopper()
-		defer s.Stop()
+	return func(ctx context.Context, t *testing.T, c cluster.Cluster, cfg cluster.TestConfig) {
+		const accounts = 10
 		b := NewBank(t, c)
-		b.Init(accounts, 10)
-		for _, nemesis := range nemeses {
-			s.RunWorker(func() {
-				nemesis(t, s.ShouldQuiesce(), c)
-			})
-		}
-		for i := 0; i < concurrency; i++ {
-			localI := i
-			if err := s.RunAsyncTask(context.Background(), func(_ context.Context) {
-				for timeutil.Now().Before(deadline) {
-					select {
-					case <-s.ShouldQuiesce():
-						return
-					default:
-					}
-					b.Invoke(localI)
+		b.Init(ctx, accounts, 10)
+		runTransactionsAndNemeses(ctx, t, c, b, cfg.Duration, nemeses...)
+		b.Verify(ctx)
+	}
+}
+
+func runTransactionsAndNemeses(
+	ctx context.Context,
+	t *testing.T,
+	c cluster.Cluster,
+	b *Bank,
+	duration time.Duration,
+	nemeses ...NemesisFn,
+) {
+	deadline := timeutil.Now().Add(duration)
+	// We're going to run the nemeses for the duration of this function, which may
+	// return before `stopper` is stopped.
+	nemesesStopper := stop.NewStopper()
+	defer nemesesStopper.Stop()
+	const concurrency = 5
+	for _, nemesis := range nemeses {
+		stopper.RunWorker(func() {
+			nemesis(ctx, t, c, nemesesStopper)
+		})
+	}
+	for i := 0; i < concurrency; i++ {
+		localI := i
+		if err := stopper.RunAsyncTask(ctx, func(_ context.Context) {
+			for timeutil.Now().Before(deadline) {
+				select {
+				case <-stopper.ShouldQuiesce():
+					return
+				default:
 				}
-			}); err != nil {
-				t.Fatal(err)
+				b.Invoke(ctx, localI)
 			}
+		}); err != nil {
+			t.Fatal(err)
 		}
-		select {
-		case <-stopper:
-		case <-time.After(cfg.Duration):
-		}
-		log.Warningf(context.Background(), "finishing test")
-		b.Verify()
+	}
+	select {
+	case <-stopper.ShouldStop():
+	case <-time.After(duration):
 	}
 }

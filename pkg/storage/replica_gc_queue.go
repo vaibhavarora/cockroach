@@ -30,12 +30,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
 )
 
 const (
-	// replicaGCQueueMaxSize is the max size of the gc queue.
-	replicaGCQueueMaxSize = 100
-
 	// replicaGCQueueTimerDuration is the duration between GCs of queued replicas.
 	replicaGCQueueTimerDuration = 50 * time.Millisecond
 
@@ -61,23 +59,42 @@ const (
 	replicaGCPriorityRemoved = 2
 )
 
+var (
+	metaReplicaGCQueueRemoveReplicaCount = metric.Metadata{Name: "queue.replicagc.removereplica",
+		Help: "Number of replica removals attempted by the replica gc queue"}
+)
+
+// ReplicaGCQueueMetrics is the set of metrics for the replica GC queue.
+type ReplicaGCQueueMetrics struct {
+	RemoveReplicaCount *metric.Counter
+}
+
+func makeReplicaGCQueueMetrics() ReplicaGCQueueMetrics {
+	return ReplicaGCQueueMetrics{
+		RemoveReplicaCount: metric.NewCounter(metaReplicaGCQueueRemoveReplicaCount),
+	}
+}
+
 // replicaGCQueue manages a queue of replicas to be considered for garbage
 // collections. The GC process asynchronously removes local data for
 // ranges that have been rebalanced away from this store.
 type replicaGCQueue struct {
 	*baseQueue
-	db *client.DB
+	metrics ReplicaGCQueueMetrics
+	db      *client.DB
 }
 
 // newReplicaGCQueue returns a new instance of replicaGCQueue.
 func newReplicaGCQueue(store *Store, db *client.DB, gossip *gossip.Gossip) *replicaGCQueue {
-	q := &replicaGCQueue{
-		db: db,
+	rgcq := &replicaGCQueue{
+		metrics: makeReplicaGCQueueMetrics(),
+		db:      db,
 	}
-	q.baseQueue = newBaseQueue(
-		"replicaGC", q, store, gossip,
+	store.metrics.registry.AddMetricStruct(&rgcq.metrics)
+	rgcq.baseQueue = newBaseQueue(
+		"replicaGC", rgcq, store, gossip,
 		queueConfig{
-			maxSize:              replicaGCQueueMaxSize,
+			maxSize:              defaultQueueMaxSize,
 			needsLease:           false,
 			acceptsUnsplitRanges: true,
 			successes:            store.metrics.ReplicaGCQueueSuccesses,
@@ -86,7 +103,7 @@ func newReplicaGCQueue(store *Store, db *client.DB, gossip *gossip.Gossip) *repl
 			processingNanos:      store.metrics.ReplicaGCQueueProcessingNanos,
 		},
 	)
-	return q
+	return rgcq
 }
 
 // shouldQueue determines whether a replica should be queued for GC,
@@ -95,27 +112,23 @@ func newReplicaGCQueue(store *Store, db *client.DB, gossip *gossip.Gossip) *repl
 // ReplicaGCQueueInactivityThreshold. Further, the last replica GC
 // check must have occurred more than ReplicaGCQueueInactivityThreshold
 // in the past.
-func (q *replicaGCQueue) shouldQueue(
-	ctx context.Context, now hlc.Timestamp, rng *Replica, _ config.SystemConfig,
+func (rgcq *replicaGCQueue) shouldQueue(
+	ctx context.Context, now hlc.Timestamp, repl *Replica, _ config.SystemConfig,
 ) (bool, float64) {
-	lastCheck, err := rng.getLastReplicaGCTimestamp()
+	lastCheck, err := repl.getLastReplicaGCTimestamp(ctx)
 	if err != nil {
 		log.Errorf(ctx, "could not read last replica GC timestamp: %s", err)
 		return false, 0
 	}
 
-	lastActivity := hlc.ZeroTimestamp.Add(rng.store.startedAt, 0)
+	lastActivity := hlc.ZeroTimestamp.Add(repl.store.startedAt, 0)
 
-	lease, nextLease := rng.getLease()
-	if lease != nil {
-		lastActivity.Forward(lease.Expiration)
-	}
-	if nextLease != nil {
-		lastActivity.Forward(nextLease.Expiration)
+	if lease, _ := repl.getLease(); lease != nil && lease.ProposedTS != nil {
+		lastActivity.Forward(*lease.ProposedTS)
 	}
 
 	var isCandidate bool
-	if raftStatus := rng.RaftStatus(); raftStatus != nil {
+	if raftStatus := repl.RaftStatus(); raftStatus != nil {
 		isCandidate = (raftStatus.SoftState.RaftState == raft.StateCandidate)
 	}
 	return replicaGCShouldQueueImpl(now, lastCheck, lastActivity, isCandidate)
@@ -134,7 +147,7 @@ func replicaGCShouldQueueImpl(
 		priority = replicaGCPriorityCandidate
 	} else if now.Less(lastCheck.Add(ReplicaGCQueueInactivityThreshold.Nanoseconds(), 0)) {
 		// Return false immediately if the previous check was less than the
-		// check interval in the past. Note that we don't do this is the
+		// check interval in the past. Note that we don't do this if the
 		// replica is in candidate state, in which case we want to be more
 		// aggressive - a failed rebalance attempt could have checked this
 		// range, and candidate state suggests that a retry succeeded. See
@@ -153,13 +166,13 @@ func replicaGCShouldQueueImpl(
 
 // process performs a consistent lookup on the range descriptor to see if we are
 // still a member of the range.
-func (q *replicaGCQueue) process(
-	ctx context.Context, now hlc.Timestamp, rng *Replica, _ config.SystemConfig,
+func (rgcq *replicaGCQueue) process(
+	ctx context.Context, repl *Replica, _ config.SystemConfig,
 ) error {
 	// Note that the Replicas field of desc is probably out of date, so
 	// we should only use `desc` for its static fields like RangeID and
 	// StartKey (and avoid rng.GetReplica() for the same reason).
-	desc := rng.Desc()
+	desc := repl.Desc()
 
 	// Calls to RangeLookup typically use inconsistent reads, but we
 	// want to do a consistent read here. This is important when we are
@@ -172,7 +185,7 @@ func (q *replicaGCQueue) process(
 		},
 		MaxRanges: 1,
 	})
-	if err := q.db.Run(ctx, b); err != nil {
+	if err := rgcq.db.Run(ctx, b); err != nil {
 		return err
 	}
 	br := b.RawResponse()
@@ -183,10 +196,11 @@ func (q *replicaGCQueue) process(
 	}
 
 	replyDesc := reply.Ranges[0]
-	if _, currentMember := replyDesc.GetReplicaDescriptor(rng.store.StoreID()); !currentMember {
+	if _, currentMember := replyDesc.GetReplicaDescriptor(repl.store.StoreID()); !currentMember {
 		// We are no longer a member of this range; clean up our local data.
+		rgcq.metrics.RemoveReplicaCount.Inc(1)
 		log.VEventf(ctx, 1, "destroying local data")
-		if err := rng.store.RemoveReplica(rng, replyDesc, true); err != nil {
+		if err := repl.store.RemoveReplica(ctx, repl, replyDesc, true); err != nil {
 			return err
 		}
 	} else if desc.RangeID != replyDesc.RangeID {
@@ -194,8 +208,9 @@ func (q *replicaGCQueue) process(
 		// away. But currentMember is true, so we are still a member of the
 		// subsuming range. Shut down raft processing for the former range
 		// and delete any remaining metadata, but do not delete the data.
+		rgcq.metrics.RemoveReplicaCount.Inc(1)
 		log.VEventf(ctx, 1, "removing merged range")
-		if err := rng.store.RemoveReplica(rng, replyDesc, false); err != nil {
+		if err := repl.store.RemoveReplica(ctx, repl, replyDesc, false); err != nil {
 			return err
 		}
 
@@ -210,7 +225,7 @@ func (q *replicaGCQueue) process(
 		// Replica (see #8111) when inactive ones can be starved by
 		// event-driven additions.
 		log.Event(ctx, "not gc'able")
-		if err := rng.setLastReplicaGCTimestamp(now); err != nil {
+		if err := repl.setLastReplicaGCTimestamp(ctx, repl.store.Clock().Now()); err != nil {
 			return err
 		}
 	}
@@ -218,7 +233,7 @@ func (q *replicaGCQueue) process(
 	return nil
 }
 
-func (*replicaGCQueue) timer() time.Duration {
+func (*replicaGCQueue) timer(_ time.Duration) time.Duration {
 	return replicaGCQueueTimerDuration
 }
 

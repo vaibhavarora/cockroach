@@ -21,12 +21,12 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 )
 
@@ -45,7 +45,7 @@ func TestReplicaGCQueueDropReplicaDirect(t *testing.T) {
 	// no GC will take place since the consistent RangeLookup hits the first
 	// Node. We use the TestingCommandFilter to make sure that the second Node
 	// waits for the first.
-	cfg := storage.TestStoreConfig()
+	cfg := storage.TestStoreConfig(nil)
 	mtc.storeConfig = &cfg
 	mtc.storeConfig.TestingKnobs.TestingCommandFilter =
 		func(filterArgs storagebase.FilterArgs) *roachpb.Error {
@@ -53,11 +53,11 @@ func TestReplicaGCQueueDropReplicaDirect(t *testing.T) {
 			if !ok || filterArgs.Sid != 2 {
 				return nil
 			}
-			rct := et.InternalCommitTrigger.GetChangeReplicasTrigger()
-			if rct == nil || rct.ChangeType != roachpb.REMOVE_REPLICA {
+			crt := et.InternalCommitTrigger.GetChangeReplicasTrigger()
+			if crt == nil || crt.ChangeType != roachpb.REMOVE_REPLICA {
 				return nil
 			}
-			util.SucceedsSoon(t, func() error {
+			testutils.SucceedsSoon(t, func() error {
 				r, err := mtc.stores[0].GetReplica(rangeID)
 				if err != nil {
 					return err
@@ -70,14 +70,14 @@ func TestReplicaGCQueueDropReplicaDirect(t *testing.T) {
 			return nil
 		}
 
-	mtc.Start(t, numStores)
 	defer mtc.Stop()
+	mtc.Start(t, numStores)
 
 	mtc.replicateRange(rangeID, 1, 2)
 	mtc.unreplicateRange(rangeID, 1)
 
 	// Make sure the range is removed from the store.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if _, err := mtc.stores[1].GetReplica(rangeID); !testutils.IsError(err, "range .* was not found") {
 			return errors.Errorf("expected range removal: %v", err) // NB: errors.Wrapf(nil, ...) returns nil.
 		}
@@ -90,8 +90,9 @@ func TestReplicaGCQueueDropReplicaDirect(t *testing.T) {
 func TestReplicaGCQueueDropReplicaGCOnScan(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	mtc := startMultiTestContext(t, 3)
+	mtc := &multiTestContext{}
 	defer mtc.Stop()
+	mtc.Start(t, 3)
 	// Disable the replica gc queue to prevent direct removal of replica.
 	mtc.stores[1].SetReplicaGCQueueActive(false)
 
@@ -110,11 +111,11 @@ func TestReplicaGCQueueDropReplicaGCOnScan(t *testing.T) {
 	mtc.stores[1].SetReplicaGCQueueActive(true)
 
 	// Increment the clock's timestamp to make the replica GC queue process the range.
-	mtc.expireLeases()
+	mtc.expireLeases(context.TODO())
 	mtc.manualClock.Increment(int64(storage.ReplicaGCQueueInactivityThreshold + 1))
 
 	// Make sure the range is removed from the store.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		store := mtc.stores[1]
 		store.ForceReplicaGCScanAndProcess()
 		if _, err := store.GetReplica(rangeID); !testutils.IsError(err, "range .* was not found") {

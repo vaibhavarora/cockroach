@@ -19,20 +19,23 @@ package pgwire
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"net"
-	"reflect"
 	"strconv"
+	"time"
 
 	"github.com/lib/pq/oid"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/mon"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
 
@@ -53,6 +56,7 @@ const (
 	clientMsgExecute     clientMessageType = 'E'
 	clientMsgFlush       clientMessageType = 'H'
 	clientMsgParse       clientMessageType = 'P'
+	clientMsgPassword    clientMessageType = 'p'
 	clientMsgSimpleQuery clientMessageType = 'Q'
 	clientMsgSync        clientMessageType = 'S'
 	clientMsgTerminate   clientMessageType = 'X'
@@ -81,6 +85,8 @@ const (
 	serverErrFieldSeverity    serverErrFieldType = 'S'
 	serverErrFieldSQLState    serverErrFieldType = 'C'
 	serverErrFieldMsgPrimary  serverErrFieldType = 'M'
+	serverErrFileldDetail     serverErrFieldType = 'D'
+	serverErrFileldHint       serverErrFieldType = 'H'
 	serverErrFieldSrcFile     serverErrFieldType = 'F'
 	serverErrFieldSrcLine     serverErrFieldType = 'L'
 	serverErrFieldSrcFunction serverErrFieldType = 'R'
@@ -95,7 +101,8 @@ const (
 )
 
 const (
-	authOK int32 = 0
+	authOK                int32 = 0
+	authCleartextPassword int32 = 3
 )
 
 // preparedStatementMeta is pgwire-specific metadata which is attached to each
@@ -110,46 +117,92 @@ type preparedPortalMeta struct {
 	outFormats []formatCode
 }
 
+// readTimeoutConn overloads net.Conn.Read by periodically calling
+// checkExitConds() and aborting the read if an error is returned.
+type readTimeoutConn struct {
+	net.Conn
+	checkExitConds func() error
+}
+
+func newReadTimeoutConn(c net.Conn, checkExitConds func() error) net.Conn {
+	// net.Pipe does not support setting deadlines. See
+	// https://github.com/golang/go/blob/go1.7.4/src/net/pipe.go#L57-L67
+	if c.LocalAddr().Network() == "pipe" {
+		return c
+	}
+	return &readTimeoutConn{
+		Conn:           c,
+		checkExitConds: checkExitConds,
+	}
+}
+
+func (c *readTimeoutConn) Read(b []byte) (int, error) {
+	// readTimeout is the amount of time ReadTimeoutConn should wait on a
+	// read before checking for exit conditions. The tradeoff is between the
+	// time it takes to react to session context cancellation and the overhead
+	// of waking up and checking for exit conditions.
+	const readTimeout = 150 * time.Millisecond
+
+	// Remove the read deadline when returning from this function to avoid
+	// unexpected behavior.
+	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
+	for {
+		if err := c.checkExitConds(); err != nil {
+			return 0, err
+		}
+		if err := c.SetReadDeadline(timeutil.Now().Add(readTimeout)); err != nil {
+			return 0, err
+		}
+		n, err := c.Conn.Read(b)
+		// Continue if the error is due to timing out.
+		if err, ok := err.(net.Error); ok && err.Timeout() {
+			continue
+		}
+		return n, err
+	}
+}
+
 type v3Conn struct {
-	conn     net.Conn
-	rd       *bufio.Reader
-	wr       *bufio.Writer
-	executor *sql.Executor
-	readBuf  readBuffer
-	writeBuf writeBuffer
-	tagBuf   [64]byte
-	session  *sql.Session
+	conn        net.Conn
+	rd          *bufio.Reader
+	wr          *bufio.Writer
+	executor    *sql.Executor
+	readBuf     readBuffer
+	writeBuf    writeBuffer
+	tagBuf      [64]byte
+	sessionArgs sql.SessionArgs
+	session     *sql.Session
 
 	// The logic governing these guys is hairy, and is not sufficiently
 	// specified in documentation. Consult the sources before you modify:
 	// https://github.com/postgres/postgres/blob/master/src/backend/tcop/postgres.c
 	doingExtendedQueryMessage, ignoreTillSync bool
 
-	metrics ServerMetrics
+	metrics *ServerMetrics
+
+	sqlMemoryPool *mon.MemoryMonitor
 }
 
 func makeV3Conn(
-	conn net.Conn, executor *sql.Executor, metrics ServerMetrics, sessionArgs sql.SessionArgs,
+	conn net.Conn, metrics *ServerMetrics, sqlMemoryPool *mon.MemoryMonitor, executor *sql.Executor,
 ) v3Conn {
-	ctx := log.WithLogTagStr(context.Background(), "client", conn.RemoteAddr().String())
 	return v3Conn{
-		conn:     conn,
-		rd:       bufio.NewReader(conn),
-		wr:       bufio.NewWriter(conn),
-		executor: executor,
-		writeBuf: writeBuffer{bytecount: metrics.BytesOutCount},
-		metrics:  metrics,
-		session:  sql.NewSession(ctx, sessionArgs, executor, conn.RemoteAddr()),
+		conn:          conn,
+		rd:            bufio.NewReader(conn),
+		wr:            bufio.NewWriter(conn),
+		writeBuf:      writeBuffer{bytecount: metrics.BytesOutCount},
+		metrics:       metrics,
+		executor:      executor,
+		sqlMemoryPool: sqlMemoryPool,
 	}
 }
 
-func (c *v3Conn) finish() {
+func (c *v3Conn) finish(ctx context.Context) {
 	// This is better than always flushing on error.
 	if err := c.wr.Flush(); err != nil {
-		log.Error(context.TODO(), err)
+		log.Error(ctx, err)
 	}
 	_ = c.conn.Close()
-	c.session.Finish()
 }
 
 func parseOptions(data []byte) (sql.SessionArgs, error) {
@@ -187,26 +240,83 @@ func parseOptions(data []byte) (sql.SessionArgs, error) {
 var statusReportParams = map[string]string{
 	"client_encoding": "UTF8",
 	"DateStyle":       "ISO",
+	// All datetime binary formats expect 64-bit integer microsecond values.
+	// This param needs to be provided to clients or some may provide 64-bit
+	// floating-point microsecond values instead, which was a legacy datetime
+	// binary format.
+	"integer_datetimes": "on",
 	// The latest version of the docs that was consulted during the development
 	// of this package. We specify this version to avoid having to support old
 	// code paths which various client tools fall back to if they can't
 	// determine that the server is new enough.
-	"server_version": "9.5.0",
+	"server_version": sql.PgServerVersion,
 }
 
-func (c *v3Conn) serve(authenticationHook func(string, bool) error) error {
-	ctx := c.session.Ctx()
+// handleAuthentication should discuss with the client to arrange
+// authentication and update c.sessionArgs with the authenticated user's
+// name, if different from the one given initially. Note: at this
+// point the sql.Session does not exist yet! If need exists to access the
+// database to look up authentication data, use the internal executor.
+func (c *v3Conn) handleAuthentication(ctx context.Context, insecure bool) error {
+	if tlsConn, ok := c.conn.(*tls.Conn); ok {
+		var authenticationHook security.UserAuthHook
 
-	if authenticationHook != nil {
-		if err := authenticationHook(c.session.User, true /* public */); err != nil {
-			return c.sendInternalError(err.Error())
+		// Check that the requested user exists and retrieve the hashed
+		// password in case password authentication is needed.
+		hashedPassword, err := sql.GetUserHashedPassword(
+			ctx, c.executor, c.metrics.internalMemMetrics, c.sessionArgs.User,
+		)
+		if err != nil {
+			return c.sendError(err)
+		}
+
+		tlsState := tlsConn.ConnectionState()
+		// If no certificates are provided, default to password
+		// authentication.
+		if len(tlsState.PeerCertificates) == 0 {
+			password, err := c.sendAuthPasswordRequest()
+			if err != nil {
+				return c.sendError(err)
+			}
+			authenticationHook = security.UserAuthPasswordHook(
+				insecure, password, hashedPassword,
+			)
+		} else {
+			// Normalize the username contained in the certificate.
+			tlsState.PeerCertificates[0].Subject.CommonName = parser.Name(
+				tlsState.PeerCertificates[0].Subject.CommonName,
+			).Normalize()
+			var err error
+			authenticationHook, err = security.UserAuthCertHook(insecure, &tlsState)
+			if err != nil {
+				return c.sendError(err)
+			}
+		}
+
+		if err := authenticationHook(c.sessionArgs.User, true /* public */); err != nil {
+			return c.sendError(err)
 		}
 	}
+
 	c.writeBuf.initMsg(serverMsgAuth)
 	c.writeBuf.putInt32(authOK)
-	if err := c.writeBuf.finishMsg(c.wr); err != nil {
-		return err
-	}
+	return c.writeBuf.finishMsg(c.wr)
+}
+
+func (c *v3Conn) setupSession(ctx context.Context, reserved mon.BoundAccount) error {
+	c.session = sql.NewSession(
+		ctx, c.sessionArgs, c.executor, c.conn.RemoteAddr(), &c.metrics.SQLMemMetrics,
+	)
+	c.session.StartMonitor(c.sqlMemoryPool, reserved)
+	return nil
+}
+
+func (c *v3Conn) closeSession(ctx context.Context) {
+	c.session.Finish(c.executor)
+	c.session = nil
+}
+
+func (c *v3Conn) serve(ctx context.Context, reserved mon.BoundAccount) error {
 	for key, value := range statusReportParams {
 		c.writeBuf.initMsg(serverMsgParameterStatus)
 		c.writeBuf.writeTerminatedString(key)
@@ -218,6 +328,17 @@ func (c *v3Conn) serve(authenticationHook func(string, bool) error) error {
 	if err := c.wr.Flush(); err != nil {
 		return err
 	}
+
+	ctx = log.WithLogTagStr(ctx, "user", c.sessionArgs.User)
+	if err := c.setupSession(ctx, reserved); err != nil {
+		return err
+	}
+	defer c.closeSession(ctx)
+
+	// Once a session has been set up, the underlying net.Conn is switched to
+	// a conn that exits if the session's context is cancelled.
+	c.conn = newReadTimeoutConn(c.conn, c.session.Ctx().Err)
+	c.rd = bufio.NewReader(c.conn)
 
 	for {
 		if !c.doingExtendedQueryMessage {
@@ -241,7 +362,7 @@ func (c *v3Conn) serve(authenticationHook func(string, bool) error) error {
 			}
 
 			if log.V(2) {
-				log.Infof(context.TODO(), "pgwire: %s: %q", serverMsgReady, txnStatus)
+				log.Infof(ctx, "pgwire: %s: %q", serverMsgReady, txnStatus)
 			}
 			c.writeBuf.writeByte(txnStatus)
 			if err := c.writeBuf.finishMsg(c.wr); err != nil {
@@ -263,12 +384,12 @@ func (c *v3Conn) serve(authenticationHook func(string, bool) error) error {
 		// any messages until we get a sync.
 		if c.ignoreTillSync && typ != clientMsgSync {
 			if log.V(2) {
-				log.Infof(context.TODO(), "pgwire: ignoring %s till sync", typ)
+				log.Infof(ctx, "pgwire: ignoring %s till sync", typ)
 			}
 			continue
 		}
 		if log.V(2) {
-			log.Infof(context.TODO(), "pgwire: processing %s", typ)
+			log.Infof(ctx, "pgwire: processing %s", typ)
 		}
 		switch typ {
 		case clientMsgSync:
@@ -288,7 +409,7 @@ func (c *v3Conn) serve(authenticationHook func(string, bool) error) error {
 
 		case clientMsgDescribe:
 			c.doingExtendedQueryMessage = true
-			err = c.handleDescribe(&c.readBuf)
+			err = c.handleDescribe(ctx, &c.readBuf)
 
 		case clientMsgClose:
 			c.doingExtendedQueryMessage = true
@@ -310,13 +431,37 @@ func (c *v3Conn) serve(authenticationHook func(string, bool) error) error {
 			// The spec says to drop any extra of these messages.
 
 		default:
-			err = c.sendErrorWithCode(pgerror.CodeProtocolViolationError, sqlbase.MakeSrcCtx(0),
-				fmt.Sprintf("unrecognized client message type %s", typ))
+			return c.sendError(newUnrecognizedMsgTypeErr(typ))
 		}
 		if err != nil {
 			return err
 		}
 	}
+}
+
+// sendAuthPasswordRequest requests a cleartext password from the client and
+// returns it.
+func (c *v3Conn) sendAuthPasswordRequest() (string, error) {
+	c.writeBuf.initMsg(serverMsgAuth)
+	c.writeBuf.putInt32(authCleartextPassword)
+	if err := c.writeBuf.finishMsg(c.wr); err != nil {
+		return "", err
+	}
+	if err := c.wr.Flush(); err != nil {
+		return "", err
+	}
+
+	typ, n, err := c.readBuf.readTypedMsg(c.rd)
+	c.metrics.BytesInCount.Inc(int64(n))
+	if err != nil {
+		return "", err
+	}
+
+	if typ != clientMsgPassword {
+		return "", errors.Errorf("invalid response to authentication request: %s", typ)
+	}
+
+	return c.readBuf.getString()
 }
 
 func (c *v3Conn) handleSimpleQuery(ctx context.Context, buf *readBuffer) error {
@@ -365,7 +510,7 @@ func (c *v3Conn) handleParse(ctx context.Context, buf *readBuffer) error {
 		if t == 0 {
 			continue
 		}
-		v, ok := oidToDatum[t]
+		v, ok := parser.OidToType[t]
 		if !ok {
 			return c.sendInternalError(fmt.Sprintf("unknown oid type: %v", t))
 		}
@@ -400,11 +545,7 @@ func (c *v3Conn) handleParse(ctx context.Context, buf *readBuffer) error {
 		if inTypes[i] != 0 {
 			continue
 		}
-		id, ok := datumToOid[reflect.TypeOf(t)]
-		if !ok {
-			return c.sendInternalError(fmt.Sprintf("unknown datum type: %s", t))
-		}
-		inTypes[i] = id
+		inTypes[i] = t.Oid()
 	}
 	for i, t := range inTypes {
 		if t == 0 {
@@ -418,10 +559,10 @@ func (c *v3Conn) handleParse(ctx context.Context, buf *readBuffer) error {
 	return c.writeBuf.finishMsg(c.wr)
 }
 
-func (c *v3Conn) handleDescribe(buf *readBuffer) error {
+func (c *v3Conn) handleDescribe(ctx context.Context, buf *readBuffer) error {
 	typ, err := buf.getPrepareType()
 	if err != nil {
-		return c.sendInternalError(err.Error())
+		return c.sendError(err)
 	}
 	name, err := buf.getString()
 	if err != nil {
@@ -444,7 +585,7 @@ func (c *v3Conn) handleDescribe(buf *readBuffer) error {
 			return err
 		}
 
-		return c.sendRowDescription(stmt.Columns, nil)
+		return c.sendRowDescription(ctx, stmt.Columns, nil)
 	case preparePortal:
 		portal, ok := c.session.PreparedPortals.Get(name)
 		if !ok {
@@ -452,7 +593,7 @@ func (c *v3Conn) handleDescribe(buf *readBuffer) error {
 		}
 
 		portalMeta := portal.ProtocolMeta.(preparedPortalMeta)
-		return c.sendRowDescription(portal.Stmt.Columns, portalMeta.outFormats)
+		return c.sendRowDescription(ctx, portal.Stmt.Columns, portalMeta.outFormats)
 	default:
 		return errors.Errorf("unknown describe type: %s", typ)
 	}
@@ -461,7 +602,7 @@ func (c *v3Conn) handleDescribe(buf *readBuffer) error {
 func (c *v3Conn) handleClose(buf *readBuffer) error {
 	typ, err := buf.getPrepareType()
 	if err != nil {
-		return c.sendInternalError(err.Error())
+		return c.sendError(err)
 	}
 	name, err := buf.getString()
 	if err != nil {
@@ -649,6 +790,8 @@ func (c *v3Conn) executeStatements(
 	limit int,
 ) error {
 	tracing.AnnotateTrace()
+	// Note: sql.Executor gets its Context from c.session.context, which
+	// has been bound by v3Conn.setupSession().
 	results := c.executor.ExecuteStatements(c.session, stmts, pinfo)
 	defer results.Close()
 
@@ -658,7 +801,7 @@ func (c *v3Conn) executeStatements(
 		c.writeBuf.initMsg(serverMsgEmptyQuery)
 		return c.writeBuf.finishMsg(c.wr)
 	}
-	return c.sendResponse(results.ResultList, formatCodes, sendDescription, limit)
+	return c.sendResponse(ctx, results.ResultList, formatCodes, sendDescription, limit)
 }
 
 func (c *v3Conn) sendCommandComplete(tag []byte) error {
@@ -668,22 +811,16 @@ func (c *v3Conn) sendCommandComplete(tag []byte) error {
 	return c.writeBuf.finishMsg(c.wr)
 }
 
-func (c *v3Conn) sendError(err error) error {
-	if sqlErr, ok := err.(sqlbase.ErrorWithPGCode); ok {
-		return c.sendErrorWithCode(sqlErr.Code(), sqlErr.SrcContext(), err.Error())
-	}
-	return c.sendInternalError(err.Error())
-}
-
 // TODO(andrei): Figure out the correct codes to send for all the errors
 // in this file and remove this function.
 func (c *v3Conn) sendInternalError(errToSend string) error {
-	return c.sendErrorWithCode(pgerror.CodeInternalError, sqlbase.MakeSrcCtx(1), errToSend)
+	err := errors.Errorf(errToSend)
+	err = pgerror.WithPGCode(err, pgerror.CodeInternalError)
+	err = pgerror.WithSourceContext(err, 1)
+	return c.sendError(err)
 }
 
-// errCode is a postgres error code, plus our extensions.
-// See http://www.postgresql.org/docs/9.5/static/errcodes-appendix.html
-func (c *v3Conn) sendErrorWithCode(errCode string, errCtx sqlbase.SrcCtx, errToSend string) error {
+func (c *v3Conn) sendError(err error) error {
 	if c.doingExtendedQueryMessage {
 		c.ignoreTillSync = true
 	}
@@ -693,26 +830,42 @@ func (c *v3Conn) sendErrorWithCode(errCode string, errCtx sqlbase.SrcCtx, errToS
 	c.writeBuf.putErrFieldMsg(serverErrFieldSeverity)
 	c.writeBuf.writeTerminatedString("ERROR")
 
+	code, ok := pgerror.PGCode(err)
+	if !ok {
+		code = pgerror.CodeInternalError
+	}
 	c.writeBuf.putErrFieldMsg(serverErrFieldSQLState)
-	c.writeBuf.writeTerminatedString(errCode)
+	c.writeBuf.writeTerminatedString(code)
+
+	if detail, ok := pgerror.Detail(err); ok {
+		c.writeBuf.putErrFieldMsg(serverErrFileldDetail)
+		c.writeBuf.writeTerminatedString(detail)
+	}
+
+	if hint, ok := pgerror.Hint(err); ok {
+		c.writeBuf.putErrFieldMsg(serverErrFileldHint)
+		c.writeBuf.writeTerminatedString(hint)
+	}
+
+	if errCtx, ok := pgerror.SourceContext(err); ok {
+		if errCtx.File != "" {
+			c.writeBuf.putErrFieldMsg(serverErrFieldSrcFile)
+			c.writeBuf.writeTerminatedString(errCtx.File)
+		}
+
+		if errCtx.Line > 0 {
+			c.writeBuf.putErrFieldMsg(serverErrFieldSrcLine)
+			c.writeBuf.writeTerminatedString(strconv.Itoa(errCtx.Line))
+		}
+
+		if errCtx.Function != "" {
+			c.writeBuf.putErrFieldMsg(serverErrFieldSrcFunction)
+			c.writeBuf.writeTerminatedString(errCtx.Function)
+		}
+	}
 
 	c.writeBuf.putErrFieldMsg(serverErrFieldMsgPrimary)
-	c.writeBuf.writeTerminatedString(errToSend)
-
-	if errCtx.File != "" {
-		c.writeBuf.putErrFieldMsg(serverErrFieldSrcFile)
-		c.writeBuf.writeTerminatedString(errCtx.File)
-	}
-
-	if errCtx.Line > 0 {
-		c.writeBuf.putErrFieldMsg(serverErrFieldSrcLine)
-		c.writeBuf.writeTerminatedString(strconv.Itoa(errCtx.Line))
-	}
-
-	if errCtx.Function != "" {
-		c.writeBuf.putErrFieldMsg(serverErrFieldSrcFunction)
-		c.writeBuf.writeTerminatedString(errCtx.Function)
-	}
+	c.writeBuf.writeTerminatedString(err.Error())
 
 	c.writeBuf.nullTerminate()
 	if err := c.writeBuf.finishMsg(c.wr); err != nil {
@@ -723,7 +876,11 @@ func (c *v3Conn) sendErrorWithCode(errCode string, errCtx sqlbase.SrcCtx, errToS
 
 // sendResponse sends the results as a query response.
 func (c *v3Conn) sendResponse(
-	results sql.ResultList, formatCodes []formatCode, sendDescription bool, limit int,
+	ctx context.Context,
+	results sql.ResultList,
+	formatCodes []formatCode,
+	sendDescription bool,
+	limit int,
 ) error {
 	if len(results) == 0 {
 		return c.sendCommandComplete(nil)
@@ -761,7 +918,7 @@ func (c *v3Conn) sendResponse(
 
 		case parser.Rows:
 			if sendDescription {
-				if err := c.sendRowDescription(result.Columns, formatCodes); err != nil {
+				if err := c.sendRowDescription(ctx, result.Columns, formatCodes); err != nil {
 					return err
 				}
 			}
@@ -804,7 +961,15 @@ func (c *v3Conn) sendResponse(
 			}
 
 		case parser.CopyIn:
-			if err := c.copyIn(result.Columns); err != nil {
+			rows, err := c.copyIn(result.Columns)
+			if err != nil {
+				return err
+			}
+
+			// Send CommandComplete.
+			tag = append(tag, ' ')
+			tag = strconv.AppendInt(tag, rows, 10)
+			if err := c.sendCommandComplete(tag); err != nil {
 				return err
 			}
 
@@ -816,7 +981,9 @@ func (c *v3Conn) sendResponse(
 	return nil
 }
 
-func (c *v3Conn) sendRowDescription(columns []sql.ResultColumn, formatCodes []formatCode) error {
+func (c *v3Conn) sendRowDescription(
+	ctx context.Context, columns []sql.ResultColumn, formatCodes []formatCode,
+) error {
 	if len(columns) == 0 {
 		c.writeBuf.initMsg(serverMsgNoData)
 		return c.writeBuf.finishMsg(c.wr)
@@ -826,7 +993,7 @@ func (c *v3Conn) sendRowDescription(columns []sql.ResultColumn, formatCodes []fo
 	c.writeBuf.putInt16(int16(len(columns)))
 	for i, column := range columns {
 		if log.V(2) {
-			log.Infof(context.TODO(), "pgwire writing column %s of type: %T", column.Name, column.Typ)
+			log.Infof(ctx, "pgwire: writing column %s of type: %T", column.Name, column.Typ)
 		}
 		c.writeBuf.writeTerminatedString(column.Name)
 
@@ -845,8 +1012,10 @@ func (c *v3Conn) sendRowDescription(columns []sql.ResultColumn, formatCodes []fo
 	return c.writeBuf.finishMsg(c.wr)
 }
 
+// copyIn processes COPY IN data and returns the number of rows inserted.
 // See: https://www.postgresql.org/docs/current/static/protocol-flow.html#PROTOCOL-COPY
-func (c *v3Conn) copyIn(columns []sql.ResultColumn) error {
+func (c *v3Conn) copyIn(columns []sql.ResultColumn) (int64, error) {
+	var rows int64
 	defer c.session.CopyEnd()
 
 	c.writeBuf.initMsg(serverMsgCopyInResponse)
@@ -856,25 +1025,29 @@ func (c *v3Conn) copyIn(columns []sql.ResultColumn) error {
 		c.writeBuf.putInt16(int16(formatText))
 	}
 	if err := c.writeBuf.finishMsg(c.wr); err != nil {
-		return err
+		return 0, err
 	}
 	if err := c.wr.Flush(); err != nil {
-		return err
+		return 0, err
 	}
 
 	for {
 		typ, n, err := c.readBuf.readTypedMsg(c.rd)
 		c.metrics.BytesInCount.Inc(int64(n))
 		if err != nil {
-			return err
+			return rows, err
 		}
 		var sr sql.StatementResults
 		var done bool
 		switch typ {
 		case clientMsgCopyData:
+			// Note: sql.Executor gets its Context from c.session.context, which
+			// has been bound by v3Conn.setupSession().
 			sr = c.executor.CopyData(c.session, string(c.readBuf.msg))
 
 		case clientMsgCopyDone:
+			// Note: sql.Executor gets its Context from c.session.context, which
+			// has been bound by v3Conn.setupSession().
 			sr = c.executor.CopyDone(c.session)
 			done = true
 
@@ -885,16 +1058,22 @@ func (c *v3Conn) copyIn(columns []sql.ResultColumn) error {
 			// Spec says to "ignore Flush and Sync messages received during copy-in mode".
 
 		default:
-			return c.sendErrorWithCode(pgerror.CodeProtocolViolationError, sqlbase.MakeSrcCtx(0),
-				fmt.Sprintf("unrecognized client message type %s", typ))
+			return rows, c.sendError(newUnrecognizedMsgTypeErr(typ))
 		}
 		for _, res := range sr.ResultList {
+			rows += int64(res.RowsAffected)
 			if res.Err != nil {
-				return c.sendError(res.Err)
+				return rows, c.sendError(res.Err)
 			}
 		}
 		if done {
-			return nil
+			return rows, nil
 		}
 	}
+}
+
+func newUnrecognizedMsgTypeErr(typ clientMessageType) error {
+	err := errors.Errorf("unrecognized client message type %v", typ)
+	err = pgerror.WithPGCode(err, pgerror.CodeProtocolViolationError)
+	return pgerror.WithSourceContext(err, 1)
 }

@@ -17,7 +17,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"net"
@@ -28,6 +27,7 @@ import (
 
 	basictracer "github.com/opentracing/basictracer-go"
 	opentracing "github.com/opentracing/opentracing-go"
+	otlog "github.com/opentracing/opentracing-go/log"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
@@ -44,12 +44,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -60,9 +60,6 @@ const (
 	gossipStatusInterval = 1 * time.Minute
 	// gossipNodeDescriptorInterval is the interval for gossiping the node descriptor.
 	gossipNodeDescriptorInterval = 1 * time.Hour
-	// publishStatusInterval is the interval for publishing periodic statistics
-	// from stores to the internal event feed.
-	publishStatusInterval = 10 * time.Second
 
 	// FirstNodeID is the node ID of the first node in a new cluster.
 	FirstNodeID = 1
@@ -170,21 +167,27 @@ func GetBootstrapSchema() sqlbase.MetadataSchema {
 // engines and cluster ID. The first bootstrapped store contains a
 // single range spanning all keys. Initial range lookup metadata is
 // populated for the range. Returns the cluster ID.
-func bootstrapCluster(engines []engine.Engine, txnMetrics kv.TxnMetrics) (uuid.UUID, error) {
+func bootstrapCluster(
+	cfg storage.StoreConfig, engines []engine.Engine, txnMetrics kv.TxnMetrics,
+) (uuid.UUID, error) {
 	clusterID := uuid.MakeV4()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
 
-	cfg := storage.StoreConfig{}
+	// Make sure that the store config has a valid clock and that it doesn't
+	// try to use gossip, since that can introduce race conditions.
+	if cfg.Clock == nil {
+		cfg.Clock = hlc.NewClock(hlc.UnixNano, time.Nanosecond)
+	}
+	cfg.Gossip = nil
+	cfg.TestingKnobs = storage.StoreTestingKnobs{}
 	cfg.ScanInterval = 10 * time.Minute
 	cfg.MetricsSampleInterval = time.Duration(math.MaxInt64)
 	cfg.ConsistencyCheckInterval = 10 * time.Minute
-	cfg.Clock = hlc.NewClock(hlc.UnixNano)
 	cfg.AmbientCtx.Tracer = tracing.NewTracer()
 	// Create a KV DB with a local sender.
 	stores := storage.NewStores(cfg.AmbientCtx, cfg.Clock)
-	ctx := tracing.WithTracer(context.TODO(), cfg.AmbientCtx.Tracer)
-	sender := kv.NewTxnCoordSender(ctx, stores, cfg.Clock, false, stopper, txnMetrics)
+	sender := kv.NewTxnCoordSender(cfg.AmbientCtx, stores, cfg.Clock, false, stopper, txnMetrics)
 	cfg.DB = client.NewDB(sender)
 	cfg.Transport = storage.NewDummyRaftTransport()
 	for i, eng := range engines {
@@ -199,12 +202,12 @@ func bootstrapCluster(engines []engine.Engine, txnMetrics kv.TxnMetrics) (uuid.U
 		s := storage.NewStore(cfg, eng, &roachpb.NodeDescriptor{NodeID: FirstNodeID})
 
 		// Verify the store isn't already part of a cluster.
-		if s.Ident.ClusterID != *uuid.EmptyUUID {
+		if s.Ident.ClusterID != (uuid.UUID{}) {
 			return uuid.UUID{}, errors.Errorf("storage engine already belongs to a cluster (%s)", s.Ident.ClusterID)
 		}
 
 		// Bootstrap store to persist the store ident.
-		if err := s.Bootstrap(sIdent, stopper); err != nil {
+		if err := s.Bootstrap(sIdent); err != nil {
 			return uuid.UUID{}, err
 		}
 		// Create first range, writing directly to engine. Note this does
@@ -222,6 +225,7 @@ func bootstrapCluster(engines []engine.Engine, txnMetrics kv.TxnMetrics) (uuid.U
 
 		stores.AddStore(s)
 
+		ctx := context.TODO()
 		// Initialize node and store ids.  Only initialize the node once.
 		if i == 0 {
 			if nodeID, err := allocateNodeID(ctx, cfg.DB); nodeID != sIdent.NodeID || err != nil {
@@ -314,8 +318,8 @@ func (n *Node) initNodeID(id roachpb.NodeID) {
 		if id == 0 {
 			log.Fatal(ctxWithSpan, "new node allocated illegal ID 0")
 		}
-		n.storeCfg.Gossip.SetNodeID(id)
 		span.Finish()
+		n.storeCfg.Gossip.NodeID.Set(ctx, id)
 	} else {
 		log.Infof(ctx, "node ID %d initialized", id)
 	}
@@ -339,19 +343,19 @@ func (n *Node) start(
 	n.initDescriptor(addr, attrs, locality)
 
 	// Initialize stores, including bootstrapping new ones.
-	if err := n.initStores(ctx, engines, n.stopper); err != nil {
+	if err := n.initStores(ctx, engines, n.stopper, false); err != nil {
 		if err == errNeedsBootstrap {
 			n.initialBoot = true
 			// This node has no initialized stores and no way to connect to
 			// an existing cluster, so we bootstrap it.
-			clusterID, err := bootstrapCluster(engines, n.txnMetrics)
+			clusterID, err := bootstrapCluster(n.storeCfg, engines, n.txnMetrics)
 			if err != nil {
 				return err
 			}
 			log.Infof(ctx, "**** cluster %s has been created", clusterID)
 			log.Infof(ctx, "**** add additional nodes by specifying --join=%s", addr)
 			// After bootstrapping, try again to initialize the stores.
-			if err := n.initStores(ctx, engines, n.stopper); err != nil {
+			if err := n.initStores(ctx, engines, n.stopper, true); err != nil {
 				return err
 			}
 		} else {
@@ -361,7 +365,7 @@ func (n *Node) start(
 
 	n.startedAt = n.storeCfg.Clock.Now().WallTime
 
-	n.startComputePeriodicMetrics(n.stopper)
+	n.startComputePeriodicMetrics(n.stopper, n.storeCfg.MetricsSampleInterval)
 	n.startGossip(n.stopper)
 
 	// Record node started event.
@@ -402,7 +406,7 @@ func (n *Node) SetDraining(drain bool) error {
 // bootstraps list for initialization once the cluster and node IDs
 // have been determined.
 func (n *Node) initStores(
-	ctx context.Context, engines []engine.Engine, stopper *stop.Stopper,
+	ctx context.Context, engines []engine.Engine, stopper *stop.Stopper, bootstrapped bool,
 ) error {
 	var bootstraps []*storage.Store
 
@@ -412,6 +416,9 @@ func (n *Node) initStores(
 	for _, e := range engines {
 		s := storage.NewStore(n.storeCfg, e, &n.Descriptor)
 		log.Eventf(ctx, "created store for engine: %s", e)
+		if bootstrapped {
+			s.NotifyBootstrapped()
+		}
 		// Initialize each store in turn, handling un-bootstrapped errors by
 		// adding the store to the bootstraps list.
 		if err := s.Start(ctx, stopper); err != nil {
@@ -422,7 +429,7 @@ func (n *Node) initStores(
 			}
 			return errors.Errorf("failed to start store: %s", err)
 		}
-		if s.Ident.ClusterID == *uuid.EmptyUUID || s.Ident.NodeID == 0 {
+		if s.Ident.ClusterID == (uuid.UUID{}) || s.Ident.NodeID == 0 {
 			return errors.Errorf("unidentified store: %s", s)
 		}
 		capacity, err := s.Capacity()
@@ -463,7 +470,9 @@ func (n *Node) initStores(
 
 	// Connect gossip before starting bootstrap. For new nodes, connecting
 	// to the gossip network is necessary to get the cluster ID.
-	n.connectGossip(ctx)
+	if err := n.connectGossip(ctx); err != nil {
+		return err
+	}
 	log.Event(ctx, "connected to gossip")
 
 	// If no NodeID has been assigned yet, allocate a new node ID by
@@ -496,7 +505,7 @@ func (n *Node) addStore(store *storage.Store) {
 // the agreed-upon cluster and node IDs.
 func (n *Node) validateStores() error {
 	return n.stores.VisitStores(func(s *storage.Store) error {
-		if n.ClusterID == *uuid.EmptyUUID {
+		if n.ClusterID == (uuid.UUID{}) {
 			n.ClusterID = s.Ident.ClusterID
 			n.initNodeID(s.Ident.NodeID)
 		} else if n.ClusterID != s.Ident.ClusterID {
@@ -515,7 +524,7 @@ func (n *Node) validateStores() error {
 func (n *Node) bootstrapStores(
 	ctx context.Context, bootstraps []*storage.Store, stopper *stop.Stopper,
 ) {
-	if n.ClusterID == *uuid.EmptyUUID {
+	if n.ClusterID == (uuid.UUID{}) {
 		panic("ClusterID missing during store bootstrap of auxiliary store")
 	}
 
@@ -532,7 +541,7 @@ func (n *Node) bootstrapStores(
 		StoreID:   firstID,
 	}
 	for _, s := range bootstraps {
-		if err := s.Bootstrap(sIdent, stopper); err != nil {
+		if err := s.Bootstrap(sIdent); err != nil {
 			log.Fatal(ctx, err)
 		}
 		if err := s.Start(ctx, stopper); err != nil {
@@ -558,29 +567,33 @@ func (n *Node) bootstrapStores(
 // this node is already part of a cluster, the cluster ID is verified
 // for a match. If not part of a cluster, the cluster ID is set. The
 // node's address is gossiped with node ID as the gossip key.
-func (n *Node) connectGossip(ctx context.Context) {
+func (n *Node) connectGossip(ctx context.Context) error {
 	log.Infof(ctx, "connecting to gossip network to verify cluster ID...")
-	// No timeout or stop condition is needed here. Log statements should be
-	// sufficient for diagnosing this type of condition.
-	<-n.storeCfg.Gossip.Connected
+	select {
+	case <-n.stopper.ShouldStop():
+		return errors.New("stop called before we could connect to gossip")
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.storeCfg.Gossip.Connected:
+	}
 
 	uuidBytes, err := n.storeCfg.Gossip.GetInfo(gossip.KeyClusterID)
 	if err != nil {
-		log.Fatalf(ctx, "unable to ascertain cluster ID from gossip network: %s", err)
+		return errors.Wrap(err, "unable to ascertain cluster ID from gossip network")
 	}
-	gossipClusterIDPtr, err := uuid.FromBytes(uuidBytes)
+	gossipClusterID, err := uuid.FromBytes(uuidBytes)
 	if err != nil {
-		log.Fatalf(ctx, "unable to ascertain cluster ID from gossip network: %s", err)
+		return errors.Wrap(err, "unable to parse cluster ID from gossip network")
 	}
-	gossipClusterID := *gossipClusterIDPtr
 
-	if n.ClusterID == *uuid.EmptyUUID {
+	if n.ClusterID == (uuid.UUID{}) {
 		n.ClusterID = gossipClusterID
 	} else if n.ClusterID != gossipClusterID {
-		log.Fatalf(ctx, "node %d belongs to cluster %q but is attempting to connect to a gossip network for cluster %q",
+		return errors.Errorf("node %d belongs to cluster %q but is attempting to connect to a gossip network for cluster %q",
 			n.Descriptor.NodeID, n.ClusterID, gossipClusterID)
 	}
 	log.Infof(ctx, "node connected via gossip and verified as part of cluster %q", gossipClusterID)
+	return nil
 }
 
 // startGossip loops on a periodic ticker to gossip node-related
@@ -600,10 +613,8 @@ func (n *Node) startGossip(stopper *stop.Stopper) {
 			panic(err)
 		}
 
-		gossipStoresInterval := envutil.EnvOrDefaultDuration("COCKROACH_GOSSIP_STORES_INTERVAL",
-			gossip.DefaultGossipStoresInterval)
 		statusTicker := time.NewTicker(gossipStatusInterval)
-		storesTicker := time.NewTicker(gossipStoresInterval)
+		storesTicker := time.NewTicker(gossip.GossipStoresInterval)
 		nodeTicker := time.NewTicker(gossipNodeDescriptorInterval)
 		defer storesTicker.Stop()
 		defer nodeTicker.Stop()
@@ -643,16 +654,16 @@ func (n *Node) gossipStores(ctx context.Context) {
 // startComputePeriodicMetrics starts a loop which periodically instructs each
 // store to compute the value of metrics which cannot be incrementally
 // maintained.
-func (n *Node) startComputePeriodicMetrics(stopper *stop.Stopper) {
+func (n *Node) startComputePeriodicMetrics(stopper *stop.Stopper, interval time.Duration) {
 	stopper.RunWorker(func() {
 		ctx := n.AnnotateCtx(context.Background())
-		// Publish status at the same frequency as metrics are collected.
-		ticker := time.NewTicker(publishStatusInterval)
+		// Compute periodic stats at the same frequency as metrics are sampled.
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for tick := 0; ; tick++ {
 			select {
 			case <-ticker.C:
-				if err := n.computePeriodicMetrics(tick); err != nil {
+				if err := n.computePeriodicMetrics(ctx, tick); err != nil {
 					log.Errorf(ctx, "failed computing periodic metrics: %s", err)
 				}
 			case <-stopper.ShouldStop():
@@ -664,10 +675,9 @@ func (n *Node) startComputePeriodicMetrics(stopper *stop.Stopper) {
 
 // computePeriodicMetrics instructs each store to compute the value of
 // complicated metrics.
-func (n *Node) computePeriodicMetrics(tick int) error {
+func (n *Node) computePeriodicMetrics(ctx context.Context, tick int) error {
 	return n.stores.VisitStores(func(store *storage.Store) error {
-		if err := store.ComputeMetrics(tick); err != nil {
-			ctx := n.AnnotateCtx(context.TODO())
+		if err := store.ComputeMetrics(ctx, tick); err != nil {
 			log.Warningf(ctx, "%s: unable to compute metrics: %s", store, err)
 		}
 		return nil
@@ -705,27 +715,7 @@ func (n *Node) startWriteSummaries(frequency time.Duration) {
 func (n *Node) writeSummaries(ctx context.Context) error {
 	var err error
 	if runErr := n.stopper.RunTask(func() {
-		nodeStatus := n.recorder.GetStatusSummary()
-		if nodeStatus != nil {
-			key := keys.NodeStatusKey(nodeStatus.Desc.NodeID)
-			// We use PutInline to store only a single version of the node
-			// status. There's not much point in keeping the historical
-			// versions as we keep all of the constituent data as
-			// timeseries. Further, due to the size of the build info in the
-			// node status, writing one of these every 10s will generate
-			// more versions than will easily fit into a range over the
-			// course of a day.
-			if err = n.storeCfg.DB.PutInline(ctx, key, nodeStatus); err != nil {
-				return
-			}
-			if log.V(2) {
-				statusJSON, err := json.Marshal(nodeStatus)
-				if err != nil {
-					log.Errorf(ctx, "error marshaling nodeStatus to json: %s", err)
-				}
-				log.Infof(ctx, "node %d status: %s", nodeStatus.Desc.NodeID, statusJSON)
-			}
-		}
+		err = n.recorder.WriteStatusSummary(ctx, n.storeCfg.DB)
 	}); runErr != nil {
 		err = runErr
 	}
@@ -771,29 +761,9 @@ func (n *Node) recordJoinEvent() {
 	})
 }
 
-// Batch implements the roachpb.InternalServer interface.
-func (n *Node) Batch(
+func (n *Node) batchInternal(
 	ctx context.Context, args *roachpb.BatchRequest,
-) (br *roachpb.BatchResponse, err error) {
-	ctx = n.AnnotateCtx(ctx)
-	// TODO(marc,bdarnell): this code is duplicated in server/node.go,
-	// which should be fixed.
-	defer func() {
-		// We always return errors via BatchResponse.Error so structure is
-		// preserved; plain errors are presumed to be from the RPC
-		// framework and not from cockroach.
-		if err != nil {
-			if br == nil {
-				br = &roachpb.BatchResponse{}
-			}
-			if br.Error != nil {
-				panic(fmt.Sprintf(
-					"attempting to return both a plain error (%s) and roachpb.Error (%s)", err, br.Error))
-			}
-			br.Error = roachpb.NewError(err)
-			err = nil
-		}
-	}()
+) (*roachpb.BatchResponse, error) {
 	// TODO(marc): grpc's authentication model (which gives credential access in
 	// the request handler) doesn't really fit with the current design of the
 	// security package (which assumes that TLS state is only given at connection
@@ -810,35 +780,47 @@ func (n *Node) Batch(
 		}
 	}
 
-	const opName = "node.Batch"
+	var br *roachpb.BatchResponse
 
-	fail := func(err error) {
-		br = &roachpb.BatchResponse{}
-		br.Error = roachpb.NewError(err)
+	type snowballInfo struct {
+		syncutil.Mutex
+		collectedSpans [][]byte
+		done           bool
 	}
+	var snowball *snowballInfo
 
-	f := func() {
+	if err := n.stopper.RunTaskWithErr(func() error {
+		const opName = "node.Batch"
 		sp, err := tracing.JoinOrNew(n.storeCfg.AmbientCtx.Tracer, args.TraceContext, opName)
 		if err != nil {
-			fail(err)
-			return
+			return err
 		}
 		// If this is a snowball span, it gets special treatment: It skips the
 		// regular tracing machinery, and we instead send the collected spans
 		// back with the response. This is more expensive, but then again,
 		// those are individual requests traced by users, so they can be.
 		if sp.BaggageItem(tracing.Snowball) != "" {
-			sp.LogEvent("delegating to snowball tracing")
+			sp.LogFields(otlog.String("event", "delegating to snowball tracing"))
 			sp.Finish()
-			if sp, err = tracing.JoinOrNewSnowball(opName, args.TraceContext, func(rawSpan basictracer.RawSpan) {
+
+			snowball = new(snowballInfo)
+			recorder := func(rawSpan basictracer.RawSpan) {
+				snowball.Lock()
+				defer snowball.Unlock()
+				if snowball.done {
+					// This is a late span that we must discard because the request was
+					// already completed.
+					return
+				}
 				encSp, err := tracing.EncodeRawSpan(&rawSpan, nil)
 				if err != nil {
 					log.Warning(ctx, err)
 				}
-				br.CollectedSpans = append(br.CollectedSpans, encSp)
-			}); err != nil {
-				fail(err)
-				return
+				snowball.collectedSpans = append(snowball.collectedSpans, encSp)
+			}
+
+			if sp, err = tracing.JoinOrNewSnowball(opName, args.TraceContext, recorder); err != nil {
+				return err
 			}
 		}
 		defer sp.Finish()
@@ -857,10 +839,64 @@ func (n *Node) Batch(
 		}
 		n.metrics.callComplete(timeutil.Since(tStart), pErr)
 		br.Error = pErr
-	}
-
-	if err := n.stopper.RunTask(f); err != nil {
+		return nil
+	}); err != nil {
 		return nil, err
 	}
+
+	if snowball != nil {
+		snowball.Lock()
+		br.CollectedSpans = snowball.collectedSpans
+		snowball.done = true
+		snowball.Unlock()
+	}
+
 	return br, nil
+}
+
+// Batch implements the roachpb.InternalServer interface.
+func (n *Node) Batch(
+	ctx context.Context, args *roachpb.BatchRequest,
+) (*roachpb.BatchResponse, error) {
+	growStack()
+
+	ctx = n.AnnotateCtx(ctx)
+
+	br, err := n.batchInternal(ctx, args)
+
+	// We always return errors via BatchResponse.Error so structure is
+	// preserved; plain errors are presumed to be from the RPC
+	// framework and not from cockroach.
+	if err != nil {
+		if br == nil {
+			br = &roachpb.BatchResponse{}
+		}
+		if br.Error != nil {
+			log.Fatalf(
+				ctx, "attempting to return both a plain error (%s) and roachpb.Error (%s)", err, br.Error,
+			)
+		}
+		br.Error = roachpb.NewError(err)
+	}
+	return br, nil
+}
+
+var growStackGlobal = false
+
+//go:noinline
+func growStack() {
+	// Goroutine stacks currently start at 2 KB in size. The code paths through
+	// the storage package often need a stack that is 32 KB in size. The stack
+	// growth is mildly expensive making it useful to trick the runtime into
+	// growing the stack early. Since goroutine stacks grow in multiples of 2 and
+	// start at 2 KB in size, by placing a 16 KB object on the stack early in the
+	// lifetime of a goroutine we force the runtime to use a 32 KB stack for the
+	// goroutine.
+	var buf [16 << 10] /* 16 KB */ byte
+	if growStackGlobal {
+		// Make sure the compiler doesn't optimize away buf.
+		for i := range buf {
+			buf[i] = byte(i)
+		}
+	}
 }

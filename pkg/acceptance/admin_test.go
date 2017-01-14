@@ -21,20 +21,28 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/pkg/acceptance/cluster"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 func TestAdminLossOfQuorum(t *testing.T) {
+	s := log.Scope(t, "")
+	defer s.Close(t)
+
 	runTestOnConfigs(t, testAdminLossOfQuorumInner)
 }
 
-func testAdminLossOfQuorumInner(t *testing.T, c cluster.Cluster, cfg cluster.TestConfig) {
+func testAdminLossOfQuorumInner(
+	ctx context.Context, t *testing.T, c cluster.Cluster, cfg cluster.TestConfig,
+) {
 	if c.NumNodes() < 2 {
 		t.Logf("skipping test %s because given cluster has too few nodes", cfg.Name)
 		return
@@ -44,28 +52,28 @@ func testAdminLossOfQuorumInner(t *testing.T, c cluster.Cluster, cfg cluster.Tes
 	nodeIDs := make([]roachpb.NodeID, c.NumNodes())
 	for i := 0; i < c.NumNodes(); i++ {
 		var details serverpb.DetailsResponse
-		if err := util.GetJSON(cluster.HTTPClient, c.URL(i)+"/_status/details/local", &details); err != nil {
-			t.Fatal(err)
+		if err := httputil.GetJSON(cluster.HTTPClient, c.URL(ctx, i)+"/_status/details/local", &details); err != nil {
+			t.Fatalf("failed to get local details from node %d: %s", i, err)
 		}
 		nodeIDs[i] = details.NodeID
 	}
 
 	// Leave only the first node alive.
 	for i := 1; i < c.NumNodes(); i++ {
-		if err := c.Kill(i); err != nil {
+		if err := c.Kill(ctx, i); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Retrieve node statuses.
 	var nodes serverpb.NodesResponse
-	if err := util.GetJSON(cluster.HTTPClient, c.URL(0)+"/_status/nodes", &nodes); err != nil {
+	if err := httputil.GetJSON(cluster.HTTPClient, c.URL(ctx, 0)+"/_status/nodes", &nodes); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, nodeID := range nodeIDs {
 		var nodeStatus status.NodeStatus
-		if err := util.GetJSON(cluster.HTTPClient, c.URL(0)+"/_status/nodes/"+strconv.Itoa(int(nodeID)), &nodeStatus); err != nil {
+		if err := httputil.GetJSON(cluster.HTTPClient, c.URL(ctx, 0)+"/_status/nodes/"+strconv.Itoa(int(nodeID)), &nodeStatus); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -80,7 +88,7 @@ func testAdminLossOfQuorumInner(t *testing.T, c cluster.Cluster, cfg cluster.Tes
 		},
 	}
 	var queryResponse tspb.TimeSeriesQueryResponse
-	if err := util.PostJSON(cluster.HTTPClient, c.URL(0)+"/ts/query",
+	if err := httputil.PostJSON(cluster.HTTPClient, c.URL(ctx, 0)+"/ts/query",
 		&queryRequest, &queryResponse); err != nil {
 		t.Fatal(err)
 	}

@@ -19,8 +19,8 @@ package kv_test
 import (
 	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
@@ -36,7 +36,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -56,7 +55,7 @@ func TestRangeLookupWithOpenTransaction(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
-	db := createTestClient(t, s.Stopper(), s.ServingAddr())
+	db := createTestClient(t, s)
 
 	// Create an intent on the meta1 record by writing directly to the
 	// engine.
@@ -64,7 +63,7 @@ func TestRangeLookupWithOpenTransaction(t *testing.T) {
 	now := s.Clock().Now()
 	txn := roachpb.NewTransaction("txn", roachpb.Key("foobar"), 0, enginepb.SERIALIZABLE, now, 0)
 	if err := engine.MVCCPutProto(
-		context.Background(), s.(*server.TestServer).Cfg.Engines[0],
+		context.Background(), s.(*server.TestServer).Engines()[0],
 		nil, key, now, txn, &roachpb.RangeDescriptor{}); err != nil {
 		t.Fatal(err)
 	}
@@ -86,9 +85,9 @@ func TestRangeLookupWithOpenTransaction(t *testing.T) {
 // The caller is responsible for stopping the server and
 // closing the client.
 func setupMultipleRanges(
-	t *testing.T, ts serverutils.TestServerInterface, splitAt ...string,
+	t *testing.T, s serverutils.TestServerInterface, splitAt ...string,
 ) *client.DB {
-	db := createTestClient(t, ts.Stopper(), ts.ServingAddr())
+	db := createTestClient(t, s)
 
 	// Split the keyspace at the given keys.
 	for _, key := range splitAt {
@@ -741,7 +740,7 @@ func TestMultiRangeScanReverseScanInconsistent(t *testing.T) {
 		ts[i] = s.Clock().Now()
 		log.Infof(context.TODO(), "%d: %s %d", i, key, ts[i])
 		if i == 0 {
-			util.SucceedsSoon(t, func() error {
+			testutils.SucceedsSoon(t, func() error {
 				// Enforce that when we write the second key, it's written
 				// with a strictly higher timestamp. We're dropping logical
 				// ticks and the clock may just have been pushed into the
@@ -763,8 +762,11 @@ func TestMultiRangeScanReverseScanInconsistent(t *testing.T) {
 		roachpb.NewReverseScan(roachpb.Key("a"), roachpb.Key("c")),
 	} {
 		manual := hlc.NewManualClock(ts[0].WallTime + 1)
-		clock := hlc.NewClock(manual.UnixNano)
-		ds := kv.NewDistSender(&kv.DistSenderConfig{Clock: clock, RPCContext: s.RPCContext()}, s.(*server.TestServer).Gossip())
+		clock := hlc.NewClock(manual.UnixNano, time.Nanosecond)
+		ds := kv.NewDistSender(
+			kv.DistSenderConfig{Clock: clock, RPCContext: s.RPCContext()},
+			s.(*server.TestServer).Gossip(),
+		)
 
 		reply, err := client.SendWrappedWith(context.Background(), ds, roachpb.Header{
 			ReadConsistency: roachpb.INCONSISTENT,
@@ -792,8 +794,57 @@ func TestMultiRangeScanReverseScanInconsistent(t *testing.T) {
 	}
 }
 
+// TestParallelSender splits the keyspace 10 times and verifies that a
+// scan across all and 10 puts to each range both use parallelizing
+// dist sender.
+func TestParallelSender(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop()
+	ctx := context.TODO()
+
+	db := createTestClient(t, s)
+
+	// Split into multiple ranges.
+	splitKeys := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	for _, key := range splitKeys {
+		if err := db.AdminSplit(context.TODO(), key); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	psCount := s.DistSender().GetParallelSendCount()
+
+	// Batch writes to each range.
+	if err := db.Txn(ctx, func(txn *client.Txn) error {
+		b := txn.NewBatch()
+		for _, key := range splitKeys {
+			b.Put(key, "val")
+		}
+		return txn.CommitInBatch(b)
+	}); err != nil {
+		t.Errorf("unexpected error on batch put: %s", err)
+	}
+	newPSCount := s.DistSender().GetParallelSendCount()
+	if c := newPSCount - psCount; c < 9 {
+		t.Errorf("expected at least 9 parallel sends; got %d", c)
+	}
+	psCount = newPSCount
+
+	// Scan across all rows.
+	if rows, err := db.Scan(context.TODO(), "a", "z", 0); err != nil {
+		t.Fatalf("unexpected error on Scan: %s", err)
+	} else if l := len(rows); l != len(splitKeys) {
+		t.Fatalf("expected %d rows; got %d", len(splitKeys), l)
+	}
+	newPSCount = s.DistSender().GetParallelSendCount()
+	if c := newPSCount - psCount; c < 9 {
+		t.Errorf("expected at least 9 parallel sends; got %d", c)
+	}
+}
+
 func initReverseScanTestEnv(s serverutils.TestServerInterface, t *testing.T) *client.DB {
-	db := createTestClient(t, s.Stopper(), s.ServingAddr())
+	db := createTestClient(t, s)
 
 	// Set up multiple ranges:
 	// ["", "b"),["b", "e") ,["e", "g") and ["g", "\xff\xff").
@@ -922,7 +973,7 @@ func TestBadRequest(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
-	db := createTestClient(t, s.Stopper(), s.ServingAddr())
+	db := createTestClient(t, s)
 	ctx := context.TODO()
 
 	// Write key "a".
@@ -985,7 +1036,7 @@ func TestNoSequenceCachePutOnRangeMismatchError(t *testing.T) {
 	}
 }
 
-// TestPropagateTxnOnError verifies that DistSender.sendChunk properly
+// TestPropagateTxnOnError verifies that DistSender.sendBatch properly
 // propagates the txn data to a next iteration. Use txn.Writing field to
 // verify that.
 func TestPropagateTxnOnError(t *testing.T) {
@@ -1162,143 +1213,6 @@ func TestPropagateTxnOnPushError(t *testing.T) {
 			close(waitForTxnRestart)
 			log.Infof(context.TODO(), "Waiting for the txn commit")
 			<-waitForTxnCommit
-		}
-	}
-}
-
-// TestRequestToUninitializedRange tests the behavior when a request
-// is sent to a node which should be a replica of the correct range
-// but has not yet received its initial snapshot. This would
-// previously panic due to a malformed error response from the server,
-// as seen in https://github.com/cockroachdb/cockroach/issues/6027.
-//
-// Prior to the other changes in the commit that introduced it, this
-// test would reliable trigger the panic from #6027. However, it
-// relies on some hacky tricks to both trigger the panic and shut down
-// cleanly. If this test needs a lot of maintenance in the future we
-// should be willing to get rid of it.
-func TestRequestToUninitializedRange(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	srv, _, _ := serverutils.StartServer(t, base.TestServerArgs{
-		StoreSpecs: []base.StoreSpec{
-			base.DefaultTestStoreSpec,
-			base.DefaultTestStoreSpec,
-		},
-	})
-	defer srv.Stopper().Stop()
-	s := srv.(*server.TestServer)
-
-	// Choose a range ID that is much larger than any that would be
-	// created by initial splits.
-	const rangeID = roachpb.RangeID(1000)
-
-	// Set up a range with replicas on two stores of the same node. This
-	// ensures that the DistSender will consider both replicas healthy
-	// and will try to talk to both (so we can get a non-retryable error
-	// from the second store).
-	replica1 := roachpb.ReplicaDescriptor{
-		NodeID:    1,
-		StoreID:   1,
-		ReplicaID: 1,
-	}
-	replica2 := roachpb.ReplicaDescriptor{
-		NodeID:    1,
-		StoreID:   2,
-		ReplicaID: 2,
-	}
-
-	// HACK: remove the second store from the node to generate a
-	// non-retryable error when we try to talk to it.
-	store2, err := s.Stores().GetStore(2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.Stores().RemoveStore(store2)
-
-	// Create the uninitialized range by sending an isolated raft
-	// message to the first store.
-	conn, err := s.RPCContext().GRPCDial(s.ServingAddr())
-	if err != nil {
-		t.Fatal(err)
-	}
-	raftClient := storage.NewMultiRaftClient(conn)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	stream, err := raftClient.RaftMessageBatch(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	msg := storage.RaftMessageRequestBatch{
-		Requests: []storage.RaftMessageRequest{
-			{
-				RangeID:     rangeID,
-				ToReplica:   replica1,
-				FromReplica: replica2,
-				Message: raftpb.Message{
-					Type: raftpb.MsgApp,
-					To:   1,
-				},
-			},
-		},
-	}
-	if err := stream.Send(&msg); err != nil {
-		t.Fatal(err)
-	}
-
-	// Make sure the replica was created.
-	store1, err := s.Stores().GetStore(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	util.SucceedsSoon(t, func() error {
-		if replica, err := store1.GetReplica(rangeID); err != nil {
-			return errors.Errorf("failed to look up replica: %s", err)
-		} else if replica.IsInitialized() {
-			return errors.Errorf("expected replica to be uninitialized")
-		}
-		return nil
-	})
-
-	// Create our own DistSender so we can force some requests to the
-	// bogus range. The DistSender needs to be in scope for its own
-	// MockRangeDescriptorDB closure.
-	var sender *kv.DistSender
-	sender = kv.NewDistSender(&kv.DistSenderConfig{
-		Clock:      s.Clock(),
-		RPCContext: s.RPCContext(),
-		RangeDescriptorDB: kv.MockRangeDescriptorDB(
-			func(key roachpb.RKey, useReverseScan bool,
-			) ([]roachpb.RangeDescriptor, []roachpb.RangeDescriptor, *roachpb.Error) {
-				if key.Equal(roachpb.RKeyMin) {
-					// Pass through requests for the first range to the real sender.
-					desc, err := sender.FirstRange()
-					if err != nil {
-						return nil, nil, roachpb.NewError(err)
-					}
-					return []roachpb.RangeDescriptor{*desc}, nil, nil
-				}
-				return []roachpb.RangeDescriptor{{
-					RangeID:  rangeID,
-					StartKey: roachpb.RKey(keys.Meta2Prefix),
-					EndKey:   roachpb.RKeyMax,
-					Replicas: []roachpb.ReplicaDescriptor{replica1, replica2},
-				}}, nil, nil
-			}),
-	}, s.Gossip())
-	// Only inconsistent reads triggered the panic in #6027.
-	hdr := roachpb.Header{
-		ReadConsistency: roachpb.INCONSISTENT,
-	}
-	req := roachpb.NewGet(roachpb.Key("asdf"))
-	// Repeat the test a few times: due to the randomization between the
-	// two replicas, each attempt only had a 50% chance of triggering
-	// the panic.
-	for i := 0; i < 5; i++ {
-		_, pErr := client.SendWrappedWith(context.Background(), sender, hdr, req)
-		// Each attempt fails with "store 2 not found" because that is the
-		// non-retryable error.
-		if !testutils.IsPError(pErr, "store 2 not found") {
-			t.Fatal(pErr)
 		}
 	}
 }

@@ -387,10 +387,10 @@ func simplifyOneAndExpr(left, right parser.TypedExpr) (parser.TypedExpr, parser.
 	// to prefer a comparison between a column value and a datum of the same
 	// type is that it makes index constraint construction easier.
 	either := lcmp
-	if !ldatum.ResolvedType().Equal(rdatum.ResolvedType()) {
+	if !ldatum.ResolvedType().Equivalent(rdatum.ResolvedType()) {
 		switch ta := lcmpLeft.(type) {
 		case *parser.IndexedVar:
-			if ta.ResolvedType().Equal(rdatum.ResolvedType()) {
+			if ta.ResolvedType().Equivalent(rdatum.ResolvedType()) {
 				either = rcmp
 			}
 		}
@@ -922,10 +922,10 @@ func simplifyOneOrExpr(left, right parser.TypedExpr) (parser.TypedExpr, parser.T
 	// to prefer a comparison between a column value and a datum of the same
 	// type is that it makes index constraint construction easier.
 	either := lcmp
-	if !ldatum.ResolvedType().Equal(rdatum.ResolvedType()) {
+	if !ldatum.ResolvedType().Equivalent(rdatum.ResolvedType()) {
 		switch ta := lcmpLeft.(type) {
 		case *parser.IndexedVar:
-			if ta.ResolvedType().Equal(rdatum.ResolvedType()) {
+			if ta.ResolvedType().Equivalent(rdatum.ResolvedType()) {
 				either = rcmp
 			}
 		}
@@ -1593,7 +1593,7 @@ func makeIsNotNull(left parser.TypedExpr) parser.TypedExpr {
 	)
 }
 
-// analyzeExpr performs semantic analysis of an axpression, including:
+// analyzeExpr performs semantic analysis of an expression, including:
 // - replacing sub-queries by a sql.subquery node;
 // - resolving names (optional);
 // - type checking (with optional type enforcement);
@@ -1604,7 +1604,7 @@ func makeIsNotNull(left parser.TypedExpr) parser.TypedExpr {
 func (p *planner) analyzeExpr(
 	raw parser.Expr,
 	sources multiSourceInfo,
-	ivarHelper parser.IndexedVarHelper,
+	iVarHelper parser.IndexedVarHelper,
 	expectedType parser.Type,
 	requireType bool,
 	typingContext string,
@@ -1624,7 +1624,7 @@ func (p *planner) analyzeExpr(
 	if sources == nil {
 		resolved = replaced
 	} else {
-		resolved, err = p.resolveNames(replaced, sources, ivarHelper)
+		resolved, _, err = p.resolveNames(replaced, sources, iVarHelper)
 		if err != nil {
 			return nil, err
 		}

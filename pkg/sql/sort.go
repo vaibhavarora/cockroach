@@ -17,25 +17,20 @@
 package sql
 
 import (
-	"bytes"
 	"container/heap"
 	"fmt"
 	"math"
 	"strconv"
 
-	"golang.org/x/net/context"
-
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/pkg/errors"
 )
 
 // sortNode represents a node that sorts the rows returned by its
 // sub-node.
 type sortNode struct {
-	ctx      context.Context
 	p        *planner
 	plan     planNode
 	columns  ResultColumns
@@ -57,7 +52,7 @@ type sortNode struct {
 // However, for a SELECT, we can also sort by the pre-alias column name (SELECT
 // a AS b ORDER BY b) as well as expressions (SELECT a, b, ORDER BY a+b). In
 // this case, construction of the sortNode might adjust the number of render
-// targets in the selectNode if any ordering expressions are specified.
+// targets in the renderNode if any ordering expressions are specified.
 //
 // TODO(dan): SQL also allows sorting a VALUES or UNION by an expression.
 // Support this. It will reduce some of the special casing below, but requires a
@@ -67,132 +62,204 @@ func (p *planner) orderBy(orderBy parser.OrderBy, n planNode) (*sortNode, error)
 		return nil, nil
 	}
 
+	// Multiple tests below use renderNode as a special case.
+	// So factor the cast.
+	s, _ := n.(*renderNode)
+
 	// We grab a copy of columns here because we might add new render targets
 	// below. This is the set of columns requested by the query.
 	columns := n.Columns()
 	numOriginalCols := len(columns)
-	if s, ok := n.(*selectNode); ok {
+	if s != nil {
 		numOriginalCols = s.numOriginalCols
 	}
 	var ordering sqlbase.ColumnOrdering
 
 	for _, o := range orderBy {
+		direction := encoding.Ascending
+		if o.Direction == parser.Descending {
+			direction = encoding.Descending
+		}
+
 		index := -1
 
 		// Unwrap parenthesized expressions like "((a))" to "a".
 		expr := parser.StripParens(o.Expr)
 
-		if vBase, ok := expr.(parser.VarName); ok {
+		// The logical data source for ORDER BY is the list of render
+		// expressions for a SELECT, as specified in the input SQL text
+		// (or an entire UNION or VALUES clause).  Alas, SQL has some
+		// historical baggage from SQL92 and there are some special cases:
+		//
+		// SQL92 rules:
+		//
+		// 1) if the expression is the aliased (AS) name of a render
+		//    expression in a SELECT clause, then use that
+		//    render as sort key.
+		//    e.g. SELECT a AS b, b AS c ORDER BY b
+		//    this sorts on the first render.
+		//
+		// 2) column ordinals. If a simple integer literal is used,
+		//    optionally enclosed within parentheses but *not subject to
+		//    any arithmetic*, then this refers to one of the columns of
+		//    the data source. Then use the render expression at that
+		//    ordinal position as sort key.
+		//
+		// SQL99 rules:
+		//
+		// 3) otherwise, if the expression is already in the render list,
+		//    then use that render as sort key.
+		//    e.g. SELECT b AS c ORDER BY b
+		//    this sorts on the first render.
+		//    (this is an optimization)
+		//
+		// 4) if the sort key is not dependent on the data source (no
+		//    IndexedVar) then simply do not sort. (this is an optimization)
+		//
+		// 5) otherwise, add a new render with the ORDER BY expression
+		//    and use that as sort key.
+		//    e.g. SELECT a FROM t ORDER by b
+		//    e.g. SELECT a, b FROM t ORDER by a+b
+
+		// First, deal with render aliases.
+		if vBase, ok := expr.(parser.VarName); index == -1 && ok {
 			v, err := vBase.NormalizeVarName()
 			if err != nil {
 				return nil, err
 			}
 
-			var c *parser.ColumnItem
-			switch t := v.(type) {
-			case *parser.ColumnItem:
-				c = t
-			default:
-				return nil, fmt.Errorf("invalid syntax for ORDER BY: %s", v)
-			}
-
-			if c.TableName.Table() == "" {
+			if c, ok := v.(*parser.ColumnItem); ok && c.TableName.Table() == "" {
 				// Look for an output column that matches the name. This
 				// handles cases like:
 				//
 				//   SELECT a AS b FROM t ORDER BY b
-				target := sqlbase.NormalizeName(c.ColumnName)
+				target := c.ColumnName.Normalize()
 				for j, col := range columns {
-					if sqlbase.ReNormalizeName(col.Name) == target {
-						index = j
-						break
-					}
-				}
-			}
-
-			if s, ok := n.(*selectNode); ok && index == -1 {
-				// No output column matched the  name, so look for an existing
-				// render target that matches the column name. This handles cases like:
-				//
-				//   SELECT a AS b FROM t ORDER BY a
-				colIdx, err := s.source.findUnaliasedColumn(c)
-				if err != nil {
-					return nil, err
-				}
-				if colIdx != invalidColIdx {
-					for j, r := range s.render {
-						if ivar, ok := r.(*parser.IndexedVar); ok {
-							s.ivarHelper.AssertSameContainer(ivar)
-							if ivar.Idx == colIdx {
-								index = j
-								break
+					if parser.ReNormalizeName(col.Name) == target {
+						if index != -1 {
+							// There is more than one render alias that matches the ORDER BY
+							// clause. Here, SQL92 is specific as to what should be done:
+							// if the underlying expression is known (we're on a renderNode)
+							// and it is equivalent, then just accept that and ignore the ambiguity.
+							// This plays nice with `SELECT b, * FROM t ORDER BY b`. Otherwise,
+							// reject with an ambituity error.
+							if s == nil || !s.equivalentRenders(j, index) {
+								return nil, errors.Errorf("ORDER BY \"%s\" is ambiguous", target)
 							}
 						}
+						index = j
 					}
 				}
 			}
+		}
+
+		// So Then, deal with column ordinals.
+		if index == -1 {
+			col, err := p.colIndex(numOriginalCols, expr, "ORDER BY")
+			if err != nil {
+				return nil, err
+			}
+			if col != -1 {
+				index = col
+			}
+		}
+
+		if s != nil {
+			// Try to optimize constant sorts. For this we need to resolve
+			// names to IndexedVars then see if there were any row-dependent
+			// expressions found in the sort expression.
+			sortExpr := expr
+			if index != -1 {
+				// We found a render above, so fetch it. This is needed
+				// because if the sort expression is a reference to a render
+				// alias, resolveNames below would be incorrect.
+				sortExpr = s.render[index]
+			}
+			_, hasRowDependentValues, err := p.resolveNames(sortExpr, s.sourceInfo, s.ivarHelper)
+			if err != nil {
+				return nil, err
+			}
+			if !hasRowDependentValues {
+				// No sorting needed!
+				continue
+			}
+		}
+
+		// Finally, if we haven't found anything so far, we really
+		// need a new render.
+		// TODO(knz/dan) currently this is only possible for renderNode.
+		// If we are dealing with a UNION or something else we would need
+		// to fabricate an intermediate renderNode to add the new render.
+		if index == -1 && s != nil {
+			cols, exprs, hasStar, err := p.computeRender(parser.SelectExpr{Expr: expr}, parser.TypeAny,
+				s.source.info, s.ivarHelper, true)
+			if err != nil {
+				return nil, err
+			}
+			s.isStar = s.isStar || hasStar
+
+			if len(cols) == 0 {
+				// Nothing was expanded! No order here.
+				continue
+			}
+
+			colIdxs := s.addOrMergeRenders(cols, exprs, true)
+			for i := 0; i < len(colIdxs)-1; i++ {
+				// If more than 1 column were expanded, turn them into sort columns too.
+				// Except the last one, which will be added below.
+				ordering = append(ordering,
+					sqlbase.ColumnOrderInfo{ColIdx: colIdxs[i], Direction: direction})
+			}
+			index = colIdxs[len(colIdxs)-1]
 		}
 
 		if index == -1 {
-			// The order by expression matched neither an output column nor an
-			// existing render target.
-			if col, err := colIndex(numOriginalCols, expr); err != nil {
-				return nil, err
-			} else if col >= 0 {
-				index = col
-			} else if s, ok := n.(*selectNode); ok {
-				// TODO(dan): Once we support VALUES (1), (2) ORDER BY 3*4, this type
-				// check goes away.
-
-				// Add a new render expression to use for ordering. This
-				// handles cases were the expression is either not a name or
-				// is a name that is otherwise not referenced by the query:
-				//
-				//   SELECT a FROM t ORDER by b
-				//   SELECT a, b FROM t ORDER by a+b
-				if err := s.addRender(parser.SelectExpr{Expr: expr}, nil); err != nil {
-					return nil, err
-				}
-				index = len(s.columns) - 1
-			} else {
-				return nil, errors.Errorf("column %s does not exist", expr)
-			}
+			return nil, errors.Errorf("column %s does not exist", expr)
 		}
-		direction := encoding.Ascending
-		if o.Direction == parser.Descending {
-			direction = encoding.Descending
-		}
-		ordering = append(ordering, sqlbase.ColumnOrderInfo{ColIdx: index, Direction: direction})
+		ordering = append(ordering,
+			sqlbase.ColumnOrderInfo{ColIdx: index, Direction: direction})
 	}
 
-	return &sortNode{ctx: p.ctx(), p: p, columns: columns, ordering: ordering}, nil
+	if ordering == nil {
+		// All the sort expressions are constant. Simply drop the sort node.
+		return nil, nil
+	}
+	return &sortNode{p: p, columns: columns, ordering: ordering}, nil
 }
 
 // colIndex takes an expression that refers to a column using an integer, verifies it refers to a
 // valid render target and returns the corresponding column index. For example:
 //    SELECT a from T ORDER by 1
 // Here "1" refers to the first render target "a". The returned index is 0.
-func colIndex(numOriginalCols int, expr parser.Expr) (int, error) {
-	typedExpr, err := parser.TypeConstants(expr)
-	if err != nil {
-		return 0, err
-	}
-
-	switch i := typedExpr.(type) {
-	case *parser.DInt:
-		index := int(*i)
-		if numCols := numOriginalCols; index < 1 || index > numCols {
-			return -1, fmt.Errorf("invalid column index: %d not in range [1, %d]", index, numCols)
+func (p *planner) colIndex(numOriginalCols int, expr parser.Expr, context string) (int, error) {
+	ord := int64(-1)
+	switch i := expr.(type) {
+	case *parser.NumVal:
+		if i.ShouldBeInt64() {
+			val, err := i.AsInt64()
+			if err != nil {
+				return -1, err
+			}
+			ord = val
+		} else {
+			return -1, errors.Errorf("non-integer constant in %s: %s", context, expr)
 		}
-		return index - 1, nil
-
+	case *parser.DInt:
+		if *i >= 0 {
+			ord = int64(*i)
+		}
+	case *parser.StrVal:
+		return -1, errors.Errorf("non-integer constant in %s: %s", context, expr)
 	case parser.Datum:
-		return -1, fmt.Errorf("non-integer constant column index: %s", typedExpr)
-
-	default:
-		// expr doesn't look like a col index (i.e. not a constant).
-		return -1, nil
+		return -1, errors.Errorf("non-integer constant in %s: %s", context, expr)
 	}
+	if ord != -1 {
+		if ord < 1 || ord > int64(numOriginalCols) {
+			return -1, errors.Errorf("%s position %s is not in select list", context, expr)
+		}
+		ord--
+	}
+	return int(ord), nil
 }
 
 func (n *sortNode) Columns() ResultColumns {
@@ -203,7 +270,27 @@ func (n *sortNode) Ordering() orderingInfo {
 	if n == nil {
 		return orderingInfo{}
 	}
-	return orderingInfo{exactMatchCols: nil, ordering: n.ordering}
+	// Remove all the columns after the first one that's not present in
+	// the result columns.
+	ordering := make(sqlbase.ColumnOrdering, 0, len(n.ordering))
+	for _, o := range n.ordering {
+		if o.ColIdx < len(n.columns) {
+			ordering = append(ordering, o)
+		} else {
+			// If something is ordered by columns A, then B, then C, if I
+			// don't have column B I can't say it's ordered by columns A,
+			// then C. Example:
+			// A | B | C          A | C
+			// ---------          -----
+			// 1 | 1 | 2   --->   1 | 2
+			// 1 | 2 | 1          1 | 1
+			// 1 | 2 | 3          1 | 3
+			// So we need to break the orderingInfo here.
+			break
+		}
+	}
+	// TODO(radu/knz): bubble up columns the source has as exact matches.
+	return orderingInfo{exactMatchCols: nil, ordering: ordering}
 }
 
 func (n *sortNode) Values() parser.DTuple {
@@ -227,33 +314,6 @@ func (n *sortNode) DebugValues() debugValues {
 	return n.debugVals
 }
 
-func (n *sortNode) ExplainPlan(_ bool) (name, description string, children []planNode) {
-	if n.needSort {
-		name = "sort"
-	} else {
-		name = "nosort"
-	}
-
-	var buf bytes.Buffer
-	var columns ResultColumns
-	if n.plan != nil {
-		columns = n.plan.Columns()
-	}
-	n.Ordering().Format(&buf, columns)
-
-	switch ss := n.sortStrategy.(type) {
-	case *iterativeSortStrategy:
-		buf.WriteString(" (iterative)")
-	case *sortTopKStrategy:
-		fmt.Fprintf(&buf, " (top %d)", ss.topK)
-	}
-	description = buf.String()
-
-	return name, description, []planNode{n.plan}
-}
-
-func (n *sortNode) ExplainTypes(_ func(string, string)) {}
-
 func (n *sortNode) SetLimitHint(numRows int64, soft bool) {
 	if !n.needSort {
 		// The limit is only useful to the wrapped node if we don't need to sort.
@@ -270,45 +330,6 @@ func (n *sortNode) SetLimitHint(numRows int64, soft bool) {
 			}
 		}
 	}
-}
-
-// wrap the supplied planNode with the sortNode if sorting is required.
-// The first returned value is "true" if the sort node can be squashed
-// in the selectTopNode (sorting unneeded).
-func (n *sortNode) wrap(plan planNode) (bool, planNode) {
-	if n != nil {
-		// Check to see if the requested ordering is compatible with the existing
-		// ordering.
-		existingOrdering := plan.Ordering()
-		if log.V(2) {
-			log.Infof(n.ctx, "Sort: existing=%+v desired=%+v", existingOrdering, n.ordering)
-		}
-		match := computeOrderingMatch(n.ordering, existingOrdering, false)
-		if match < len(n.ordering) {
-			n.plan = plan
-			n.needSort = true
-			return false, n
-		}
-
-		if len(n.columns) < len(plan.Columns()) {
-			// No sorting required, but we have to strip off the extra render
-			// expressions we added.
-			n.plan = plan
-			return false, n
-		}
-
-		if log.V(2) {
-			log.Infof(n.ctx, "Sort: no sorting required")
-		}
-	}
-
-	return true, plan
-}
-
-func (n *sortNode) expandPlan() error {
-	// We do not need to recurse into the child node here; selectTopNode
-	// does this for us.
-	return nil
 }
 
 func (n *sortNode) Start() error {
@@ -428,9 +449,8 @@ func newSortAllStrategy(vNode *valuesNode) sortingStrategy {
 }
 
 func (ss *sortAllStrategy) Add(values parser.DTuple) error {
-	valuesCopy := make(parser.DTuple, len(values))
-	copy(valuesCopy, values)
-	return ss.vNode.rows.AddRow(valuesCopy)
+	_, err := ss.vNode.rows.AddRow(values)
+	return err
 }
 
 func (ss *sortAllStrategy) Finish() {
@@ -476,9 +496,8 @@ func newIterativeSortStrategy(vNode *valuesNode) sortingStrategy {
 }
 
 func (ss *iterativeSortStrategy) Add(values parser.DTuple) error {
-	valuesCopy := make(parser.DTuple, len(values))
-	copy(valuesCopy, values)
-	return ss.vNode.rows.AddRow(valuesCopy)
+	_, err := ss.vNode.rows.AddRow(values)
+	return err
 }
 
 func (ss *iterativeSortStrategy) Finish() {
@@ -545,20 +564,14 @@ func (ss *sortTopKStrategy) Add(values parser.DTuple) error {
 	switch {
 	case int64(ss.vNode.Len()) < ss.topK:
 		// The first k values all go into the max-heap.
-		valuesCopy := make(parser.DTuple, len(values))
-		copy(valuesCopy, values)
-
-		if err := ss.vNode.PushValues(valuesCopy); err != nil {
+		if err := ss.vNode.PushValues(values); err != nil {
 			return err
 		}
 	case ss.vNode.ValuesLess(values, ss.vNode.rows.At(0)):
 		// Once the heap is full, only replace the top
 		// value if a new value is less than it. If so
 		// replace and fix the heap.
-		valuesCopy := make(parser.DTuple, len(values))
-		copy(valuesCopy, values)
-
-		if err := ss.vNode.rows.Replace(0, valuesCopy); err != nil {
+		if err := ss.vNode.rows.Replace(0, values); err != nil {
 			return err
 		}
 		heap.Fix(ss.vNode, 0)
@@ -570,11 +583,10 @@ func (ss *sortTopKStrategy) Finish() {
 	// Pop all values in the heap, resulting in the inverted ordering
 	// being sorted in reverse. Therefore, the slice is ordered correctly
 	// in-place.
-	origLen := ss.vNode.Len()
 	for ss.vNode.Len() > 0 {
 		heap.Pop(ss.vNode)
 	}
-	ss.vNode.rows.ResetLen(origLen)
+	ss.vNode.ResetLen()
 }
 
 func (ss *sortTopKStrategy) Next() (bool, error) {

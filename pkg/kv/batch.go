@@ -99,24 +99,24 @@ func truncate(ba roachpb.BatchRequest, rs roachpb.RSpan) (roachpb.BatchRequest, 
 	}
 
 	var numNoop int
-	origRequests := ba.Requests
-	ba.Requests = make([]roachpb.RequestUnion, len(ba.Requests))
-	for pos, arg := range origRequests {
+	truncBA := ba
+	truncBA.Requests = make([]roachpb.RequestUnion, len(ba.Requests))
+	for pos, arg := range ba.Requests {
 		hasRequest, newHeader, err := truncateOne(arg.GetInner())
 		if !hasRequest {
 			// We omit this one, i.e. replace it with a Noop.
 			numNoop++
 			union := roachpb.RequestUnion{}
 			union.MustSetInner(&noopRequest)
-			ba.Requests[pos] = union
+			truncBA.Requests[pos] = union
 		} else {
 			// Keep the old one. If we must adjust the header, must copy.
-			if inner := origRequests[pos].GetInner(); newHeader.Equal(inner.Header()) {
-				ba.Requests[pos] = origRequests[pos]
+			if inner := ba.Requests[pos].GetInner(); newHeader.Equal(inner.Header()) {
+				truncBA.Requests[pos] = ba.Requests[pos]
 			} else {
 				shallowCopy := inner.ShallowCopy()
 				shallowCopy.SetHeader(newHeader)
-				union := &ba.Requests[pos] // avoid operating on copy
+				union := &truncBA.Requests[pos] // avoid operating on copy
 				union.MustSetInner(shallowCopy)
 			}
 		}
@@ -124,7 +124,7 @@ func truncate(ba roachpb.BatchRequest, rs roachpb.RSpan) (roachpb.BatchRequest, 
 			return roachpb.BatchRequest{}, 0, err
 		}
 	}
-	return ba, len(ba.Requests) - numNoop, nil
+	return truncBA, len(ba.Requests) - numNoop, nil
 }
 
 // prev gives the right boundary of the union of all requests which don't
@@ -134,7 +134,11 @@ func truncate(ba roachpb.BatchRequest, rs roachpb.RSpan) (roachpb.BatchRequest, 
 func prev(ba roachpb.BatchRequest, k roachpb.RKey) (roachpb.RKey, error) {
 	candidate := roachpb.RKeyMin
 	for _, union := range ba.Requests {
-		h := union.GetInner().Header()
+		inner := union.GetInner()
+		if _, ok := inner.(*roachpb.NoopRequest); ok {
+			continue
+		}
+		h := inner.Header()
 		addr, err := keys.Addr(h.Key)
 		if err != nil {
 			return nil, err
@@ -169,7 +173,11 @@ func prev(ba roachpb.BatchRequest, k roachpb.RKey) (roachpb.RKey, error) {
 func next(ba roachpb.BatchRequest, k roachpb.RKey) (roachpb.RKey, error) {
 	candidate := roachpb.RKeyMax
 	for _, union := range ba.Requests {
-		h := union.GetInner().Header()
+		inner := union.GetInner()
+		if _, ok := inner.(*roachpb.NoopRequest); ok {
+			continue
+		}
+		h := inner.Header()
 		addr, err := keys.Addr(h.Key)
 		if err != nil {
 			return nil, err

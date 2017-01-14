@@ -135,9 +135,10 @@ func TestTruncate(t *testing.T) {
 		goldenOriginal := roachpb.BatchRequest{}
 		for _, ks := range test.keys {
 			if len(ks[1]) > 0 {
+				u := uuid.MakeV4()
 				goldenOriginal.Add(&roachpb.ResolveIntentRangeRequest{
 					Span:      roachpb.Span{Key: roachpb.Key(ks[0]), EndKey: roachpb.Key(ks[1])},
-					IntentTxn: enginepb.TxnMeta{ID: uuid.NewV4()},
+					IntentTxn: enginepb.TxnMeta{ID: &u},
 				})
 			} else {
 				goldenOriginal.Add(&roachpb.GetRequest{
@@ -168,14 +169,17 @@ func TestTruncate(t *testing.T) {
 		}
 		ba, num, err := truncate(original, rs)
 		if err != nil || test.err != "" {
-			if test.err == "" || !testutils.IsError(err, test.err) {
-				t.Errorf("%d: %v (expected: %s)", i, err, test.err)
+			if !testutils.IsError(err, test.err) {
+				t.Errorf("%d: %v (expected: %q)", i, err, test.err)
 			}
 			continue
 		}
 		var reqs int
 		for j, arg := range ba.Requests {
 			req := arg.GetInner()
+			if _, ok := req.(*roachpb.NoopRequest); ok {
+				continue
+			}
 			if h := req.Header(); !bytes.Equal(h.Key, roachpb.Key(test.expKeys[j][0])) || !bytes.Equal(h.EndKey, roachpb.Key(test.expKeys[j][1])) {
 				t.Errorf("%d.%d: range mismatch: actual [%q,%q), wanted [%q,%q)", i, j,
 					h.Key, h.EndKey, test.expKeys[j][0], test.expKeys[j][1])

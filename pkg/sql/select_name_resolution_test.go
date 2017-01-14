@@ -24,13 +24,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 )
 
-func testInitDummySelectNode(desc *sqlbase.TableDescriptor) *selectNode {
-	p := makePlanner("test")
+func testInitDummySelectNode(desc *sqlbase.TableDescriptor) *renderNode {
+	p := makeTestPlanner()
 	scan := &scanNode{p: p}
 	scan.desc = *desc
 	scan.initDescDefaults(publicColumns)
 
-	sel := &selectNode{planner: p}
+	sel := &renderNode{planner: p}
 	sel.source.plan = scan
 	testName := parser.TableName{TableName: parser.Name(desc.Name), DatabaseName: parser.Name("test")}
 	sel.source.info = newSourceInfoForSingleTable(testName, scan.Columns())
@@ -45,7 +45,7 @@ func testInitDummySelectNode(desc *sqlbase.TableDescriptor) *selectNode {
 func TestRetryResolveNames(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	expr, err := parser.ParseExprTraditional(`COUNT(a)`)
+	expr, err := parser.ParseExprTraditional(`count(a)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestRetryResolveNames(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		newExpr, err := s.resolveNames(expr)
+		newExpr, _, err := s.resolveNames(expr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -70,8 +70,8 @@ func TestRetryResolveNames(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("%d: expected 1 ivar, but found %d", i, count)
 		}
-		if newExpr.String() != "COUNT(a)" {
-			t.Fatalf("%d: newExpr: got %s, expected 'COUNT(a)'", i, newExpr.String())
+		if newExpr.String() != "count(a)" {
+			t.Fatalf("%d: newExpr: got %s, expected 'count(a)'", i, newExpr.String())
 		}
 		expr = newExpr
 	}

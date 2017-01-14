@@ -75,12 +75,12 @@ func makeTableDescForTest(test indexKeyTest) (TableDescriptor, map[ColumnID]int)
 			Interleave:       makeInterleave(1, test.primaryInterleaves),
 		},
 		Indexes: []IndexDescriptor{{
-			ID:                2,
-			ColumnIDs:         secondaryColumnIDs,
-			ImplicitColumnIDs: primaryColumnIDs,
-			Unique:            true,
-			ColumnDirections:  make([]IndexDescriptor_Direction, len(secondaryColumnIDs)),
-			Interleave:        makeInterleave(2, test.secondaryInterleaves),
+			ID:               2,
+			ColumnIDs:        secondaryColumnIDs,
+			ExtraColumnIDs:   primaryColumnIDs,
+			Unique:           true,
+			ColumnDirections: make([]IndexDescriptor_Direction, len(secondaryColumnIDs)),
+			Interleave:       makeInterleave(2, test.secondaryInterleaves),
 		}},
 	}
 
@@ -90,8 +90,7 @@ func makeTableDescForTest(test indexKeyTest) (TableDescriptor, map[ColumnID]int)
 func decodeIndex(
 	a *DatumAlloc, tableDesc *TableDescriptor, index *IndexDescriptor, key []byte,
 ) ([]parser.Datum, error) {
-	values := make([]parser.Datum, len(index.ColumnIDs))
-	valTypes, err := MakeKeyVals(tableDesc, index.ColumnIDs)
+	values, err := MakeEncodedKeyVals(tableDesc, index.ColumnIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -102,14 +101,25 @@ func decodeIndex(
 			return nil, err
 		}
 	}
-	_, ok, err := DecodeIndexKey(a, tableDesc, index.ID, valTypes, values, colDirs, key)
+	_, ok, err := DecodeIndexKey(a, tableDesc, index.ID, values, colDirs, key)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, errors.Errorf("key did not match descriptor")
 	}
-	return values, nil
+
+	decodedValues := make([]parser.Datum, len(values))
+	var da DatumAlloc
+	for i, value := range values {
+		err := value.EnsureDecoded(&da)
+		if err != nil {
+			return nil, err
+		}
+		decodedValues[i] = value.Datum
+	}
+
+	return decodedValues, nil
 }
 
 func TestIndexKey(t *testing.T) {
@@ -157,7 +167,7 @@ func TestIndexKey(t *testing.T) {
 		valuesLen := randutil.RandIntInRange(rng, len(t.primaryInterleaves)+1, len(t.primaryInterleaves)+10)
 		t.primaryValues = make([]parser.Datum, valuesLen)
 		for j := range t.primaryValues {
-			t.primaryValues[j] = RandDatum(rng, ColumnType_INT, true)
+			t.primaryValues[j] = RandDatum(rng, ColumnType{Kind: ColumnType_INT}, true)
 		}
 
 		t.secondaryInterleaves = make([]ID, rng.Intn(10))
@@ -167,7 +177,7 @@ func TestIndexKey(t *testing.T) {
 		valuesLen = randutil.RandIntInRange(rng, len(t.secondaryInterleaves)+1, len(t.secondaryInterleaves)+10)
 		t.secondaryValues = make([]parser.Datum, valuesLen)
 		for j := range t.secondaryValues {
-			t.secondaryValues[j] = RandDatum(rng, ColumnType_INT, true)
+			t.secondaryValues[j] = RandDatum(rng, ColumnType{Kind: ColumnType_INT}, true)
 		}
 
 		tests = append(tests, t)

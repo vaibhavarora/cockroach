@@ -3,23 +3,50 @@
  *
  * ! = Potentially difficult to implement
  *
- * - Visualization Components
+ * - All Pages / Shared Components
+ *    - "Last Updated"
+ *    - Dropdowns
+ *      - Fix 1px offset bug
+ *    - Tables
+ *      - CSS Match to design
+ *      - Management of column widths
+ * - Cluster Page
+ *    - Alert notifications
+ *      - Mismatched/Out-of-date Version
+ *      - Help us
+ *    - Right-side Summary Section
+ *      - Link to Nodes page
+ *      - Events?
  *    - Graphs
- *      - Greyed-out display on error
- *    - Cluster health indicator
- * ! Notification Banners
- *    - Cockroach out of date
- * - Node Page
- *    ! Logs Page
- * - Layout Footer
- * ! HelpUs communication with CRL server
- *
+ *      - Tooltip when hover over title
+ *    - Code block syntax highlighting
+ *      - Choose keywords correctly
+ *      - Fix bug on direct page load
+ * - Databases Page
+ *    - Last Updated Column
+ *      - Retrieve/Filter events
+ *    - Single database page
+ *       - Table component row limit
+ *       - Route to single database
+ *    - Schema Change
+ *      - Retrieve information from backend
+ *      - Display in table list column
+ *      - Display alert on table details page
+ *    - Table details page
+ *      - Schema Change notification
+ *      - Fill out summary stats
+ *      - Back Button
+ *      - Column widths for grants table
+ * - Nodes page
+ *  - Table Style
+ *  - Add Summary Section
+ *  - Remove Link from Navigation Bar
+ * - Helpus Page
+ *  - New Navigation Bar Icon
+ *  - Header links
+ *  - New form field Appearance
  *
  * NICE TO HAVE:
- *  - "generateCacheReducer()" method; most of our data reducers are extremely
- *  similar (storing read-only, cachable data queried from the server), we could
- *  cut down on a lot of boilerplate and testing by creating such a function.
- *
  *  - Create a "NodeStatusProvider" similar to "MetricsDataProvider", allowing
  *  different components to access nodes data.
  *
@@ -32,6 +59,7 @@
  */
 
 import "nvd3/build/nv.d3.min.css!";
+import "react-select/dist/react-select.css!";
 import "build/app.css!";
 
 import * as React from "react";
@@ -39,28 +67,24 @@ import * as ReactDOM from "react-dom";
 import { Provider } from "react-redux";
 import { Router, Route, IndexRoute, IndexRedirect } from "react-router";
 
-import { databaseNameAttr, nodeIDAttr, tableNameAttr } from "./util/constants";
+import {
+  tableNameAttr, databaseNameAttr, nodeIDAttr, dashboardNameAttr,
+} from "./util/constants";
 
 import { store, history } from "./redux/state";
 import Layout from "./containers/layout";
-import Cluster from "./containers/cluster";
-import ClusterOverview from "./containers/clusterOverview";
-import ClusterEvents from "./containers/clusterEvents";
-import Databases from "./containers/databases/databases";
-import DatabaseList from "./containers/databases/databaseList";
-import DatabaseEvents from "./containers/databases/databaseEvents";
-import DatabaseDetails from "./containers/databases/databaseDetails";
-import DatabaseGrants from "./containers/databases/databaseGrants";
+import { DatabaseTablesList, DatabaseGrantsList } from "./containers/databases/databases";
 import TableDetails from "./containers/databases/tableDetails";
 import HelpUs from "./containers/helpus";
 import Nodes from "./containers/nodes";
-import NodesOverview from "./containers/nodesOverview";
 import Node from "./containers/node";
+import NodesOverview from "./containers/nodesOverview";
 import NodeOverview from "./containers/nodeOverview";
 import NodeGraphs from "./containers/nodeGraphs";
 import NodeLogs from "./containers/nodeLogs";
 import Raft from "./containers/raft";
 import RaftRanges from "./containers/raftRanges";
+import registrationSyncListener from "./services/registrationService";
 
 // tslint:disable-next-line:variable-name
 const DOMNode = document.getElementById("react-layout");
@@ -76,14 +100,13 @@ ReactDOM.render(
     <Router history={history}>
       <Route path="/" component={Layout}>
         <IndexRedirect to="cluster" />
-        <Route path="cluster" component={ Cluster }>
-          <IndexRoute component={ ClusterOverview } />
-          <Route path="events" component={ ClusterEvents } />
+        <Route path="cluster" component={ Nodes }>
+          <IndexRedirect to="all/runtime" />
+          <Route path={`all/:${dashboardNameAttr}`} component={NodeGraphs} />
+          <Route path={ `node/:${nodeIDAttr}/:${dashboardNameAttr}` } component={NodeGraphs} />
         </Route>
-        <Route path="nodes" component={ Nodes }>
-          <IndexRedirect to="overview" />
-          <Route path="overview" component={ NodesOverview } />
-          <Route path="graphs" component={ NodeGraphs } />
+        <Route path="cluster">
+          <Route path="nodes" component={ NodesOverview } />
         </Route>
         <Route path="nodes">
           // This path has to match the "nodes" route for the purpose of
@@ -95,26 +118,11 @@ ReactDOM.render(
             <Route path="logs" component={ NodeLogs } />
           </Route>
         </Route>
-        <Route path="databases" component= { Databases }>
-          <IndexRedirect to="overview" />
-          <Route path="overview" component={ DatabaseList } />
-          <Route path="events" component={ DatabaseEvents } />
-          <Route path="database" >
-            <Route path={ `:${databaseNameAttr}` } >
-              <IndexRedirect to="overview" />
-              <Route path="overview" component={ DatabaseDetails } />
-              <Route path="events" component={ DatabaseEvents } />
-              <Route path="grants" component={ DatabaseGrants } />
-              <Route path="table">
-                <Route path={ `:${tableNameAttr}` } >
-                  <IndexRedirect to="overview" />
-                  <Route path="overview" component={ TableDetails } />
-                  <Route path="events" component={ DatabaseEvents } />
-                  <Route path="grants" component={ DatabaseGrants } />
-                </Route>
-              </Route>
-            </Route>
-          </Route>
+        <Route path="databases">
+          <IndexRedirect to="tables" />
+          <Route path="tables" component={ DatabaseTablesList } />
+          <Route path="grants" component={ DatabaseGrantsList } />
+          <Route path={ `database/:${databaseNameAttr}/table/:${tableNameAttr}` } component={ TableDetails } />
         </Route>
         <Route path="help-us/reporting" component={ HelpUs } />
         <Route path="raft" component={ Raft }>
@@ -124,5 +132,8 @@ ReactDOM.render(
       </Route>
     </Router>
   </Provider>,
-  DOMNode
+  DOMNode,
 );
+
+// Subscribe store listeners.
+store.subscribe(registrationSyncListener(store));

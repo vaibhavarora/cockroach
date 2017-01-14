@@ -21,15 +21,15 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/pkg/errors"
 )
 
 func checkGauge(t *testing.T, g *metric.Gauge, e int64) {
@@ -66,7 +66,7 @@ func verifyStats(t *testing.T, mtc *multiTestContext, storeIdxSlice ...int) {
 	// non-local intent resolution.
 	for _, s := range stores {
 		m := s.Metrics()
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			if a := m.IntentCount.Value(); a != 0 {
 				return fmt.Errorf("expected intent count to be zero, was %d", a)
 			}
@@ -135,7 +135,7 @@ func verifyStats(t *testing.T, mtc *multiTestContext, storeIdxSlice ...int) {
 }
 
 func verifyRocksDBStats(t *testing.T, s *storage.Store) {
-	if err := s.ComputeMetrics(0); err != nil {
+	if err := s.ComputeMetrics(context.TODO(), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -168,8 +168,9 @@ func TestStoreMetrics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	t.Skip("TODO(mrtracy): #9204")
 
-	mtc := startMultiTestContext(t, 3)
+	mtc := &multiTestContext{}
 	defer mtc.Stop()
+	mtc.Start(t, 3)
 
 	// Flush RocksDB memtables, so that RocksDB begins using block-based tables.
 	// This is useful, because most of the stats we track don't apply to
@@ -188,7 +189,7 @@ func TestStoreMetrics(t *testing.T) {
 
 	// Perform a split, which has special metrics handling.
 	splitArgs := adminSplitArgs(roachpb.KeyMin, roachpb.Key("m"))
-	if _, err := client.SendWrapped(context.Background(), rg1(mtc.stores[0]), &splitArgs); err != nil {
+	if _, err := client.SendWrapped(context.Background(), rg1(mtc.stores[0]), splitArgs); err != nil {
 		t.Fatal(err)
 	}
 

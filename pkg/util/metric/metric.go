@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sync/atomic"
 	"time"
 
 	"github.com/VividCortex/ewma"
@@ -68,6 +69,8 @@ type PrometheusExportable interface {
 	GetLabels() []*prometheusgo.LabelPair
 	// ToPrometheusMetric returns a filled-in prometheus metric of the right type
 	// for the given metric. It does not fill in labels.
+	// The implementation must return thread-safe data to the caller, i.e.
+	// usually a copy of internal state.
 	ToPrometheusMetric() *prometheusgo.Metric
 }
 
@@ -319,12 +322,49 @@ func (c *Counter) ToPrometheusMetric() *prometheusgo.Metric {
 // A Gauge atomically stores a single integer value.
 type Gauge struct {
 	Metadata
-	metrics.Gauge
+	value *int64
+	fn    func() int64
 }
 
 // NewGauge creates a Gauge.
 func NewGauge(metadata Metadata) *Gauge {
-	return &Gauge{metadata, metrics.NewGauge()}
+	return &Gauge{metadata, new(int64), nil}
+}
+
+// NewFunctionalGauge creates a Gauge metric whose value is determined when
+// asked for by calling the provided function.
+// Note that Update, Inc, and Dec should NOT be called on a Gauge returned
+// from NewFunctionalGauge.
+func NewFunctionalGauge(metadata Metadata, f func() int64) *Gauge {
+	return &Gauge{metadata, nil, f}
+}
+
+// Snapshot returns a read-only copy of the gauge.
+func (g *Gauge) Snapshot() metrics.Gauge {
+	return metrics.GaugeSnapshot(g.Value())
+}
+
+// Update updates the gauge's value.
+func (g *Gauge) Update(v int64) {
+	atomic.StoreInt64(g.value, v)
+}
+
+// Value returns the gauge's current value.
+func (g *Gauge) Value() int64 {
+	if g.fn != nil {
+		return g.fn()
+	}
+	return atomic.LoadInt64(g.value)
+}
+
+// Inc increments the gauge's value.
+func (g *Gauge) Inc(i int64) {
+	atomic.AddInt64(g.value, i)
+}
+
+// Dec decrements the gauge's value.
+func (g *Gauge) Dec(i int64) {
+	atomic.AddInt64(g.value, -i)
 }
 
 // GetType returns the prometheus type enum for this metric.
@@ -337,13 +377,13 @@ func (g *Gauge) Inspect(f func(interface{})) { f(g) }
 
 // MarshalJSON marshals to JSON.
 func (g *Gauge) MarshalJSON() ([]byte, error) {
-	return json.Marshal(g.Gauge.Value())
+	return json.Marshal(g.Value())
 }
 
 // ToPrometheusMetric returns a filled-in prometheus metric of the right type.
 func (g *Gauge) ToPrometheusMetric() *prometheusgo.Metric {
 	return &prometheusgo.Metric{
-		Gauge: &prometheusgo.Gauge{Value: proto.Float64(float64(g.Gauge.Value()))},
+		Gauge: &prometheusgo.Gauge{Value: proto.Float64(float64(g.Value()))},
 	}
 }
 
@@ -368,13 +408,13 @@ func (g *GaugeFloat64) Inspect(f func(interface{})) { f(g) }
 
 // MarshalJSON marshals to JSON.
 func (g *GaugeFloat64) MarshalJSON() ([]byte, error) {
-	return json.Marshal(g.GaugeFloat64.Value())
+	return json.Marshal(g.Value())
 }
 
 // ToPrometheusMetric returns a filled-in prometheus metric of the right type.
 func (g *GaugeFloat64) ToPrometheusMetric() *prometheusgo.Metric {
 	return &prometheusgo.Metric{
-		Gauge: &prometheusgo.Gauge{Value: proto.Float64(g.GaugeFloat64.Value())},
+		Gauge: &prometheusgo.Gauge{Value: proto.Float64(g.Value())},
 	}
 }
 

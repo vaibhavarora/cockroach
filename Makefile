@@ -23,17 +23,21 @@ GOFLAGS :=
 # Set to 1 to use static linking for all builds (including tests).
 STATIC :=
 
+COCKROACH := ./cockroach
+
 # Variables to be overridden on the command line, e.g.
 #   make test PKG=./pkg/storage TESTFLAGS=--vmodule=raft=1
 PKG          := ./pkg/...
 TAGS         :=
 TESTS        := .
+BENCHES      := -
 TESTTIMEOUT  := 2m
 RACETIMEOUT  := 10m
 BENCHTIMEOUT := 5m
 TESTFLAGS    :=
-STRESSFLAGS  := -stderr -maxfails 1
+STRESSFLAGS  :=
 DUPLFLAGS    := -t 100
+STARTFLAGS   := -s type=mem,size=1GiB --alsologtostderr
 BUILDMODE    := install
 SUFFIX       :=
 export GOPATH := $(realpath ../../../..)
@@ -73,6 +77,12 @@ all: build test check
 build: BUILDMODE = build -i -o cockroach$(SUFFIX)
 build: install
 
+.PHONY: start
+start: build
+start:
+	$(COCKROACH) start $(STARTFLAGS)
+
+
 .PHONY: install
 install: LDFLAGS += $(shell GOPATH=${GOPATH} build/ldflags.sh)
 install:
@@ -98,7 +108,11 @@ gotestdashi:
 
 .PHONY: test
 test: gotestdashi
+ifeq ($(BENCHES),-)
 	$(GO) test $(GOFLAGS) -tags '$(TAGS)' -run "$(TESTS)" -timeout $(TESTTIMEOUT) $(PKG) $(TESTFLAGS)
+else
+	$(GO) test $(GOFLAGS) -tags '$(TAGS)' -run "$(TESTS)" -bench "$(BENCHES)" -timeout $(TESTTIMEOUT) $(PKG) $(TESTFLAGS)
+endif
 
 testrace: GOFLAGS += -race
 testrace: TESTTIMEOUT := $(RACETIMEOUT)
@@ -107,7 +121,11 @@ testrace: test
 .PHONY: testslow
 testslow: TESTFLAGS += -v
 testslow: gotestdashi
+ifeq ($(BENCHES),-)
 	$(GO) test $(GOFLAGS) -tags '$(TAGS)' -run "$(TESTS)" -timeout $(TESTTIMEOUT) $(PKG) $(TESTFLAGS) | grep -F ': Test' | sed -E 's/(--- PASS: |\(|\))//g' | awk '{ print $$2, $$1 }' | sort -rn | head -n 10
+else
+	$(GO) test $(GOFLAGS) -tags '$(TAGS)' -run "$(TESTS)" -bench "$(BENCHES)" -timeout $(TESTTIMEOUT) $(PKG) $(TESTFLAGS) | grep -F ': Test' | sed -E 's/(--- PASS: |\(|\))//g' | awk '{ print $$2, $$1 }' | sort -rn | head -n 10
+endif
 
 .PHONY: testraceslow
 testraceslow: GOFLAGS += -race
@@ -119,31 +137,45 @@ testraceslow: testslow
 # github.com/cockroachdb/cockroach/gossip), and this target needs to create
 # the test binary in the correct location and `cd` to the correct directory.
 # This is handled by having `go list` produce the command line.
-# - PKG may also be recursive (e.g. './...'). This is also handled by piping
+# - PKG may also be recursive (e.g. './pkg/...'). This is also handled by piping
 # through `go list`.
 # - PKG may not contain any tests! This is handled with an `if` statement that
 # checks for the presence of a test binary before running `stress` on it.
 .PHONY: stress
 stress:
-	$(GO) list -tags '$(TAGS)' -f \
-	'$(GO) test -v $(GOFLAGS) -tags '\''$(TAGS)'\'' -ldflags '\''$(LDFLAGS)'\'' -i -c {{.ImportPath}} -o {{.Dir}}/stress.test && (cd {{.Dir}} && if [ -f stress.test ]; then stress $(STRESSFLAGS) ./stress.test -test.run $(TESTS) -test.timeout $(TESTTIMEOUT) $(TESTFLAGS); fi)' $(PKG) | \
-	$(SHELL)
+ifeq ($(BENCHES),-)
+	$(GO) list -tags '$(TAGS)' -f '$(GO) test -v $(GOFLAGS) -tags '\''$(TAGS)'\'' -ldflags '\''$(LDFLAGS)'\'' -i -c {{.ImportPath}} -o {{.Dir}}/stress.test && (cd {{.Dir}} && if [ -f stress.test ]; then stress $(STRESSFLAGS) ./stress.test -test.run '\''$(TESTS)'\'' -test.timeout $(TESTTIMEOUT) $(TESTFLAGS); fi)' $(PKG) | $(SHELL)
+else
+	$(GO) list -tags '$(TAGS)' -f '$(GO) test -v $(GOFLAGS) -tags '\''$(TAGS)'\'' -ldflags '\''$(LDFLAGS)'\'' -i -c {{.ImportPath}} -o {{.Dir}}/stress.test && (cd {{.Dir}} && if [ -f stress.test ]; then stress $(STRESSFLAGS) ./stress.test -test.run '\''$(TESTS)'\'' -test.bench '\''$(BENCHES)'\'' -test.timeout $(TESTTIMEOUT) $(TESTFLAGS); fi)' $(PKG) | $(SHELL)
+endif
 
 .PHONY: stressrace
 stressrace: GOFLAGS += -race
 stressrace: TESTTIMEOUT := $(RACETIMEOUT)
 stressrace: stress
 
+# We're stuck copy-pasting this command from the test target because `ifeq`
+# clauses are all executed by Make before any targets are ever run. That means
+# that setting the BENCHES variable here doesn't effect the `ifeq` evaluation in
+# the test target. Thus, if we were to simply set BENCHES and declare the test
+# target as a prerequisite, we'd never actually run the benchmarks unless an
+# override for BENCHES was specified on the command-line (which would take
+# effect during `ifeq` processing). The alternative to copy-pasting would be to
+# use shell-conditionals in the test target, which would quickly make the output
+# of running `make test` or `make bench` very ugly.
+# If golang/go#18010 is ever fixed, we can just get rid of all the `ifeq`s,
+# always include -bench, and switch this back to specifying test as a prereq.
 .PHONY: bench
+bench: BENCHES := .
+bench: TESTS := -
+bench: TESTTIMEOUT := $(BENCHTIMEOUT)
 bench: gotestdashi
-	$(GO) test $(GOFLAGS) -tags '$(TAGS)' -run - -bench "$(TESTS)" -timeout $(BENCHTIMEOUT) $(PKG) $(TESTFLAGS)
-
-.PHONY: coverage
-coverage: gotestdashi
-	$(GO) test $(GOFLAGS) -tags '$(TAGS)' -cover -run "$(TESTS)" $(PKG) $(TESTFLAGS)
+	$(GO) test $(GOFLAGS) -tags '$(TAGS)' -run "$(TESTS)" -bench "$(BENCHES)" -timeout $(TESTTIMEOUT) $(PKG) $(TESTFLAGS)
 
 .PHONY: upload-coverage
 upload-coverage:
+	$(GO) install ./vendor/github.com/wadey/gocovmerge
+	$(GO) install ./vendor/github.com/mattn/goveralls
 	@build/upload-coverage.sh
 
 .PHONY: acceptance
@@ -184,8 +216,6 @@ protobuf:
 
 include .go-version
 
-ifneq ($(SKIP_BOOTSTRAP),1)
-
 # If we're in a git worktree, the git hooks directory may not be in our root,
 # so we ask git for the location.
 #
@@ -205,14 +235,13 @@ GLOCK := ../../../../bin/glock
 #        |~ GOPATH/src/github.com/cockroachdb
 
 $(GLOCK):
-	$(GO) get github.com/tamird/glock
+	$(GO) install ./vendor/github.com/robfig/glock
 
 # Update the git hooks and run the bootstrap script whenever any
 # of them (or their dependencies) change.
-.bootstrap: $(GITHOOKS) $(GLOCK) GLOCKFILE
-	@unset GIT_WORK_TREE; $(GLOCK) sync github.com/cockroachdb/cockroach
+.bootstrap: $(GITHOOKS) $(GLOCK) GLOCKFILE glide.lock
+	git submodule update --init
+	@unset GIT_WORK_TREE; $(GLOCK) sync -n < GLOCKFILE
 	touch $@
 
 include .bootstrap
-
-endif

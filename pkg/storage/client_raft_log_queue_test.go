@@ -19,17 +19,17 @@ package storage_test
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"testing"
-	"time"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/pkg/errors"
 )
 
 // TestRaftLogQueue verifies that the raft log queue correctly truncates the
@@ -37,7 +37,7 @@ import (
 func TestRaftLogQueue(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	var mtc multiTestContext
+	mtc := &multiTestContext{}
 
 	// Set maxBytes to something small so we can trigger the raft log truncation
 	// without adding 64MB of logs.
@@ -48,17 +48,17 @@ func TestRaftLogQueue(t *testing.T) {
 
 	// Turn off raft elections so the raft leader won't change out from under
 	// us in this test.
-	sc := storage.TestStoreConfig()
-	sc.RaftTickInterval = time.Hour * 24
+	sc := storage.TestStoreConfig(nil)
+	sc.RaftTickInterval = math.MaxInt32
 	sc.RaftElectionTimeoutTicks = 1000000
 	mtc.storeConfig = &sc
 
-	mtc.Start(t, 3)
 	defer mtc.Stop()
+	mtc.Start(t, 3)
 
 	// Write a single value to ensure we have a leader.
 	pArgs := putArgs([]byte("key"), []byte("value"))
-	if _, err := client.SendWrapped(context.Background(), rg1(mtc.stores[0]), &pArgs); err != nil {
+	if _, err := client.SendWrapped(context.Background(), rg1(mtc.stores[0]), pArgs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -82,7 +82,7 @@ func TestRaftLogQueue(t *testing.T) {
 	value := bytes.Repeat([]byte("a"), 1000) // 1KB
 	for size := int64(0); size < 2*maxBytes; size += int64(len(value)) {
 		pArgs = putArgs([]byte(fmt.Sprintf("key-%d", size)), value)
-		if _, err := client.SendWrapped(context.Background(), rg1(mtc.stores[0]), &pArgs); err != nil {
+		if _, err := client.SendWrapped(context.Background(), rg1(mtc.stores[0]), pArgs); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -90,7 +90,7 @@ func TestRaftLogQueue(t *testing.T) {
 	// Sadly, occasionally the queue has a race with the force processing so
 	// this succeeds within will captures those rare cases.
 	var afterTruncationIndex uint64
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		// Force a truncation check.
 		for _, store := range mtc.stores {
 			store.ForceRaftLogScanAndProcess()

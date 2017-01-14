@@ -163,13 +163,13 @@ func TestMakeTableDescIndexes(t *testing.T) {
 			},
 			[]sqlbase.IndexDescriptor{
 				{
-					Name:              "test_a_key",
-					ID:                2,
-					Unique:            true,
-					ColumnNames:       []string{"a"},
-					ColumnIDs:         []sqlbase.ColumnID{1},
-					ImplicitColumnIDs: []sqlbase.ColumnID{2},
-					ColumnDirections:  []sqlbase.IndexDescriptor_Direction{sqlbase.IndexDescriptor_ASC},
+					Name:             "test_a_key",
+					ID:               2,
+					Unique:           true,
+					ColumnNames:      []string{"a"},
+					ColumnIDs:        []sqlbase.ColumnID{1},
+					ExtraColumnIDs:   []sqlbase.ColumnID{2},
+					ColumnDirections: []sqlbase.IndexDescriptor_Direction{sqlbase.IndexDescriptor_ASC},
 				},
 			},
 		},
@@ -197,13 +197,13 @@ func TestMakeTableDescIndexes(t *testing.T) {
 			},
 			[]sqlbase.IndexDescriptor{
 				{
-					Name:              "c",
-					ID:                2,
-					Unique:            true,
-					ColumnNames:       []string{"b"},
-					ColumnIDs:         []sqlbase.ColumnID{2},
-					ImplicitColumnIDs: []sqlbase.ColumnID{1},
-					ColumnDirections:  []sqlbase.IndexDescriptor_Direction{sqlbase.IndexDescriptor_ASC},
+					Name:             "c",
+					ID:               2,
+					Unique:           true,
+					ColumnNames:      []string{"b"},
+					ColumnIDs:        []sqlbase.ColumnID{2},
+					ExtraColumnIDs:   []sqlbase.ColumnID{1},
+					ColumnDirections: []sqlbase.IndexDescriptor_Direction{sqlbase.IndexDescriptor_ASC},
 				},
 			},
 		},
@@ -255,8 +255,8 @@ func TestRemoveLeaseIfExpiring(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	p := planner{session: &Session{context: context.Background()}}
-	mc := hlc.NewManualClock(0)
-	p.leaseMgr = &LeaseManager{LeaseStore: LeaseStore{clock: hlc.NewClock(mc.UnixNano)}}
+	mc := hlc.NewManualClock(123)
+	p.leaseMgr = &LeaseManager{LeaseStore: LeaseStore{clock: hlc.NewClock(mc.UnixNano, time.Nanosecond)}}
 	p.leases = make([]*LeaseState, 0)
 	txn := client.Txn{Context: context.Background()}
 	p.setTxn(&txn)

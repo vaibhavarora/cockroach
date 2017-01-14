@@ -19,18 +19,19 @@ package stop_test
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	_ "github.com/cockroachdb/cockroach/pkg/util/log" // for flags
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/pkg/errors"
 )
 
 func TestStopper(t *testing.T) {
@@ -45,26 +46,26 @@ func TestStopper(t *testing.T) {
 	})
 
 	go func() {
-		<-s.ShouldStop()
-		select {
-		case <-waiting:
-			t.Fatal("expected stopper to have blocked")
-		case <-time.After(1 * time.Millisecond):
-			// Expected.
-		}
-		close(running)
-		select {
-		case <-waiting:
-			// Success.
-		case <-time.After(100 * time.Millisecond):
-			t.Fatal("stopper should have finished waiting")
-		}
-		close(cleanup)
+		s.Stop()
+		close(waiting)
+		<-cleanup
 	}()
 
-	s.Stop()
-	close(waiting)
-	<-cleanup
+	<-s.ShouldStop()
+	select {
+	case <-waiting:
+		t.Fatal("expected stopper to have blocked")
+	case <-time.After(100 * time.Millisecond):
+		// Expected.
+	}
+	close(running)
+	select {
+	case <-waiting:
+		// Success.
+	case <-time.After(time.Second):
+		t.Fatal("stopper should have finished waiting")
+	}
+	close(cleanup)
 }
 
 type blockingCloser struct {
@@ -92,20 +93,20 @@ func TestStopperIsStopped(t *testing.T) {
 
 	select {
 	case <-s.ShouldStop():
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Fatal("stopper should have finished waiting")
 	}
 	select {
 	case <-s.IsStopped():
 		t.Fatal("expected blocked closer to prevent stop")
-	case <-time.After(1 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		// Expected.
 	}
 	bc.Unblock()
 	select {
 	case <-s.IsStopped():
 		// Expected
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Fatal("stopper should have finished stopping")
 	}
 }
@@ -140,7 +141,7 @@ func TestStopperStartFinishTasks(t *testing.T) {
 		select {
 		case <-s.ShouldStop():
 			t.Fatal("expected stopper to be quiesceing")
-		case <-time.After(1 * time.Millisecond):
+		case <-time.After(100 * time.Millisecond):
 			// Expected.
 		}
 	}); err != nil {
@@ -149,7 +150,7 @@ func TestStopperStartFinishTasks(t *testing.T) {
 	select {
 	case <-s.ShouldStop():
 		// Success.
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Fatal("stopper should be ready to stop")
 	}
 }
@@ -168,7 +169,7 @@ func TestStopperRunWorker(t *testing.T) {
 	select {
 	case <-closer:
 		// Success.
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Fatal("stopper should be ready to stop")
 	}
 }
@@ -226,7 +227,7 @@ func TestStopperQuiesce(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Errorf("timed out waiting for stop")
 	}
 }
@@ -289,7 +290,7 @@ func TestStopperNumTasks(t *testing.T) {
 		// Close the channel to let the task proceed.
 		close(c)
 		expNum := len(tasks[i+1:])
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			if nt := s.NumTasks(); nt != expNum {
 				return errors.Errorf("%d: stopper should have %d running tasks, got %d", i, expNum, nt)
 			}
@@ -325,6 +326,7 @@ func TestStopperRunTaskPanic(t *testing.T) {
 			_ = s.RunLimitedAsyncTask(
 				context.Background(),
 				make(chan struct{}, 1),
+				true, /* wait */
 				func(_ context.Context) { explode() },
 			)
 		},
@@ -374,41 +376,41 @@ func TestStopperShouldQuiesce(t *testing.T) {
 	}
 
 	go func() {
-		// The ShouldQuiesce() channel should close as soon as the stopper is
-		// Stop()ed.
-		<-s.ShouldQuiesce()
-		// However, the ShouldStop() channel should still be blocked because the
-		// async task started above is still running, meaning we haven't quiesceed
-		// yet.
-		select {
-		case <-s.ShouldStop():
-			t.Fatal("expected ShouldStop() to block until quiesceing complete")
-		default:
-			// Expected.
-		}
-		// After completing the running task, the ShouldStop() channel should
-		// now close.
-		close(runningTask)
-		<-s.ShouldStop()
-		// However, the working running above prevents the call to Stop() from
-		// returning; it blocks until the runner's goroutine is finished. We
-		// use the "waiting" channel to detect this.
-		select {
-		case <-waiting:
-			t.Fatal("expected stopper to have blocked")
-		default:
-			// Expected.
-		}
-		// Finally, close the "running" channel, which should cause the original
-		// call to Stop() to return.
-		close(running)
-		<-waiting
-		close(cleanup)
+		s.Stop()
+		close(waiting)
+		<-cleanup
 	}()
 
-	s.Stop()
-	close(waiting)
-	<-cleanup
+	// The ShouldQuiesce() channel should close as soon as the stopper is
+	// Stop()ed.
+	<-s.ShouldQuiesce()
+	// However, the ShouldStop() channel should still be blocked because the
+	// async task started above is still running, meaning we haven't quiesceed
+	// yet.
+	select {
+	case <-s.ShouldStop():
+		t.Fatal("expected ShouldStop() to block until quiesceing complete")
+	default:
+		// Expected.
+	}
+	// After completing the running task, the ShouldStop() channel should
+	// now close.
+	close(runningTask)
+	<-s.ShouldStop()
+	// However, the working running above prevents the call to Stop() from
+	// returning; it blocks until the runner's goroutine is finished. We
+	// use the "waiting" channel to detect this.
+	select {
+	case <-waiting:
+		t.Fatal("expected stopper to have blocked")
+	default:
+		// Expected.
+	}
+	// Finally, close the "running" channel, which should cause the original
+	// call to Stop() to return.
+	close(running)
+	<-waiting
+	close(cleanup)
 }
 
 func TestStopperRunLimitedAsyncTask(t *testing.T) {
@@ -417,8 +419,9 @@ func TestStopperRunLimitedAsyncTask(t *testing.T) {
 	defer s.Stop()
 
 	const maxConcurrency = 5
-	const duration = 10 * time.Millisecond
+	const numTasks = maxConcurrency * 3
 	sem := make(chan struct{}, maxConcurrency)
+	taskSignal := make(chan struct{}, maxConcurrency)
 	var mu syncutil.Mutex
 	concurrency := 0
 	peakConcurrency := 0
@@ -431,16 +434,34 @@ func TestStopperRunLimitedAsyncTask(t *testing.T) {
 			peakConcurrency = concurrency
 		}
 		mu.Unlock()
-		time.Sleep(duration)
+		<-taskSignal
 		mu.Lock()
 		concurrency--
 		mu.Unlock()
 		wg.Done()
 	}
+	go func() {
+		// Loop until the desired peak concurrency has been reached.
+		for {
+			mu.Lock()
+			c := concurrency
+			mu.Unlock()
+			if c >= maxConcurrency {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		// Then let the rest of the async tasks finish quickly.
+		for i := 0; i < numTasks; i++ {
+			taskSignal <- struct{}{}
+		}
+	}()
 
-	for i := 0; i < maxConcurrency*3; i++ {
+	for i := 0; i < numTasks; i++ {
 		wg.Add(1)
-		if err := s.RunLimitedAsyncTask(context.TODO(), sem, f); err != nil {
+		if err := s.RunLimitedAsyncTask(
+			context.TODO(), sem, true /* wait */, f,
+		); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -451,6 +472,72 @@ func TestStopperRunLimitedAsyncTask(t *testing.T) {
 	if peakConcurrency != maxConcurrency {
 		t.Fatalf("expected peak concurrency %d to equal max concurrency %d",
 			peakConcurrency, maxConcurrency)
+	}
+
+	sem = make(chan struct{}, 1)
+	sem <- struct{}{}
+	err := s.RunLimitedAsyncTask(
+		context.TODO(), sem, false /* wait */, func(_ context.Context) {
+		},
+	)
+	if err != stop.ErrThrottled {
+		t.Fatalf("expected %v; got %v", stop.ErrThrottled, err)
+	}
+}
+
+func TestStopperRunLimitedAsyncTaskCancelContext(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	s := stop.NewStopper()
+	defer s.Stop()
+
+	const maxConcurrency = 5
+	sem := make(chan struct{}, maxConcurrency)
+
+	// Synchronization channels.
+	workersDone := make(chan struct{})
+	workerStarted := make(chan struct{})
+
+	var workersRun int32
+	var workersCancelled int32
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	f := func(ctx context.Context) {
+		atomic.AddInt32(&workersRun, 1)
+		workerStarted <- struct{}{}
+		<-ctx.Done()
+	}
+
+	// This loop will block when the semaphore is filled.
+	if err := s.RunAsyncTask(ctx, func(ctx context.Context) {
+		for i := 0; i < maxConcurrency*2; i++ {
+			if err := s.RunLimitedAsyncTask(ctx, sem, true, f); err != nil {
+				if err != context.Canceled {
+					t.Fatal(err)
+				}
+				atomic.AddInt32(&workersCancelled, 1)
+			}
+		}
+		close(workersDone)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure that the semaphore fills up, leaving maxConcurrency workers
+	// waiting for context cancelation.
+	for i := 0; i < maxConcurrency; i++ {
+		<-workerStarted
+	}
+
+	// Cancel the context, which should result in all subsequent attempts to
+	// queue workers failing.
+	cancel()
+	<-workersDone
+
+	if a, e := atomic.LoadInt32(&workersRun), int32(maxConcurrency); a != e {
+		t.Fatalf("%d workers ran before context close, expected exactly %d", a, e)
+	}
+	if a, e := atomic.LoadInt32(&workersCancelled), int32(maxConcurrency); a != e {
+		t.Fatalf("%d workers cancelled after context close, expected exactly %d", a, e)
 	}
 }
 
