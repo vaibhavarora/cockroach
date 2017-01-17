@@ -62,7 +62,7 @@ func callbenchmark() {
 		log.Fatal(err)
 	}
 	binary := strings.TrimSpace(string(path)) + "/contention/contention"
-
+	//log.Printf("binary %s", binary)
 	for concurrency <= *maxconcurrency {
 
 		arg1 := "-max-transfer=" + strconv.Itoa(maxTransfer)
