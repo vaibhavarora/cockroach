@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"github.com/cockroachdb/cockroach/benchmark/concurrency/shared"
+	"github.com/cockroachdb/cockroach/benchmark/pkg/stats"
 	"log"
 	"net"
 	"net/rpc"
@@ -28,13 +28,13 @@ var maxconcurrency = flag.Int("max", 200, "Maximum concurrency level to test.")
 var concurrencystep = flag.Int("step", 5, "Incremental for concurrency")
 var startconcurrency = flag.Int("start", 1, "start of concurrency")
 
-var stats = make(map[int]data)
+//var stats = make(map[int]data)
 var optimalConcurrency = 1
 var optimaltransactionrate float64
 
-func (l *Listener) CollectStats(info *shared.Data, ack *bool) error {
-	stat := data{info.Success, info.Retries, info.Transactionrate}
-	stats[info.Concurrency] = stat
+func (l *Listener) CollectStats(info *stats.Data, ack *bool) error {
+	//	stat := data{info.Success, info.Retries, info.Transactionrate}
+	//	stats[info.Concurrency] = stat
 
 	if info.Transactionrate > optimaltransactionrate {
 		optimaltransactionrate = info.Transactionrate
@@ -61,7 +61,7 @@ func callbenchmark() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	binary := strings.TrimSpace(string(path)) + "/contention/contention"
+	binary := strings.TrimSpace(string(path)) + "/base/base"
 	//log.Printf("binary %s", binary)
 	for concurrency <= *maxconcurrency {
 
@@ -108,7 +108,7 @@ func main() {
 
 	go func() {
 		<-sigs
-		log.Printf("Optimal Cncurrency is %d where Transaction rate was %v, suucessful transactions were %d and retires were %d", optimalConcurrency, optimaltransactionrate, stats[optimalConcurrency].Success, stats[optimalConcurrency].Retries)
+		//log.Printf("Optimal Cncurrency is %d where Transaction rate was %v, suucessful transactions were %d and retires were %d", optimalConcurrency, optimaltransactionrate, stats[optimalConcurrency].Success, stats[optimalConcurrency].Retries)
 		os.Exit(0)
 	}()
 
