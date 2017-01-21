@@ -22,6 +22,7 @@ artifacts
 # Various `sed -i~` invocations in our scripts.
 *~
 
+benchmark/base/base
 benchmark/contention/contention
 benchmark/concurrency/concurrency
 benchmark/clearDB/clearDB

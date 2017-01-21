@@ -42,7 +42,8 @@ func (l *Listener) CollectStats(info *stats.Data, ack *bool) error {
 	//		optimaltransactionrate = info.Transactionrate
 	//		optimalConcurrency = info.Concurrency
 	//	}
-	log.Printf("Contention %s : Transaction rate %v ,Total Success %v , Total Retries %v", info.Contention, info.Transactionrate, info.Success, info.Retries)
+	//log.Printf("Contention %s : Transaction rate %v ,Total Success %v , Total Retries %v", info.Contention, info.Transactionrate, info.Success, info.Retries)
+	log.Printf("Contention %s : Transaction rate %v ,Total Success %v , Total Retries %v, Average read time %v, Average write time %v, Average time for transaction(without retires) %v Average time for transaction ( with retries ) %v", info.Contention, info.Transactionrate, info.Success, info.Retries, info.Avgread, info.Avgwrite, info.Tnxwithoutreties, info.Trxwithretries)
 	return nil
 }
 
@@ -67,7 +68,7 @@ func callbenchmark() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	binary := strings.TrimSpace(string(path)) + "/contention/contention"
+	binary := strings.TrimSpace(string(path)) + "/base/base"
 	//log.Printf("binary %s", binary)
 	for contention1 <= 90 {
 
@@ -83,19 +84,21 @@ func callbenchmark() {
 		arg6 := "-report-concurrency=true"
 		arg7 := "-concurrency=" + strconv.Itoa(*concurrency)
 
-		cmd := exec.Command(binary, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
-		//log.Printf("cmd is %s", strings.Join(cmd.Args, " "))
-		var out bytes.Buffer
-		var stderr bytes.Buffer
-		cmd.Stdout = &out
-		cmd.Stderr = &stderr
-		time.Sleep(100 * time.Millisecond)
-		err = cmd.Run()
-		if err != nil {
-			fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
-			log.Fatal(err)
-		}
+		for i := 0; i < 5; i++ {
 
+			cmd := exec.Command(binary, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+			//log.Printf("cmd is %s", strings.Join(cmd.Args, " "))
+			var out bytes.Buffer
+			var stderr bytes.Buffer
+			cmd.Stdout = &out
+			cmd.Stderr = &stderr
+			time.Sleep(100 * time.Millisecond)
+			err = cmd.Run()
+			if err != nil {
+				fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+				log.Fatal(err)
+			}
+		}
 		//log.Printf("done with concurrency %d", concurrency)
 		contention1 += 10
 		contention2 -= 10

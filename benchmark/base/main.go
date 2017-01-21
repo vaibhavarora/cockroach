@@ -344,8 +344,15 @@ CREATE TABLE IF NOT EXISTS account (
 		if err != nil {
 			log.Fatal(err)
 		}
+		successes := atomic.LoadInt32(&successCount)
+		d := time.Duration(successes)
+		read := time.Duration(atomic.LoadInt64(&aggr.read))
+		write := time.Duration(atomic.LoadInt64(&aggr.write))
+		totalWithRetries := time.Duration(atomic.LoadInt64(&aggr.totalWithRetries))
+		total := time.Duration(atomic.LoadInt64(&aggr.total))
 
-		stat := &stats.Data{*concurrency, int(atomic.LoadInt32(&successCount)), int(atomic.LoadInt32(&aggr.retries)), *contention, float64(atomic.LoadInt32(&successCount)) / totaltime.Seconds()}
+		stat := &stats.Data{*concurrency, int(atomic.LoadInt32(&successCount)), int(atomic.LoadInt32(&aggr.retries)), *contentionratio, time.Duration(read / d), time.Duration(write / d), time.Duration(totalWithRetries / d), time.Duration(total / d), float64(atomic.LoadInt32(&successCount)) / totaltime.Seconds()}
+
 		var reply bool
 		err = client.Call("Listener.CollectStats", stat, &reply)
 		if err != nil {
