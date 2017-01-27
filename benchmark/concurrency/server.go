@@ -49,8 +49,8 @@ func callbenchmark() {
 	concurrency := *startconcurrency
 	// everything is set to its default values as in main program
 	maxTransfer := 100
-	numTransfers := 50000
-	numAccounts := 50000
+	numTransfers := 250000
+	numAccounts := 100000
 	contention := "low"
 	contentionratio := "50:50"
 	err := os.Chdir("../")

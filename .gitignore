@@ -26,3 +26,4 @@ benchmark/base/base
 benchmark/contention/contention
 benchmark/concurrency/concurrency
 benchmark/clearDB/clearDB
+/bin/

@@ -197,8 +197,8 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	dbURL := "postgresql://root@pacific:26257/bank2?sslmode=disable"
+	dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
+	//dbURL := "postgresql://root@pacific:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
 		dbURL = flag.Arg(0)

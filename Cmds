@@ -1,0 +1,5 @@
+Cmds
+
+To build 
+build/builder.sh make build
+build/builder.sh make install
