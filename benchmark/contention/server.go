@@ -25,6 +25,8 @@ type data struct {
 type Listener int
 
 var concurrency = flag.Int("concurrency", 200, "Concurrency level to test.")
+var concurrency_start = flag.String("concurrency-start", "50:50", "Start of concurrency ratio")
+var concurrency_end = flag.String("concurrency-end", "90:10", "End of concurrency ratio")
 
 //var concurrencystep = flag.Int("step", 5, "Incremental for concurrency")
 //var startconcurrency = flag.Int("start", 1, "start of concurrency")
@@ -54,8 +56,11 @@ func callbenchmark() {
 	numTransfers := 250000
 	numAccounts := 100000
 	contention := "low"
-	contention1 := 50
-	contention2 := 50
+	c_s := strings.Split(*concurrency_start, ":")
+	c_e := strings.Split(*concurrency_end, ":")
+	contention1, _ := strconv.Atoi(c_s[0])
+	contention2, _ := strconv.Atoi(c_s[1])
+	contention_max, _ := strconv.Atoi(c_e[0])
 	contentiona := strconv.Itoa(contention1)
 	contentionb := strconv.Itoa(contention2)
 	contentionratio := contentiona + ":" + contentionb
@@ -71,7 +76,7 @@ func callbenchmark() {
 	}
 	binary := strings.TrimSpace(string(path)) + "/base/base"
 	//log.Printf("binary %s", binary)
-	for contention1 <= 90 {
+	for contention1 <= contention_max {
 
 		contentiona = strconv.Itoa(contention1)
 		contentionb = strconv.Itoa(contention2)
