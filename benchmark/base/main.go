@@ -48,6 +48,7 @@ var balanceCheckInterval = flag.Duration("balance-check-interval", time.Second, 
 var contentionratio = flag.String("contention-ratio", "50:50", "AccountPercentage:Contention percentage")
 var reportConcurrency = flag.Bool("report-concurrency", false, "{ true | false }")
 var clearentries = flag.Bool("new-entries", false, "{ true | false }")
+var warmuptnxs = flag.Int("warm-up-tnx", 0, "Number of Transactions(2 reads each) for warming up")
 
 var txnCount int32
 var successCount int32
@@ -78,6 +79,37 @@ func getAccount() int {
 	} else {
 		return random(contentionAccounts, *numAccounts)
 	}
+}
+
+// Reads to warm up the database cache( if there is any) to elemitate the effect of cache on bechmark
+func warm_up_tnxs(db *sql.DB, number_of_tnx int) {
+	tnx_count := 0
+	fmt.Printf("Performing Warm up reads")
+
+	for tnx_count <= number_of_tnx {
+		account1 := random(1, *numAccounts)
+		account2 := random(1, *numAccounts)
+		for account1 == account2 {
+			account2 = random(1, *numAccounts)
+		}
+		if err, _ := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
+			_, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1, $2)`, account1, account2)
+			if err != nil {
+				//log.Printf("read error %v , tnx %v", err, tx)
+				//atomic.AddInt32(&aggr.aborts, 1)
+				return err
+			}
+			return nil
+			// we dont bother with the content of the response
+		}); err != nil {
+			log.Printf("failed transaction: %v", err)
+
+			continue
+		}
+		tnx_count += 1
+	}
+	fmt.Printf("Done with Warm up reads")
+
 }
 
 func moveMoney(db *sql.DB, aggr *measurement) {
@@ -291,6 +323,10 @@ CREATE TABLE IF NOT EXISTS account (
 		log.Fatal(err)
 	}
 	contentionPercentage = contentionPer
+
+	if *warmuptnxs > 0 {
+		warm_up_tnxs(db, *warmuptnxs)
+	}
 
 	var aggr measurement
 	var lastSuccesses int32

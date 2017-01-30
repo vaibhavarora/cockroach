@@ -59,6 +59,7 @@ func callbenchmark() {
 	contentiona := strconv.Itoa(contention1)
 	contentionb := strconv.Itoa(contention2)
 	contentionratio := contentiona + ":" + contentionb
+	warm_up_tnxs := numTransfers
 
 	err := os.Chdir("../")
 	if err != nil {
@@ -83,10 +84,11 @@ func callbenchmark() {
 		arg5 := "-contention-ratio=" + contentionratio
 		arg6 := "-report-concurrency=true"
 		arg7 := "-concurrency=" + strconv.Itoa(*concurrency)
+		arg8 := "-warm-up-tnx=" + strconv.Itoa(warm_up_tnxs)
 
 		for i := 0; i < 5; i++ {
 
-			cmd := exec.Command(binary, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+			cmd := exec.Command(binary, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
 			//log.Printf("cmd is %s", strings.Join(cmd.Args, " "))
 			var out bytes.Buffer
 			var stderr bytes.Buffer
