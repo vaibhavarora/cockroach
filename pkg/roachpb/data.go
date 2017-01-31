@@ -678,9 +678,11 @@ func NewTransaction(
 			Priority:  MakePriority(userPriority),
 			Sequence:  1,
 		},
-		Name:          name,
-		OrigTimestamp: now,
-		MaxTimestamp:  now.Add(maxOffset, 0),
+		Name:                       name,
+		OrigTimestamp:              now,
+		MaxTimestamp:               now.Add(maxOffset, 0),
+		DynamicTimestampLowerBound: hlc.ZeroTimestamp,
+		DynamicTimestampUpperBound: hlc.MaxTimestamp,
 	}
 }
 
@@ -895,6 +897,8 @@ func (t *Transaction) Update(o *Transaction) {
 	if len(o.Intents) > 0 {
 		t.Intents = o.Intents
 	}
+	t.DynamicTimestampLowerBound.Backward(o.DynamicTimestampLowerBound)
+	t.DynamicTimestampUpperBound.Forward(o.DynamicTimestampUpperBound)
 }
 
 // UpgradePriority sets transaction priority to the maximum of current

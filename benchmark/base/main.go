@@ -57,6 +57,8 @@ var initialSystemBalance int
 var contentionAccounts int
 var contentionPercentage int
 
+var warmupcounts int32
+
 type measurement struct {
 	read, write, total, totalWithRetries, commit int64
 	retries                                      int32
@@ -82,11 +84,11 @@ func getAccount() int {
 }
 
 // Reads to warm up the database cache( if there is any) to elemitate the effect of cache on bechmark
-func warm_up_tnxs(db *sql.DB, number_of_tnx int) {
-	tnx_count := 0
+func warm_up_tnxs(db *sql.DB, number_of_tnx int32) {
+
 	fmt.Printf("Performing Warm up reads")
 
-	for tnx_count <= number_of_tnx {
+	for atomic.LoadInt32(&warmupcounts) <= number_of_tnx {
 		account1 := random(1, *numAccounts)
 		account2 := random(1, *numAccounts)
 		for account1 == account2 {
@@ -106,9 +108,9 @@ func warm_up_tnxs(db *sql.DB, number_of_tnx int) {
 
 			continue
 		}
-		tnx_count += 1
+		atomic.AddInt32(&warmupcounts, 1)
 	}
-	fmt.Printf("Done with Warm up reads")
+	//fmt.Printf("Done with Warm up reads")
 
 }
 
@@ -229,8 +231,8 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	//dbURL := "postgresql://root@pacific:26257/bank2?sslmode=disable"
+	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
+	dbURL := "postgresql://root@pacific:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
 		dbURL = flag.Arg(0)
@@ -325,7 +327,10 @@ CREATE TABLE IF NOT EXISTS account (
 	contentionPercentage = contentionPer
 
 	if *warmuptnxs > 0 {
-		warm_up_tnxs(db, *warmuptnxs)
+		for i := 0; i < *concurrency; i++ {
+			go warm_up_tnxs(db, int32(*warmuptnxs))
+		}
+
 	}
 
 	var aggr measurement

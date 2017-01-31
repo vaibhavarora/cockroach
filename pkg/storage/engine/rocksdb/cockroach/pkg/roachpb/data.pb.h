@@ -1317,6 +1317,24 @@ class Transaction : public ::google::protobuf::MessageLite /* @@protoc_insertion
   const ::google::protobuf::RepeatedPtrField< ::cockroach::roachpb::Span >&
       intents() const;
 
+  // optional .cockroach.util.hlc.Timestamp dynamic_timestamp_lower_bound = 14;
+  bool has_dynamic_timestamp_lower_bound() const;
+  void clear_dynamic_timestamp_lower_bound();
+  static const int kDynamicTimestampLowerBoundFieldNumber = 14;
+  const ::cockroach::util::hlc::Timestamp& dynamic_timestamp_lower_bound() const;
+  ::cockroach::util::hlc::Timestamp* mutable_dynamic_timestamp_lower_bound();
+  ::cockroach::util::hlc::Timestamp* release_dynamic_timestamp_lower_bound();
+  void set_allocated_dynamic_timestamp_lower_bound(::cockroach::util::hlc::Timestamp* dynamic_timestamp_lower_bound);
+
+  // optional .cockroach.util.hlc.Timestamp dynamic_timestamp_upper_bound = 15;
+  bool has_dynamic_timestamp_upper_bound() const;
+  void clear_dynamic_timestamp_upper_bound();
+  static const int kDynamicTimestampUpperBoundFieldNumber = 15;
+  const ::cockroach::util::hlc::Timestamp& dynamic_timestamp_upper_bound() const;
+  ::cockroach::util::hlc::Timestamp* mutable_dynamic_timestamp_upper_bound();
+  ::cockroach::util::hlc::Timestamp* release_dynamic_timestamp_upper_bound();
+  void set_allocated_dynamic_timestamp_upper_bound(::cockroach::util::hlc::Timestamp* dynamic_timestamp_upper_bound);
+
   // @@protoc_insertion_point(class_scope:cockroach.roachpb.Transaction)
  private:
   inline void set_has_meta();
@@ -1337,6 +1355,10 @@ class Transaction : public ::google::protobuf::MessageLite /* @@protoc_insertion
   inline void clear_has_write_too_old();
   inline void set_has_retry_on_push();
   inline void clear_has_retry_on_push();
+  inline void set_has_dynamic_timestamp_lower_bound();
+  inline void clear_has_dynamic_timestamp_lower_bound();
+  inline void set_has_dynamic_timestamp_upper_bound();
+  inline void clear_has_dynamic_timestamp_upper_bound();
 
   ::google::protobuf::internal::ArenaStringPtr _unknown_fields_;
   ::google::protobuf::Arena* _arena_ptr_;
@@ -1360,6 +1382,8 @@ class Transaction : public ::google::protobuf::MessageLite /* @@protoc_insertion
   ::cockroach::util::hlc::Timestamp* last_heartbeat_;
   ::cockroach::util::hlc::Timestamp* orig_timestamp_;
   ::cockroach::util::hlc::Timestamp* max_timestamp_;
+  ::cockroach::util::hlc::Timestamp* dynamic_timestamp_lower_bound_;
+  ::cockroach::util::hlc::Timestamp* dynamic_timestamp_upper_bound_;
   int status_;
   bool writing_;
   bool write_too_old_;
@@ -3181,6 +3205,96 @@ inline const ::google::protobuf::RepeatedPtrField< ::cockroach::roachpb::Span >&
 Transaction::intents() const {
   // @@protoc_insertion_point(field_list:cockroach.roachpb.Transaction.intents)
   return intents_;
+}
+
+// optional .cockroach.util.hlc.Timestamp dynamic_timestamp_lower_bound = 14;
+inline bool Transaction::has_dynamic_timestamp_lower_bound() const {
+  return (_has_bits_[0] & 0x00000800u) != 0;
+}
+inline void Transaction::set_has_dynamic_timestamp_lower_bound() {
+  _has_bits_[0] |= 0x00000800u;
+}
+inline void Transaction::clear_has_dynamic_timestamp_lower_bound() {
+  _has_bits_[0] &= ~0x00000800u;
+}
+inline void Transaction::clear_dynamic_timestamp_lower_bound() {
+  if (dynamic_timestamp_lower_bound_ != NULL) dynamic_timestamp_lower_bound_->::cockroach::util::hlc::Timestamp::Clear();
+  clear_has_dynamic_timestamp_lower_bound();
+}
+inline const ::cockroach::util::hlc::Timestamp& Transaction::dynamic_timestamp_lower_bound() const {
+  // @@protoc_insertion_point(field_get:cockroach.roachpb.Transaction.dynamic_timestamp_lower_bound)
+  return dynamic_timestamp_lower_bound_ != NULL ? *dynamic_timestamp_lower_bound_
+                         : *::cockroach::util::hlc::Timestamp::internal_default_instance();
+}
+inline ::cockroach::util::hlc::Timestamp* Transaction::mutable_dynamic_timestamp_lower_bound() {
+  set_has_dynamic_timestamp_lower_bound();
+  if (dynamic_timestamp_lower_bound_ == NULL) {
+    dynamic_timestamp_lower_bound_ = new ::cockroach::util::hlc::Timestamp;
+  }
+  // @@protoc_insertion_point(field_mutable:cockroach.roachpb.Transaction.dynamic_timestamp_lower_bound)
+  return dynamic_timestamp_lower_bound_;
+}
+inline ::cockroach::util::hlc::Timestamp* Transaction::release_dynamic_timestamp_lower_bound() {
+  // @@protoc_insertion_point(field_release:cockroach.roachpb.Transaction.dynamic_timestamp_lower_bound)
+  clear_has_dynamic_timestamp_lower_bound();
+  ::cockroach::util::hlc::Timestamp* temp = dynamic_timestamp_lower_bound_;
+  dynamic_timestamp_lower_bound_ = NULL;
+  return temp;
+}
+inline void Transaction::set_allocated_dynamic_timestamp_lower_bound(::cockroach::util::hlc::Timestamp* dynamic_timestamp_lower_bound) {
+  delete dynamic_timestamp_lower_bound_;
+  dynamic_timestamp_lower_bound_ = dynamic_timestamp_lower_bound;
+  if (dynamic_timestamp_lower_bound) {
+    set_has_dynamic_timestamp_lower_bound();
+  } else {
+    clear_has_dynamic_timestamp_lower_bound();
+  }
+  // @@protoc_insertion_point(field_set_allocated:cockroach.roachpb.Transaction.dynamic_timestamp_lower_bound)
+}
+
+// optional .cockroach.util.hlc.Timestamp dynamic_timestamp_upper_bound = 15;
+inline bool Transaction::has_dynamic_timestamp_upper_bound() const {
+  return (_has_bits_[0] & 0x00001000u) != 0;
+}
+inline void Transaction::set_has_dynamic_timestamp_upper_bound() {
+  _has_bits_[0] |= 0x00001000u;
+}
+inline void Transaction::clear_has_dynamic_timestamp_upper_bound() {
+  _has_bits_[0] &= ~0x00001000u;
+}
+inline void Transaction::clear_dynamic_timestamp_upper_bound() {
+  if (dynamic_timestamp_upper_bound_ != NULL) dynamic_timestamp_upper_bound_->::cockroach::util::hlc::Timestamp::Clear();
+  clear_has_dynamic_timestamp_upper_bound();
+}
+inline const ::cockroach::util::hlc::Timestamp& Transaction::dynamic_timestamp_upper_bound() const {
+  // @@protoc_insertion_point(field_get:cockroach.roachpb.Transaction.dynamic_timestamp_upper_bound)
+  return dynamic_timestamp_upper_bound_ != NULL ? *dynamic_timestamp_upper_bound_
+                         : *::cockroach::util::hlc::Timestamp::internal_default_instance();
+}
+inline ::cockroach::util::hlc::Timestamp* Transaction::mutable_dynamic_timestamp_upper_bound() {
+  set_has_dynamic_timestamp_upper_bound();
+  if (dynamic_timestamp_upper_bound_ == NULL) {
+    dynamic_timestamp_upper_bound_ = new ::cockroach::util::hlc::Timestamp;
+  }
+  // @@protoc_insertion_point(field_mutable:cockroach.roachpb.Transaction.dynamic_timestamp_upper_bound)
+  return dynamic_timestamp_upper_bound_;
+}
+inline ::cockroach::util::hlc::Timestamp* Transaction::release_dynamic_timestamp_upper_bound() {
+  // @@protoc_insertion_point(field_release:cockroach.roachpb.Transaction.dynamic_timestamp_upper_bound)
+  clear_has_dynamic_timestamp_upper_bound();
+  ::cockroach::util::hlc::Timestamp* temp = dynamic_timestamp_upper_bound_;
+  dynamic_timestamp_upper_bound_ = NULL;
+  return temp;
+}
+inline void Transaction::set_allocated_dynamic_timestamp_upper_bound(::cockroach::util::hlc::Timestamp* dynamic_timestamp_upper_bound) {
+  delete dynamic_timestamp_upper_bound_;
+  dynamic_timestamp_upper_bound_ = dynamic_timestamp_upper_bound;
+  if (dynamic_timestamp_upper_bound) {
+    set_has_dynamic_timestamp_upper_bound();
+  } else {
+    clear_has_dynamic_timestamp_upper_bound();
+  }
+  // @@protoc_insertion_point(field_set_allocated:cockroach.roachpb.Transaction.dynamic_timestamp_upper_bound)
 }
 
 inline const Transaction* Transaction::internal_default_instance() {

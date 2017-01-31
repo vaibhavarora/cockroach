@@ -283,6 +283,10 @@ message Transaction {
   // for SNAPSHOT transactions.
   optional bool retry_on_push = 13 [(gogoproto.nullable) = false];
   repeated Span intents = 11 [(gogoproto.nullable) = false];
+  // Lower bound in time for the transaction to commit
+  optional util.hlc.Timestamp dynamic_timestamp_lower_bound = 14 [(gogoproto.nullable) = false];
+  // Upper bound in time for the transaction to commit
+  optional util.hlc.Timestamp dynamic_timestamp_upper_bound = 15 [(gogoproto.nullable) = false];
 }
 
 // A Intent is a Span together with a Transaction metadata and its status.

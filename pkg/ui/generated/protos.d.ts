@@ -1636,6 +1636,24 @@ getIntents?() : Span[];
 
 
 
+dynamic_timestamp_lower_bound?: util.hlc.Timestamp;
+		
+
+getDynamicTimestampLowerBound?() : util.hlc.Timestamp;
+		setDynamicTimestampLowerBound?(dynamicTimestampLowerBound : util.hlc.Timestamp): void;
+		
+
+
+
+dynamic_timestamp_upper_bound?: util.hlc.Timestamp;
+		
+
+getDynamicTimestampUpperBound?() : util.hlc.Timestamp;
+		setDynamicTimestampUpperBound?(dynamicTimestampUpperBound : util.hlc.Timestamp): void;
+		
+
+
+
 }
 
 	export interface TransactionMessage extends Transaction {

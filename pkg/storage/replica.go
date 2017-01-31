@@ -1324,7 +1324,9 @@ func (r *Replica) Send(
 	ctx context.Context, ba roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, *roachpb.Error) {
 	r.assert5725(ba)
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : received at replica: %v", ba)
+	}
 	var br *roachpb.BatchResponse
 
 	if err := r.checkBatchRequest(ba); err != nil {
@@ -1341,9 +1343,15 @@ func (r *Replica) Send(
 	// Differentiate between admin, read-only and write.
 	var pErr *roachpb.Error
 	if ba.IsWrite() {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : Taking read-write path")
+		}
 		log.Event(ctx, "read-write path")
 		br, pErr = r.addWriteCmd(ctx, ba)
 	} else if ba.IsReadOnly() {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : Taking read only path")
+		}
 		log.Event(ctx, "read-only path")
 		br, pErr = r.addReadOnlyCmd(ctx, ba)
 	} else if ba.IsAdmin() {
@@ -1861,6 +1869,9 @@ func (r *Replica) addReadOnlyCmd(
 		log.ErrEvent(ctx, pErr.String())
 	} else {
 		log.Event(ctx, "read completed")
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : read completed")
 	}
 	return br, pErr
 }
@@ -4003,7 +4014,12 @@ func (r *Replica) executeBatch(
 	ba roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, EvalResult, *roachpb.Error) {
 	br := ba.CreateReply()
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : At execute batch fn arguments idkey : %v, ba : %v ", idKey, ba)
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :At execute batch fn  ba.header %v ", ba.Header)
+	}
 	r.mu.Lock()
 	threshold := r.mu.state.GCThreshold
 	r.mu.Unlock()
@@ -4126,7 +4142,13 @@ func (r *Replica) executeBatch(
 		//   updated batch transaction / timestamp.
 		if ba.Txn != nil {
 			if txn := reply.Header().Txn; txn != nil {
+				if log.V(2) {
+					log.Infof(ctx, "Ravi :At execute batch fn  ba before update %v ", ba.Txn)
+				}
 				ba.Txn.Update(txn)
+				if log.V(2) {
+					log.Infof(ctx, "Ravi :At execute batch fn  ba after update %v ", ba.Txn)
+				}
 			}
 		}
 	}

@@ -514,6 +514,9 @@ func (txn *Txn) Exec(opt TxnExecOptions, fn func(txn *Txn, opt *TxnExecOptions) 
 				// `cluster_logical_timestamp()` is consistent with the commit
 				// (serializable) ordering.
 				txn.Proto.OrigTimestamp = opt.Clock.Now()
+				if log.V(2) {
+					log.Infof(txn.Context, "Ravi : Assiging timestamp at in tnx.go , Tnx.proto : %v", txn.Proto)
+				}
 			}
 		}
 
@@ -584,11 +587,16 @@ func (txn *Txn) sendInternal(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *
 
 	// TODO(radu): when db.send supports a context, we can just use that (and
 	// remove the prepareToSend call above).
+	if log.V(2) {
+		log.Infof(txn.Context, "Ravi : Tnx.go ba just before sending %v", ba)
+	}
 	br, pErr := txn.db.sender.Send(txn.Context, ba)
 	if br != nil && br.Error != nil {
 		panic(roachpb.ErrorUnexpectedlySet(txn.db.sender, br))
 	}
-
+	if log.V(2) {
+		log.Infof(txn.Context, "Ravi : Tnx.go br just after receiving %v", br)
+	}
 	if br != nil {
 		for _, encSp := range br.CollectedSpans {
 			var newSp basictracer.RawSpan
@@ -637,6 +645,10 @@ func (txn *Txn) sendInternal(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *
 // always commit or clean-up explicitly even when that may not be
 // required (or even erroneous). Returns (nil, nil) for an empty batch.
 func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
+
+	if log.V(2) {
+		log.Infof(txn.Context, "Ravi : Proto at start of send in txn.go : %v", txn.Proto)
+	}
 
 	if txn.Proto.Status != roachpb.PENDING || txn.IsFinalized() {
 		return nil, roachpb.NewErrorf(
@@ -695,6 +707,9 @@ func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.
 		if txn.Proto.Key != nil {
 			bt.Key = txn.Proto.Key
 		}
+		if log.V(2) {
+			log.Infof(txn.Context, "Ravi : Injecting begin Tnx request into ba")
+		}
 		// Inject the new request before position firstWriteIndex, taking
 		// care to avoid unnecessary allocations.
 		oldRequests := ba.Requests
@@ -734,6 +749,9 @@ func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.
 	if needBeginTxn {
 		if br != nil && br.Responses != nil {
 			br.Responses = append(br.Responses[:firstWriteIndex], br.Responses[firstWriteIndex+1:]...)
+		}
+		if log.V(2) {
+			log.Infof(txn.Context, "Ravi : removing begin Tnx request from br")
 		}
 		// Handle case where inserted begin txn confused an indexed error.
 		if pErr != nil && pErr.Index != nil {

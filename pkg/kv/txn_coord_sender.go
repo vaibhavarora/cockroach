@@ -294,7 +294,7 @@ func (tc *TxnCoordSender) Send(
 
 	if ba.Txn != nil {
 		// If this request is part of a transaction...
-		if err := tc.maybeBeginTxn(&ba); err != nil {
+		if err := tc.maybeBeginTxn(ctx, &ba); err != nil {
 			return nil, roachpb.NewError(err)
 		}
 
@@ -511,7 +511,8 @@ func (tc *TxnCoordSender) maybeRejectClientLocked(
 // No transactional writes are allowed unless preceded by a begin
 // transaction request within the same batch. The exception is if the
 // transaction is already in state txn.Writing=true.
-func (tc *TxnCoordSender) maybeBeginTxn(ba *roachpb.BatchRequest) error {
+//func (tc *TxnCoordSender) maybeBeginTxn(ba *roachpb.BatchRequest) error {
+func (tc *TxnCoordSender) maybeBeginTxn(ctx context.Context, ba *roachpb.BatchRequest) error {
 	if len(ba.Requests) == 0 {
 		return errors.Errorf("empty batch with txn")
 	}
@@ -527,6 +528,9 @@ func (tc *TxnCoordSender) maybeBeginTxn(ba *roachpb.BatchRequest) error {
 		}
 		newTxn := roachpb.NewTransaction(ba.Txn.Name, nil, ba.UserPriority,
 			ba.Txn.Isolation, timestamp, tc.clock.MaxOffset().Nanoseconds())
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : Created new transaction: %v", newTxn)
+		}
 		// Use existing priority as a minimum. This is used on transaction
 		// aborts to ratchet priority when creating successor transaction.
 		if newTxn.Priority < ba.Txn.Priority {
@@ -548,6 +552,9 @@ func (tc *TxnCoordSender) maybeBeginTxn(ba *roachpb.BatchRequest) error {
 			haveBeginTxn = true
 			if ba.Txn.Key == nil {
 				ba.Txn.Key = bt.Key
+				if log.V(2) {
+					log.Infof(ctx, " Ravi :key causing the begin %v is set in ba.Txn.key", bt.Key)
+				}
 			}
 		}
 		if roachpb.IsTransactionWrite(args) && !haveBeginTxn && !ba.Txn.Writing {
