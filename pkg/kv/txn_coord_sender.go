@@ -310,6 +310,10 @@ func (tc *TxnCoordSender) Send(
 		var et *roachpb.EndTransactionRequest
 		var hasET bool
 		{
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : TCS 11")
+			}
+
 			var rArgs roachpb.Request
 			rArgs, hasET = ba.GetArg(roachpb.EndTransaction)
 			if hasET {
@@ -328,8 +332,12 @@ func (tc *TxnCoordSender) Send(
 		}
 
 		if pErr := func() *roachpb.Error {
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : TCS 12")
+			}
 			tc.txnMu.Lock()
 			defer tc.txnMu.Unlock()
+
 			if pErr := tc.maybeRejectClientLocked(ctx, *ba.Txn); pErr != nil {
 				return pErr
 			}
@@ -421,7 +429,9 @@ func (tc *TxnCoordSender) Send(
 			// TODO(tschottdorf): needs to keep the trace.
 			br, pErr = tc.resendWithTxn(ba)
 		}
-
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : TCS before update state pErr : %v", pErr)
+		}
 		if pErr = tc.updateState(ctx, startNS, ba, br, pErr); pErr != nil {
 			log.Eventf(ctx, "error: %s", pErr)
 			return nil, pErr
@@ -474,7 +484,11 @@ func (tc *TxnCoordSender) maybeRejectClientLocked(
 	if !txn.Writing {
 		return nil
 	}
+
 	txnMeta, ok := tc.txnMu.txns[*txn.ID]
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : maybeRejectClientLocked : txmeta %v, ok %v", txnMeta, ok)
+	}
 	// Check whether the transaction is still tracked and has a chance of
 	// completing. It's possible that the coordinator learns about the
 	// transaction having terminated from a heartbeat, and GC queue correctness
@@ -808,6 +822,9 @@ func (tc *TxnCoordSender) updateState(
 	br *roachpb.BatchResponse,
 	pErr *roachpb.Error,
 ) *roachpb.Error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In Update state txncordsender: ")
+	}
 
 	tc.txnMu.Lock()
 	defer tc.txnMu.Unlock()
@@ -819,8 +836,19 @@ func (tc *TxnCoordSender) updateState(
 
 	var newTxn roachpb.Transaction
 	newTxn.Update(ba.Txn)
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : TCS ba.Txn: %v", ba.Txn)
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : TCS newTxn : %v", newTxn)
+	}
+
 	if pErr == nil {
 		newTxn.Update(br.Txn)
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : TCS updating newTxn br.Txn: %v", br.Txn)
+		}
 	} else if errTxn := pErr.GetTxn(); errTxn != nil {
 		newTxn.Update(errTxn)
 	}
@@ -869,7 +897,9 @@ func (tc *TxnCoordSender) updateState(
 	}
 
 	txnID := *newTxn.ID
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : TCS txnID: %v", txnID)
+	}
 	txnMeta := tc.txnMu.txns[txnID]
 	// For successful transactional requests, keep the written intents and
 	// the updated transaction record to be sent along with the reply.
@@ -884,6 +914,9 @@ func (tc *TxnCoordSender) updateState(
 	// after all, it **has** laid down intents and only the coordinator
 	// can augment a potential EndTransaction call). See #3303.
 	if txnMeta != nil || pErr == nil || newTxn.Writing {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : TCS 1: %v, pErr %v", txnMeta, pErr)
+		}
 		// Adding the intents even on error reduces the likelihood of dangling
 		// intents blocking concurrent writers for extended periods of time.
 		// See #3346.
@@ -897,12 +930,19 @@ func (tc *TxnCoordSender) updateState(
 				EndKey: endKey,
 			})
 		})
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : TCS keys : %v", keys)
+		}
 
 		if txnMeta != nil {
 			txnMeta.keys = keys
-		} else if len(keys) > 0 {
+			// Ravi : work around for passing through read only transaction
+		} else if len(keys) >= 0 {
 			if !newTxn.Writing {
 				panic("txn with intents marked as non-writing")
+			}
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : TCS 2: %v", txnMeta)
 			}
 			// If the transaction is already over, there's no point in
 			// launching a one-off coordinator which will shut down right
@@ -910,8 +950,15 @@ func (tc *TxnCoordSender) updateState(
 			// the coordinator - the transaction has laid down intents, so
 			// we expect it to be committed/aborted at some point in the
 			// future.
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : before getarg pErr : %v, ba : %v", pErr, ba)
+			}
+
 			if _, isEnding := ba.GetArg(roachpb.EndTransaction); pErr != nil || !isEnding {
 				log.Event(ctx, "coordinator spawns")
+				if log.V(2) {
+					log.Infof(ctx, "Ravi : Inside getarg pErr: %v, isEnding is %v", pErr, isEnding)
+				}
 				txnMeta = &txnMetadata{
 					txn:              newTxn,
 					keys:             keys,
@@ -921,6 +968,9 @@ func (tc *TxnCoordSender) updateState(
 					txnEnd:           make(chan struct{}),
 				}
 				tc.txnMu.txns[txnID] = txnMeta
+				if log.V(2) {
+					log.Infof(ctx, "Ravi : created TxnMeta : %v", txnMeta)
+				}
 
 				if err := tc.stopper.RunAsyncTask(ctx, func(ctx context.Context) {
 					tc.heartbeatLoop(ctx, txnID)
@@ -936,6 +986,12 @@ func (tc *TxnCoordSender) updateState(
 				// If this was a successful one phase commit, update stats
 				// directly as they won't otherwise be updated on heartbeat
 				// loop shutdown.
+				if log.V(2) {
+					log.Infof(ctx, "Ravi : Inside getarg else pErr: %v, isEnding is %v", pErr, isEnding)
+				}
+				if log.V(2) {
+					log.Infof(ctx, "Ravi : TCS 3: %v", txnMeta)
+				}
 				etArgs, ok := br.Responses[len(br.Responses)-1].GetInner().(*roachpb.EndTransactionResponse)
 				tc.updateStats(tc.clock.PhysicalNow()-startNS, 0, newTxn.Status, ok && etArgs.OnePhaseCommit)
 			}
@@ -944,7 +1000,15 @@ func (tc *TxnCoordSender) updateState(
 
 	// Update our record of this transaction, even on error.
 	if txnMeta != nil {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : updated trasaction record at tnx cord sender")
+		}
+
 		txnMeta.txn.Update(&newTxn)
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : at tns cord sender txn.writing : %v", txnMeta.txn.Writing)
+		}
+
 		if !txnMeta.txn.Writing {
 			panic("tracking a non-writing txn")
 		}
@@ -955,6 +1019,9 @@ func (tc *TxnCoordSender) updateState(
 		// For successful transactional requests, always send the updated txn
 		// record back. Note that we make sure not to share data with newTxn
 		// (which may have made it into txnMeta).
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : TCS 4: %v", txnMeta)
+		}
 		if br.Txn != nil {
 			br.Txn.Update(&newTxn)
 		} else {

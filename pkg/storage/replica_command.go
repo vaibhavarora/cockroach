@@ -157,6 +157,9 @@ func (r *Replica) executeCmd(
 			MaxKeys: maxKeys,
 			Stats:   ms,
 		}
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : executing cmd %v with cArgs %v ", cmd, cArgs)
+		}
 		pd, err = cmd.Eval(ctx, batch, cArgs, reply)
 	} else {
 		err = errors.Errorf("unrecognized command %s", args.Method())
@@ -399,6 +402,9 @@ func verifyTransaction(h roachpb.Header, args roachpb.Request) error {
 func evalBeginTransaction(
 	ctx context.Context, batch engine.ReadWriter, cArgs CommandArgs, resp roachpb.Response,
 ) (EvalResult, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : evalBeginTransaction  ")
+	}
 	r := cArgs.Repl
 	args := cArgs.Args.(*roachpb.BeginTransactionRequest)
 	h := cArgs.Header

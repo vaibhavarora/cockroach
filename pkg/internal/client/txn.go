@@ -672,8 +672,9 @@ func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.
 	// write. This is in contrast to txn.Proto.Writing, which is set by
 	// the coordinator when the first intent has been created, and which
 	// lives for the life of the transaction.
-	firstWriteIndex := -1
-	var firstWriteKey roachpb.Key
+
+	firstIndex := -1
+	var firstKey roachpb.Key
 
 	for i, ru := range ba.Requests {
 		args := ru.GetInner()
@@ -682,41 +683,43 @@ func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.
 				return nil, roachpb.NewErrorf("%s sent as non-terminal call", args.Method())
 			}
 		}
-		if roachpb.IsTransactionWrite(args) && firstWriteIndex == -1 {
-			firstWriteKey = args.Header().Key
-			firstWriteIndex = i
+		if (roachpb.IsTransactionWrite(args) || roachpb.IsReadOnly(args)) && firstIndex == -1 {
+			//if roachpb.IsTransactionWrite(args) && firstIndex == -1 {
+			firstKey = args.Header().Key
+			firstIndex = i
 		}
 	}
 
-	haveTxnWrite := firstWriteIndex != -1
+	// Transaction record will be created at first operation rather than on first read
+	haveOperation := firstIndex != -1
 	endTxnRequest, haveEndTxn := ba.Requests[lastIndex].GetInner().(*roachpb.EndTransactionRequest)
-	needBeginTxn := !txn.Proto.Writing && haveTxnWrite
-	needEndTxn := txn.Proto.Writing || haveTxnWrite
+	needBeginTxn := !txn.Proto.Writing && haveOperation
+	needEndTxn := txn.Proto.Writing || haveOperation
 	elideEndTxn := haveEndTxn && !needEndTxn
 
 	// If we're not yet writing in this txn, but intend to, insert a
-	// begin transaction request before the first write command.
+	// begin transaction request before the first (read/write) operation command.
 	if needBeginTxn {
 		// If the transaction already has a key (we're in a restart), make
 		// sure we set the key in the begin transaction request to the original.
 		bt := &roachpb.BeginTransactionRequest{
 			Span: roachpb.Span{
-				Key: firstWriteKey,
+				Key: firstKey,
 			},
 		}
 		if txn.Proto.Key != nil {
 			bt.Key = txn.Proto.Key
 		}
 		if log.V(2) {
-			log.Infof(txn.Context, "Ravi : Injecting begin Tnx request into ba")
+			log.Infof(txn.Context, "Ravi : Injecting begin Tnx request into ba, key is %v", bt.Key)
 		}
-		// Inject the new request before position firstWriteIndex, taking
+		// Inject the new request before position firstIndex, taking
 		// care to avoid unnecessary allocations.
 		oldRequests := ba.Requests
 		ba.Requests = make([]roachpb.RequestUnion, len(ba.Requests)+1)
-		copy(ba.Requests, oldRequests[:firstWriteIndex])
-		ba.Requests[firstWriteIndex].MustSetInner(bt)
-		copy(ba.Requests[firstWriteIndex+1:], oldRequests[firstWriteIndex:])
+		copy(ba.Requests, oldRequests[:firstIndex])
+		ba.Requests[firstIndex].MustSetInner(bt)
+		copy(ba.Requests[firstIndex+1:], oldRequests[firstIndex:])
 	}
 
 	if elideEndTxn {
@@ -748,7 +751,7 @@ func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.
 	// If we inserted a begin transaction request, remove it here.
 	if needBeginTxn {
 		if br != nil && br.Responses != nil {
-			br.Responses = append(br.Responses[:firstWriteIndex], br.Responses[firstWriteIndex+1:]...)
+			br.Responses = append(br.Responses[:firstIndex], br.Responses[firstIndex+1:]...)
 		}
 		if log.V(2) {
 			log.Infof(txn.Context, "Ravi : removing begin Tnx request from br")
@@ -756,10 +759,10 @@ func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.
 		// Handle case where inserted begin txn confused an indexed error.
 		if pErr != nil && pErr.Index != nil {
 			idx := pErr.Index.Index
-			if idx == int32(firstWriteIndex) {
+			if idx == int32(firstIndex) {
 				// An error was encountered on begin txn; disallow the indexing.
 				pErr.Index = nil
-			} else if idx > int32(firstWriteIndex) {
+			} else if idx > int32(firstIndex) {
 				// An error was encountered after begin txn; decrement index.
 				pErr.SetErrorIndex(idx - 1)
 			}
