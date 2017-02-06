@@ -1,0 +1,60 @@
+ scan(r(x)) 		timestamp:<wall_time:1485554874861118767 logical:0 >
+ 
+ scan(w(x))			timestamp:<wall_time:1485554874862679211 logical:0 >
+ 
+ begin_tnx(w(x))	timestamp:<wall_time:1485555408559015547 logical:0 >
+ 					orig_timestamp:<wall_time:1485555408559015547 logical:0 >
+ 					max_timestamp:<wall_time :1485555408559015547 logical:0 >
+ 					observed_timestamps:<key:1 value:<wall_time:1485555408559015547 logical:0 >
+
+put(w(x))			timestamp:<wall_time:0 logical:0 >
+
+scan(r(y))			timestamp:<wall_time:1485554874861118767 logical:0 > 		 			
+
+
+--------------------------------------------------------------------------------------------------
+Hello All,
+
+I am trying understand the timestamp allocation in crdb. I have run a basic transaction 
+ T : b1 r1(x) w(x) r(y) w(y) c1.
+
+ I have "reply" printed in logs at replica_command/execute_cmd. Below are the timestamps I am seeing in the reply structure.
+
+Things to notice :
+  According to my expectation all the reads and writes should at same timestamp (orig_timestamp). 
+ - But here r(w) and r(y) are hapenning at one timestamp (which is other than orig_timestamp) 
+ - there is no timestamp for w(x) and w(y) 
+ - commit is at orig_timestamp (as expected)    
+
+Can someone please explain me this behaviour ? 
+
+Follwing up questions
+1) I understand timestamps for the transaction is picked at trans_cored_sender. Am I right ?
+2) Transaction record is created on first write. So where is the timestamp picked for the first read (before any write) is stored ? Becuase that is used for other reads for transaction ? 
+
+Notation : actual_command_at_crdb(for_given_operation)
+
+scan(r(x))			timestamp:<wall_time:1485554874861118767 logical:0 > 
+
+scan(w(x))			timestamp:<wall_time:1485555408559015547 logical:0 > 
+
+begin_tnx(w(x))		timestamp:<wall_time:1485556286484351016 logical:0 >
+					orig_timestamp:<wall_time:1485556286484351016 logical:0 >
+					max_timestamp:<wall_time:1485556286484351016 logical:0 >
+					observed_timestamps:<key:1 value:<wall_time:1485556286484351016 logical:0 >
+
+put(w(x))			timestamp:<wall_time:0 logical:0 > 
+
+scan(r(y))			timestamp:<wall_time:1485554874861118767 logical:0 >
+
+scan(w(y))			timestamp:<wall_time:1485554874861118767 logical:0 >
+
+put(w(y)			timestamp:<wall_time:0 logical:0 >
+
+					
+commit				timestamp:<wall_time:1485556286484351016 logical:0 >
+					orig_timestamp:<wall_time:1485556286484351016 logical:0 >
+					observed_timestamps:<key:1 value:<wall_time:1485556286484351016 logical:0 >
+
+					
+

@@ -481,6 +481,9 @@ func evalBeginTransaction(
 func evalEndTransaction(
 	ctx context.Context, batch engine.ReadWriter, cArgs CommandArgs, resp roachpb.Response,
 ) (EvalResult, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : EEndTrnx 1")
+	}
 	r := cArgs.Repl
 	args := cArgs.Args.(*roachpb.EndTransactionRequest)
 	h := cArgs.Header

@@ -92,7 +92,7 @@ func execute_history(history string, db *sql.DB) {
 			fmt.Println("commiting tnx2")
 			commit_tnx(tx2)
 		case element == "r2(y)":
-			fmt.Println("tnx2 reading x")
+			fmt.Println("tnx2 reading y")
 			_ = read(y, tx2)
 		}
 	}

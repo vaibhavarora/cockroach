@@ -84,27 +84,43 @@ func getAccount() int {
 }
 
 // Reads to warm up the database cache( if there is any) to elemitate the effect of cache on bechmark
-func warm_up_tnxs(db *sql.DB, number_of_tnx int32) {
+func do_warm_up_tnxs(db *sql.DB) {
 
-	fmt.Println("Performing Warm up reads count %v", atomic.LoadInt32(&warmupcounts))
+	for atomic.LoadInt32(&warmupcounts) <= int32(*warmuptnxs) {
 
-	for atomic.LoadInt32(&warmupcounts) <= number_of_tnx {
+		//log.Printf("Performing Warm up reads count %v", atomic.LoadInt32(&warmupcounts))
 		account1 := random(1, *numAccounts)
 		account2 := random(1, *numAccounts)
 		for account1 == account2 {
 			account2 = random(1, *numAccounts)
 		}
+		//log.Printf("account1 : %v, account2 : %v", account1, account2)
 		if err, _ := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
-			_, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1, $2)`, account1, account2)
+			rows, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1, $2)`, account1, account2)
 			if err != nil {
-				//log.Printf("read error %v , tnx %v", err, tx)
+				log.Printf("read error %v , tnx %v", err, tx)
 				//atomic.AddInt32(&aggr.aborts, 1)
 				return err
+			}
+			for rows.Next() {
+				var id, balance int
+				if err = rows.Scan(&id, &balance); err != nil {
+					log.Printf("here is the error")
+					log.Fatal(err)
+				}
+				switch id {
+				case account1:
+					//log.Printf("account1 balance : %v", balance)
+				case account2:
+					//log.Printf("account2 balance : %v", balance)
+				default:
+					panic(fmt.Sprintf("got unexpected account %d"))
+				}
 			}
 			return nil
 			// we dont bother with the content of the response
 		}); err != nil {
-			log.Printf("failed transaction: %v", err)
+			log.Printf("  failed transaction: %v", err)
 
 			continue
 		}
@@ -115,6 +131,7 @@ func warm_up_tnxs(db *sql.DB, number_of_tnx int32) {
 }
 
 func moveMoney(db *sql.DB, aggr *measurement) {
+	//log.Printf("In movemoney")
 	useSystemAccount := *contention == "high"
 	for !transfersComplete() {
 		var readDuration, writeDuration time.Duration
@@ -326,17 +343,23 @@ CREATE TABLE IF NOT EXISTS account (
 	}
 	contentionPercentage = contentionPer
 
+	log.Printf("Performing warm up reads")
+
 	if *warmuptnxs > 0 {
 		for i := 0; i < *concurrency; i++ {
-			go warm_up_tnxs(db, int32(*warmuptnxs))
+			go do_warm_up_tnxs(db)
 		}
 
 	}
+
 	for atomic.LoadInt32(&warmupcounts) <= int32(*warmuptnxs) {
-		fmt.Println("current warm up count : %v", atomic.LoadInt32(&warmupcounts))
-		time.Sleep(60 * time.Second)
+
+		time.Sleep(5 * time.Second)
 		// waiting for warming up to finish
 	}
+
+	log.Printf("Done with warm up reads : %v", atomic.LoadInt32(&warmupcounts))
+
 	verifyTotalBalance(db)
 
 	var aggr measurement
