@@ -86,7 +86,7 @@ func getAccount() int {
 // Reads to warm up the database cache( if there is any) to elemitate the effect of cache on bechmark
 func warm_up_tnxs(db *sql.DB, number_of_tnx int32) {
 
-	//fmt.Println("Performing Warm up reads")
+	fmt.Println("Performing Warm up reads count %v", atomic.LoadInt32(&warmupcounts))
 
 	for atomic.LoadInt32(&warmupcounts) <= number_of_tnx {
 		account1 := random(1, *numAccounts)
