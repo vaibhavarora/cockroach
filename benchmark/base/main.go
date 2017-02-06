@@ -86,7 +86,7 @@ func getAccount() int {
 // Reads to warm up the database cache( if there is any) to elemitate the effect of cache on bechmark
 func warm_up_tnxs(db *sql.DB, number_of_tnx int32) {
 
-	fmt.Printf("Performing Warm up reads")
+	//fmt.Println("Performing Warm up reads")
 
 	for atomic.LoadInt32(&warmupcounts) <= number_of_tnx {
 		account1 := random(1, *numAccounts)
@@ -232,7 +232,7 @@ func main() {
 	flag.Parse()
 
 	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	dbURL := "postgresql://root@pacific:26257/bank2?sslmode=disable"
+	dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
 		dbURL = flag.Arg(0)
@@ -332,6 +332,12 @@ CREATE TABLE IF NOT EXISTS account (
 		}
 
 	}
+	for atomic.LoadInt32(&warmupcounts) <= int32(*warmuptnxs) {
+		fmt.Println("current warm up count : %v", atomic.LoadInt32(&warmupcounts))
+		time.Sleep(60 * time.Second)
+		// waiting for warming up to finish
+	}
+	verifyTotalBalance(db)
 
 	var aggr measurement
 	var lastSuccesses int32
