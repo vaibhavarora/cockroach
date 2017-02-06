@@ -20,6 +20,7 @@ package crdb
 
 import (
 	"database/sql"
+	"fmt"
 	"github.com/lib/pq"
 	"sync/atomic"
 	"time"
@@ -49,6 +50,7 @@ func ExecuteTx(db *sql.DB, fn func(*sql.Tx) error) (err error, commitduration in
 	var tx *sql.Tx
 	tx, err = db.Begin()
 	if err != nil {
+		fmt.Println("error on begin()")
 		return err, 0
 	}
 

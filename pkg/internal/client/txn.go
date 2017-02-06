@@ -683,8 +683,8 @@ func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.
 				return nil, roachpb.NewErrorf("%s sent as non-terminal call", args.Method())
 			}
 		}
-		if (roachpb.IsTransactionWrite(args) || roachpb.IsReadOnly(args)) && firstIndex == -1 {
-			//if roachpb.IsTransactionWrite(args) && firstIndex == -1 {
+		//if (roachpb.IsTransactionWrite(args) || roachpb.IsReadOnly(args)) && firstIndex == -1 {
+		if roachpb.IsTransactionWrite(args) && firstIndex == -1 {
 			firstKey = args.Header().Key
 			firstIndex = i
 		}
