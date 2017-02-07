@@ -318,6 +318,17 @@ func (b *Batch) AddRawRequest(reqs ...roachpb.Request) {
 	}
 }
 
+func (b *Batch) hasValidInconsistentMethods() (bool) {
+	for _, ru := range b.reqs {
+		req := ru.GetInner()
+		if req.Method() != roachpb.Get && req.Method() != roachpb.Scan &&
+			req.Method() != roachpb.ReverseScan {
+			return false
+		}
+	}
+	return true
+}
+
 // Get retrieves the value for a key. A new result will be appended to the
 // batch which will contain a single row.
 //

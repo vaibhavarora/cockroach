@@ -17,6 +17,8 @@
 package client
 
 import (
+	"os"
+	"fmt"
 	"strconv"
 
 	"github.com/gogo/protobuf/proto"
@@ -306,6 +308,15 @@ func (txn *Txn) Run(b *Batch) error {
 	if err := b.prepare(); err != nil {
 		return err
 	}
+
+	if e := "ENABLE_INCONSISTENT_READS"; os.Getenv(e) != "" {
+		if b.hasValidInconsistentMethods() {
+			fmt.Println("Executing INCONSISTENT batch...")
+			b.Header.ReadConsistency = roachpb.INCONSISTENT
+			return txn.db.Run(txn.Context, b)
+		}
+	}
+
 	return sendAndFill(txn.send, b)
 }
 
