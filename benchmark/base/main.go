@@ -343,22 +343,23 @@ CREATE TABLE IF NOT EXISTS account (
 	}
 	contentionPercentage = contentionPer
 
-	log.Printf("Performing warm up reads")
-
 	if *warmuptnxs > 0 {
+		log.Printf("Performing warm up reads")
+		log.Printf("warm up txns %v", *warmuptnxs)
 		for i := 0; i < *concurrency; i++ {
 			go do_warm_up_tnxs(db)
 		}
 
 	}
 
-	for atomic.LoadInt32(&warmupcounts) <= int32(*warmuptnxs) {
+	if *warmuptnxs > 0 {
+		for atomic.LoadInt32(&warmupcounts) <= int32(*warmuptnxs) {
 
-		time.Sleep(5 * time.Second)
-		// waiting for warming up to finish
+			time.Sleep(5 * time.Second)
+			// waiting for warming up to finish
+		}
+		log.Printf("Done with warm up reads : %v", atomic.LoadInt32(&warmupcounts))
 	}
-
-	log.Printf("Done with warm up reads : %v", atomic.LoadInt32(&warmupcounts))
 
 	verifyTotalBalance(db)
 
