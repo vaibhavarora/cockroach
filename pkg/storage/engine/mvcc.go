@@ -667,7 +667,7 @@ const (
 // does encounter an intent (currently there can only be one), it is returned
 // via the roachpb.Intent slice, in addition to the result.
 func mvccGetInternal(
-	_ context.Context,
+	ctx context.Context,
 	iter Iterator,
 	metaKey MVCCKey,
 	timestamp hlc.Timestamp,
@@ -676,6 +676,9 @@ func mvccGetInternal(
 	txn *roachpb.Transaction,
 	buf *getBuffer,
 ) (*roachpb.Value, []roachpb.Intent, valueSafety, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : mvccGetInternal: begin: metakey %v, timestamp %v, tnx %v", metaKey, timestamp, txn)
+	}
 	if !consistent && txn != nil {
 		return nil, nil, safeValue, errors.Errorf(
 			"cannot allow inconsistent reads within a transaction")
@@ -892,6 +895,9 @@ func MVCCPut(
 	value roachpb.Value,
 	txn *roachpb.Transaction,
 ) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :MVCCPut : begin")
+	}
 	// If we're not tracking stats for the key and we're writing a non-versioned
 	// key we can utilize a blind put to avoid reading any existing value.
 	var iter Iterator
@@ -954,6 +960,9 @@ func mvccPutUsingIter(
 	txn *roachpb.Transaction,
 	valueFn func(*roachpb.Value) ([]byte, error),
 ) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :mvccPutUsingIter : begin")
+	}
 	var rawBytes []byte
 	if valueFn == nil {
 		if value.Timestamp != hlc.ZeroTimestamp {
@@ -991,6 +1000,9 @@ func mvccPutInternal(
 	buf *putBuffer,
 	valueFn func(*roachpb.Value) ([]byte, error),
 ) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : mvccPutInternal: begin key %v, tnx %v", key, txn)
+	}
 	if len(key) == 0 {
 		return emptyKeyError()
 	}
@@ -1133,6 +1145,9 @@ func mvccPutInternal(
 
 	versionKey := metaKey
 	versionKey.Timestamp = timestamp
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : mvccPutInternal: calling put version key %v, value %v", versionKey, value)
+	}
 	if err := engine.Put(versionKey, value); err != nil {
 		return err
 	}
@@ -1147,6 +1162,9 @@ func mvccPutInternal(
 
 	var metaKeySize, metaValSize int64
 	if newMeta.Txn != nil {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : mvccPutInternal: calling put meta : newMeta - %v", newMeta)
+		}
 		metaKeySize, metaValSize, err = buf.putMeta(engine, metaKey, newMeta)
 		if err != nil {
 			return err
@@ -1163,7 +1181,9 @@ func mvccPutInternal(
 		ms.Add(updateStatsOnPut(key, origMetaKeySize, origMetaValSize,
 			metaKeySize, metaValSize, meta, newMeta))
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : mvccPutInternal: begin")
+	}
 	return maybeTooOldErr
 }
 
@@ -1778,6 +1798,9 @@ func mvccResolveWriteIntent(
 	intent roachpb.Intent,
 	buf *putBuffer,
 ) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : mvccResolveWriteIntent: begin")
+	}
 	if len(intent.Key) == 0 {
 		return emptyKeyError()
 	}
@@ -1789,6 +1812,9 @@ func mvccResolveWriteIntent(
 	ok, origMetaKeySize, origMetaValSize, err := mvccGetMetadata(iter, metaKey, meta)
 	if err != nil {
 		return err
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : mvccResolveWriteIntent: buf %v , buf.meta %v", buf, buf.meta)
 	}
 	// For cases where there's no write intent to resolve, or one exists
 	// which we can't resolve, this is a noop.
@@ -1845,6 +1871,9 @@ func mvccResolveWriteIntent(
 	// version value (remove old and create new with proper
 	// timestamp-encoded key) if timestamp changed.
 	if commit || pushed {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : mvccResolveWriteIntent: commit %v, pushed %v", commit, pushed)
+		}
 		buf.newMeta = *meta
 		// Set the timestamp for upcoming write (or at least the stats update).
 		buf.newMeta.Timestamp = intent.Txn.Timestamp
@@ -1853,10 +1882,16 @@ func mvccResolveWriteIntent(
 		var err error
 		if pushed {
 			// Keep intent if we're pushing timestamp.
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : mvccResolveWriteIntent: keeping the intent")
+			}
 			buf.newTxn = intent.Txn
 			buf.newMeta.Txn = &buf.newTxn
 			metaKeySize, metaValSize, err = buf.putMeta(engine, metaKey, &buf.newMeta)
 		} else {
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : mvccResolveWriteIntent: clearing the key")
+			}
 			metaKeySize = int64(metaKey.EncodedSize())
 			err = engine.Clear(metaKey)
 		}
@@ -1955,7 +1990,9 @@ func mvccResolveWriteIntent(
 			metaKeySize, metaValSize, meta, &buf.newMeta, unsafeIterKey.Timestamp.WallTime,
 			intent.Txn.Timestamp.WallTime))
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : mvccResolveWriteIntent: end")
+	}
 	return nil
 }
 

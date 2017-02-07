@@ -54,6 +54,7 @@ import (
 var errTransactionUnsupported = errors.New("not supported within a transaction")
 
 // CommandArgs contains all the arguments to a command.
+
 // TODO(bdarnell): consider merging with storagebase.FilterArgs (which
 // would probably require removing the Repl field due to import order
 // constraints).
@@ -229,6 +230,9 @@ func evalGet(
 func evalPut(
 	ctx context.Context, batch engine.ReadWriter, cArgs CommandArgs, resp roachpb.Response,
 ) (EvalResult, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : evalPut: begin")
+	}
 	args := cArgs.Args.(*roachpb.PutRequest)
 	h := cArgs.Header
 	ms := cArgs.Stats
@@ -481,6 +485,9 @@ func evalBeginTransaction(
 func evalEndTransaction(
 	ctx context.Context, batch engine.ReadWriter, cArgs CommandArgs, resp roachpb.Response,
 ) (EvalResult, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :evalEndTransaction begin")
+	}
 	r := cArgs.Repl
 	args := cArgs.Args.(*roachpb.EndTransactionRequest)
 	h := cArgs.Header
@@ -509,6 +516,9 @@ func evalEndTransaction(
 	// not suffered regression.
 	switch reply.Txn.Status {
 	case roachpb.COMMITTED:
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :evalEndTransaction : case commited")
+		}
 		return EvalResult{}, roachpb.NewTransactionStatusError("already committed")
 
 	case roachpb.ABORTED:
@@ -516,6 +526,9 @@ func evalEndTransaction(
 			// The transaction has already been aborted by other.
 			// Do not return TransactionAbortedError since the client anyway
 			// wanted to abort the transaction.
+			if log.V(2) {
+				log.Infof(ctx, "Ravi :evalEndTransaction : case aborted")
+			}
 			externalIntents := r.resolveLocalIntents(ctx, batch, ms, *args, reply.Txn)
 			if err := updateTxnWithExternalIntents(
 				ctx, batch, ms, *args, reply.Txn, externalIntents,
@@ -533,6 +546,9 @@ func evalEndTransaction(
 			roachpb.NewTransactionAbortedError()
 
 	case roachpb.PENDING:
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :evalEndTransaction : case pending")
+		}
 		if h.Txn.Epoch < reply.Txn.Epoch {
 			// TODO(tschottdorf): this leaves the Txn record (and more
 			// importantly, intents) dangling; we can't currently write on
@@ -632,6 +648,9 @@ func evalEndTransaction(
 	if err := pd.MergeAndDestroy(intentsToEvalResult(externalIntents, args)); err != nil {
 		return EvalResult{}, err
 	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :evalEndTransaction end")
+	}
 	return pd, nil
 }
 
@@ -679,6 +698,9 @@ func (r *Replica) resolveLocalIntents(
 	args roachpb.EndTransactionRequest,
 	txn *roachpb.Transaction,
 ) []roachpb.Intent {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :resolveLocalIntents : begin ")
+	}
 	desc := r.Desc()
 	var preMergeDesc *roachpb.RangeDescriptor
 	if mergeTrigger := args.InternalCommitTrigger.GetMergeTrigger(); mergeTrigger != nil {
@@ -696,6 +718,9 @@ func (r *Replica) resolveLocalIntents(
 	for _, span := range args.IntentSpans {
 		if err := func() error {
 			intent := roachpb.Intent{Span: span, Txn: txn.TxnMeta, Status: txn.Status}
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : resolveLocalIntents: intent %v", intent)
+			}
 			if len(span.EndKey) == 0 {
 				// For single-key intents, do a KeyAddress-aware check of
 				// whether it's contained in our Range.
@@ -737,6 +762,9 @@ func (r *Replica) resolveLocalIntents(
 			// and not a panic.
 			panic(fmt.Sprintf("error resolving intent at %s on end transaction [%s]: %s", span, txn.Status, err))
 		}
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :resolveLocalIntents : end")
 	}
 	return externalIntents
 }

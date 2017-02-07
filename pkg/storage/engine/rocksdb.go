@@ -416,6 +416,9 @@ func (r *RocksDB) Attrs() roachpb.Attributes {
 // The key and value byte slices may be reused safely. put takes a copy of
 // them before returning.
 func (r *RocksDB) Put(key MVCCKey, value []byte) error {
+	if log.V(2) {
+		log.Infof(context.TODO(), "Ravi : RocksDBPut: key %v, value %v", key, value)
+	}
 	return dbPut(r.rdb, key, value)
 }
 
