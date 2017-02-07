@@ -10,20 +10,20 @@ avg_write = []
 tnx_time_wo_reties = []
 tnx_time_with_reties = []
 total = 0
-#file_name = "test"
-file_name = "contention_output"
+file_name = "contention_with_stops"
+#file_name = "contention_output"
 flag = 1
 
 def plot_Tnx_rate():
     global total
-    print trans_rate
+   # print trans_rate
     plt.figure(1)
    # plt.subplot(211)
     plt.plot(contention_range, trans_rate, label="Transaction rate")
     plt.xlabel('Contention ratio', fontsize=16)
     plt.ylabel('Transactions per second', fontsize=16)
-    plt.text(60, 560, 'Total number of transactions  = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
-    plt.text(60, 540, 'Concurrency  = ' + str(concurrency), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    plt.text(60, 726, 'Total number of transactions  = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    plt.text(60, 715, 'Concurrency  = ' + str(concurrency), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     #plt.xticks(np.arange(min(contention_range), max(contention_range)+1, 10.0))
     plt.xticks([w for w in contention_range],['%i:%i'%(50+w,50-w) for w in range(0,50,10)])
     plt.yticks(np.arange(min(trans_rate), max(trans_rate)+1, 5 ))
@@ -72,10 +72,10 @@ def plot_avg_write_time():
     plt.plot(contention_range, avg_write, label="Average write time ") 
     plt.xlabel('Contention ratio', fontsize=16)
     plt.ylabel('( in milli seconds )', fontsize=16)
-    plt.text(70, 220, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
-    plt.text(70, 217, 'Concurrency  = ' + str(concurrency), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    plt.text(70, 181, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    plt.text(70, 178, 'Concurrency  = ' + str(concurrency), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks([w for w in contention_range],['%i:%i'%(50+w,50-w) for w in range(0,50,10)])
-    plt.yticks(np.arange(min(avg_write), max(avg_write)+1, 1.0 ))    
+    plt.yticks(np.arange(min(avg_write), max(avg_write)+1, 3.0 ))    
     plt.title('Average write time', fontsize=26)
     #plt.legend() 
     plt.tight_layout()
@@ -180,6 +180,6 @@ take_average_of_all()
 #plot_Tnx_rate()
 #plot_total_reties()
 #plot_avg_read_time()
-#plot_avg_write_time()
+plot_avg_write_time()
 #plot_avg_time_wo_retries()
-plot_avg_time_with_retries()
+#plot_avg_time_with_retries()
