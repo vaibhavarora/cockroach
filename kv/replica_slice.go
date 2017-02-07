@@ -151,3 +151,13 @@ func (rs ReplicaSlice) randPerm(startIndex int, topIndex int, intnFn func(int) i
 		rs.Swap(startIndex+i, startIndex+j)
 	}
 }
+
+func (rs ReplicaSlice) filter(nodeID roachpb.NodeID) ReplicaSlice {
+	var replicas []ReplicaInfo
+	for _, replica := range rs {
+		if replica.NodeDesc.NodeID == nodeID {
+			replicas = append(replicas, replica)
+		}
+	}
+	return replicas
+}

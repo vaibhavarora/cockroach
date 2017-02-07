@@ -451,6 +451,8 @@ func (ds *DistSender) sendSingleRange(
 				replicas.MoveToFront(i)
 			}
 		}
+	} else if ds.getNodeDescriptor() != nil {
+		replicas = replicas.filter(ds.getNodeDescriptor().NodeID)
 	}
 
 	// TODO(tschottdorf): should serialize the trace here, not higher up.
