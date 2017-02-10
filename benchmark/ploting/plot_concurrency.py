@@ -10,7 +10,8 @@ tnx_time_wo_reties = []
 tnx_time_with_reties = []
 total = 0
 #file_name = "test"
-file_name = "output"
+#file_name = "output"
+file_name = "concurency_without_crash"
 flag = 1
 
 def plot_Tnx_rate():
@@ -52,7 +53,7 @@ def plot_avg_read_time():
     plt.plot(concurrency, avg_read, label="Average read time ") 
     plt.xlabel('Concurrent Threads', fontsize=16)
     plt.ylabel('( in milli seconds )', fontsize=16)
-    plt.text(11, 37, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    plt.text(11, 20, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
     plt.yticks(np.arange(min(avg_read), max(avg_read)+1, 1.0 ))    
     plt.title('Average read time', fontsize=26)
@@ -66,7 +67,7 @@ def plot_avg_write_time():
     plt.plot(concurrency, avg_write, label="Average write time ") 
     plt.xlabel('Concurrent Threads', fontsize=16)
     plt.ylabel('( in milli seconds )', fontsize=16)
-    plt.text(11, 120, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    plt.text(11, 60, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
     plt.yticks(np.arange(min(avg_write), max(avg_write)+1, 5.0 ))    
     plt.title('Average write time', fontsize=26)
@@ -81,7 +82,7 @@ def plot_avg_time_wo_retries():
     plt.plot(concurrency, tnx_time_wo_reties, label="Average transaction time excluding retries ") 
     plt.xlabel('Concurrent Threads', fontsize=16)
     plt.ylabel('( in milli seconds )', fontsize=16)
-    plt.text(20, 195, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    plt.text(20, 104, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
     plt.yticks(np.arange(min(tnx_time_wo_reties), max(tnx_time_wo_reties)+1, 10.0 ))    
     plt.title('Average transaction time excluding retries', fontsize=26)
@@ -96,7 +97,7 @@ def plot_avg_time_with_retries():
     plt.plot(concurrency, tnx_time_with_reties, label="Average transaction time including retries ") 
     plt.xlabel('Concurrent Threads', fontsize=16)
     plt.ylabel('( in milli seconds )', fontsize=16)
-    plt.text(20, 195, 'Total number of transactions  = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    plt.text(20, 104, 'Total number of transactions  = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
     plt.yticks(np.arange(min(tnx_time_with_reties ), max(tnx_time_with_reties)+1, 10.0 ))    
     plt.title('Average transaction time including retries', fontsize=26)
@@ -107,7 +108,12 @@ def plot_avg_time_with_retries():
 
 def time(duration):
     duration = sanitize(duration)
-    return float(duration[:-2])
+    if (duration[-2:] == "ms"):
+        return float(duration[:-2])
+    else:
+ #       print len(duration[:-2])
+        duration = duration[:-1]
+        return (float(duration[:-2])/1000)
 
 def sanitize(value):
     if value[-1] == ",":
@@ -166,9 +172,11 @@ with open(file_name) as f:
     for line in f:
         getdata(line)
 
+total = 250000
 take_average_of_all()
-plot_Tnx_rate()
-plot_total_reties()
+#print trans_rate
+#plot_Tnx_rate()
+#plot_total_reties()
 plot_avg_read_time()
 plot_avg_write_time()
 plot_avg_time_wo_retries()
