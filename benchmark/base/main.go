@@ -40,8 +40,8 @@ const systemAccountID = 0
 const initialBalance = 1000
 
 var maxTransfer = flag.Int("max-transfer", 100, "Maximum amount to transfer in one transaction.")
-var numTransfers = flag.Int("num-transfers", 0, "Number of transfers (0 to continue indefinitely).")
-var numAccounts = flag.Int("num-accounts", 100, "Number of accounts.")
+var numTransfers = flag.Int("num-transfers", 10000, "Number of transfers (0 to continue indefinitely).")
+var numAccounts = flag.Int("num-accounts", 10000, "Number of accounts.")
 var concurrency = flag.Int("concurrency", 16, "Number of concurrent actors moving money.")
 var contention = flag.String("contention", "low", "Contention model {low | high}.")
 var balanceCheckInterval = flag.Duration("balance-check-interval", time.Second, "Interval of balance check.")
@@ -231,8 +231,8 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
+	dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
+	//dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
 		dbURL = flag.Arg(0)
@@ -332,10 +332,13 @@ CREATE TABLE IF NOT EXISTS account (
 		}
 
 	}
-	for atomic.LoadInt32(&warmupcounts) <= int32(*warmuptnxs) {
-		fmt.Println("current warm up count : %v", atomic.LoadInt32(&warmupcounts))
-		time.Sleep(60 * time.Second)
-		// waiting for warming up to finish
+
+	if *warmuptnxs > 0 {
+		for atomic.LoadInt32(&warmupcounts) <= int32(*warmuptnxs) {
+			fmt.Println("current warm up count : %v", atomic.LoadInt32(&warmupcounts))
+			time.Sleep(60 * time.Second)
+			// waiting for warming up to finish
+		}
 	}
 	verifyTotalBalance(db)
 

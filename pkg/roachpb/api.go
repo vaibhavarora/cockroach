@@ -818,7 +818,7 @@ func (drr *DeleteRangeRequest) flags() int {
 }
 func (*ScanRequest) flags() int               { return isRead | isRange | isTxn }
 func (*ReverseScanRequest) flags() int        { return isRead | isRange | isReverse | isTxn }
-func (*BeginTransactionRequest) flags() int   { return isWrite | isTxn }
+func (*BeginTransactionRequest) flags() int   { return isWrite | isTxn | isAlone }
 func (*EndTransactionRequest) flags() int     { return isWrite | isTxn | isAlone }
 func (*AdminSplitRequest) flags() int         { return isAdmin | isAlone }
 func (*AdminMergeRequest) flags() int         { return isAdmin | isAlone }

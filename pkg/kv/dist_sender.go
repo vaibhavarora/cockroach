@@ -600,14 +600,18 @@ func (ds *DistSender) Send(
 	defer cleanup()
 
 	var rplChunks []*roachpb.BatchResponse
-	parts := ba.Split(false /* don't split ET */)
+	parts := ba.Split(ctx, true /* don't split ET */)
 	if len(parts) > 1 && ba.MaxSpanRequestKeys != 0 {
 		// We already verified above that the batch contains only scan requests of the same type.
 		// Such a batch should never need splitting.
 		panic("batch with MaxSpanRequestKeys needs splitting")
 	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : len(parts) %v", len(parts))
+	}
 	for len(parts) > 0 {
 		part := parts[0]
+
 		ba.Requests = part
 		// The minimal key range encompassing all requests contained within.
 		// Local addressing has already been resolved.
@@ -626,7 +630,7 @@ func (ds *DistSender) Send(
 			if len(parts) != 1 {
 				panic("EndTransaction not in last chunk of batch")
 			}
-			parts = ba.Split(true /* split ET */)
+			parts = ba.Split(ctx, true /* split ET */)
 			if len(parts) != 2 {
 				panic("split of final EndTransaction chunk resulted in != 2 parts")
 			}

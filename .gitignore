@@ -21,7 +21,7 @@ artifacts
 *.test*
 # Various `sed -i~` invocations in our scripts.
 *~
-
+mytesting/mytesting
 benchmark/base/base
 benchmark/base/base
 benchmark/contention/contention

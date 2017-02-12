@@ -24,6 +24,8 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"golang.org/x/net/context"
 )
 
 //go:generate go run -tags gen-batch gen_batch.go
@@ -296,8 +298,11 @@ func (ba *BatchRequest) Methods() []Method {
 // a new chunk (otherwise, it is treated according to its flags). This allows
 // sending a whole transaction in a single Batch when addressing a single
 // range.
-func (ba BatchRequest) Split(canSplitET bool) [][]RequestUnion {
+func (ba BatchRequest) Split(ctx context.Context, canSplitET bool) [][]RequestUnion {
 	compatible := func(method Method, exFlags, newFlags int) bool {
+		if (exFlags & isAlone) != 0 {
+			return false
+		}
 		// If no flags are set so far, everything goes.
 		if exFlags == 0 || (!canSplitET && method == EndTransaction) {
 			return true
@@ -323,12 +328,18 @@ func (ba BatchRequest) Split(canSplitET bool) [][]RequestUnion {
 			args := union.GetInner()
 			flags := args.flags()
 			method := args.Method()
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : method %v, flags %v", method, flags)
+			}
 			// Regardless of flags, a NoopRequest is always compatible.
 			if method == Noop {
 				continue
 			}
 			if !compatible(method, gFlags, flags) {
 				part = ba.Requests[:i]
+				if log.V(2) {
+					log.Infof(ctx, "Ravi :splitting %v, i %v", method, i)
+				}
 				break
 			}
 			gFlags |= flags
