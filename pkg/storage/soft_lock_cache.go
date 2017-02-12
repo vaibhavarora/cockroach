@@ -64,14 +64,14 @@ func (s *SoftLockCache) processPlaceWriteLockRequest(ctx context.Context, h roac
 		if *lock.TransactionMeta.ID == *h.Txn.TxnMeta.ID {
 			position = index
 			if log.V(2) {
-				fmt.Println("Found my write lock", lock)
+				log.Infof(ctx, "Found my write lock", lock)
 			}
 		}
 	}
 	if position != -1 {
 		wlks = append(wlks[:position], wlks[position+1:]...)
 		if log.V(2) {
-			fmt.Println("removing my write lock from retrived list lock")
+			log.Infof(ctx, "removing my write lock from retrived list lock")
 		}
 	}
 	return rlks, wlks
@@ -94,6 +94,7 @@ func (s *SoftLockCache) servePut(ctx context.Context, h roachpb.Header, req roac
 
 	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, arg.Value)
 
+	return rlks, wlks
 }
 
 func (s *SoftLockCache) serveConditionalPut(ctx context.Context, h roachpb.Header, req roachpb.Request) {

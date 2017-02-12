@@ -77,7 +77,13 @@ func (d *DynanicTimeStamper) processDynamicTimestamping(ctx context.Context, ba 
 }
 
 func EvalDyTSGet(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-	wlks := d.slockcache.serveGet(ctx, h, req)
+	if h.Txn == nil {
+		if log.V(2) {
+			log.Infof(ctx, "Get with No tnx")
+		}
+		return
+	}
+	d.slockcache.serveGet(ctx, h, req)
 
 }
 
@@ -85,11 +91,11 @@ func EvalDyTSPut(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, r
 
 	if h.Txn == nil {
 		if log.V(2) {
-			log.Infof(ctx, "No tnx")
+			log.Infof(ctx, "Put with No tnx")
 		}
 		return
 	}
-	rlks, wlks := d.slockcache.servePut(ctx, h, req)
+	d.slockcache.servePut(ctx, h, req)
 
 }
 
