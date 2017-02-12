@@ -278,6 +278,8 @@ type Replica struct {
 	// TODO(peter): evaluate runtime overhead of the timed mutex.
 	raftMu syncutil.TimedMutex
 
+	dynamicTimeStamper *DynanicTimeStamper
+
 	cmdQMu struct {
 		// Protects all fields in the cmdQMu struct.
 		//
@@ -548,7 +550,7 @@ func newReplica(rangeID roachpb.RangeID, store *Store) *Replica {
 		store:          store,
 		abortCache:     NewAbortCache(rangeID),
 	}
-
+	r.dynamicTimeStamper = NewDynamicTImeStamper()
 	// Init rangeStr with the range ID.
 	r.rangeStr.store(0, &roachpb.RangeDescriptor{RangeID: rangeID})
 	// Add replica log tag - the value is rangeStr.String().
@@ -1840,7 +1842,8 @@ func (r *Replica) addReadOnlyCmd(
 			endCmds.done(br, pErr, proposalNoRetry)
 		}
 	}()
-
+	// placing soft locks
+	r.dynamicTimeStamper.processDynamicTimestamping(ctx, &ba)
 	r.mu.Lock()
 	err := r.mu.destroyed
 	r.mu.Unlock()
@@ -2031,6 +2034,12 @@ func (r *Replica) tryAddWriteCmd(
 		// commands which require this command to move its timestamp
 		// forward. Or, in the case of a transactional write, the txn
 		// timestamp and possible write-too-old bool.
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : calling applyTimeStampCache")
+		}
+		// Placing soft locks
+		r.dynamicTimeStamper.processDynamicTimestamping(ctx, &ba)
+
 		if bumped, pErr := r.applyTimestampCache(&ba); pErr != nil {
 			return nil, pErr, proposalNoRetry
 		} else if bumped {
