@@ -25,9 +25,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
 	"gopkg.in/inf.v0"
 
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/testutils/zerofields"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
@@ -318,13 +320,14 @@ func TestSetGetChecked(t *testing.T) {
 }
 
 func TestTxnEqual(t *testing.T) {
+	u1, u2 := uuid.MakeV4(), uuid.MakeV4()
 	tc := []struct {
 		txn1, txn2 *Transaction
 		eq         bool
 	}{
 		{nil, nil, true},
 		{&Transaction{}, nil, false},
-		{&Transaction{TxnMeta: enginepb.TxnMeta{ID: uuid.NewV4()}}, &Transaction{TxnMeta: enginepb.TxnMeta{ID: uuid.NewV4()}}, false},
+		{&Transaction{TxnMeta: enginepb.TxnMeta{ID: &u1}}, &Transaction{TxnMeta: enginepb.TxnMeta{ID: &u2}}, false},
 	}
 	for i, c := range tc {
 		if c.txn1.Equal(c.txn2) != c.txn2.Equal(c.txn1) || c.txn1.Equal(c.txn2) != c.eq {
@@ -334,16 +337,16 @@ func TestTxnEqual(t *testing.T) {
 }
 
 func TestTxnIDEqual(t *testing.T) {
-	txn1, txn2 := uuid.NewV4(), uuid.NewV4()
-	txn1Copy := *txn1
+	txn1, txn2 := uuid.MakeV4(), uuid.MakeV4()
+	txn1Copy := txn1
 
 	testCases := []struct {
 		a, b     *uuid.UUID
 		expEqual bool
 	}{
-		{txn1, txn1, true},
-		{txn1, txn2, false},
-		{txn1, &txn1Copy, true},
+		{&txn1, &txn1, true},
+		{&txn1, &txn2, false},
+		{&txn1, &txn1Copy, true},
 	}
 	for i, test := range testCases {
 		if eq := TxnIDEqual(test.a, test.b); eq != test.expEqual {
@@ -392,9 +395,12 @@ func TestTransactionObservedTimestamp(t *testing.T) {
 
 var nonZeroTxn = Transaction{
 	TxnMeta: enginepb.TxnMeta{
-		Isolation:  enginepb.SNAPSHOT,
-		Key:        Key("foo"),
-		ID:         uuid.NewV4(),
+		Isolation: enginepb.SNAPSHOT,
+		Key:       Key("foo"),
+		ID: func() *uuid.UUID {
+			u := uuid.MakeV4()
+			return &u
+		}(),
 		Epoch:      2,
 		Timestamp:  makeTS(20, 21),
 		Priority:   957356782,
@@ -415,24 +421,25 @@ var nonZeroTxn = Transaction{
 
 func TestTransactionUpdate(t *testing.T) {
 	txn := nonZeroTxn
-	if err := util.NoZeroField(txn); err != nil {
+	if err := zerofields.NoZeroField(txn); err != nil {
 		t.Fatal(err)
 	}
 
 	var txn2 Transaction
 	txn2.Update(&txn)
 
-	if err := util.NoZeroField(txn2); err != nil {
+	if err := zerofields.NoZeroField(txn2); err != nil {
 		t.Fatal(err)
 	}
 
+	u := uuid.MakeV4()
 	var txn3 Transaction
-	txn3.ID = uuid.NewV4()
+	txn3.ID = &u
 	txn3.Name = "carl"
 	txn3.Isolation = enginepb.SNAPSHOT
 	txn3.Update(&txn)
 
-	if err := util.NoZeroField(txn3); err != nil {
+	if err := zerofields.NoZeroField(txn3); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -569,6 +576,53 @@ func TestMakePriorityLimits(t *testing.T) {
 		}
 		if len(seen) < 85 {
 			t.Errorf("%f: expected randomized values, got %d: %v", userPri, len(seen), seen)
+		}
+	}
+}
+
+func TestLeaseEquivalence(t *testing.T) {
+	r1 := ReplicaDescriptor{NodeID: 1, StoreID: 1, ReplicaID: 1}
+	r2 := ReplicaDescriptor{NodeID: 2, StoreID: 2, ReplicaID: 2}
+	ts1 := makeTS(1, 1)
+	ts2 := makeTS(2, 1)
+	ts3 := makeTS(3, 1)
+
+	epoch1 := Lease{Replica: r1, Start: ts1, Epoch: proto.Int64(1)}
+	epoch2 := Lease{Replica: r1, Start: ts1, Epoch: proto.Int64(2)}
+	expire1 := Lease{Replica: r1, Start: ts1, Expiration: ts2}
+	expire2 := Lease{Replica: r1, Start: ts1, Expiration: ts3}
+	epoch2TS2 := Lease{Replica: r2, Start: ts2, Epoch: proto.Int64(2)}
+	expire2TS2 := Lease{Replica: r2, Start: ts2, Expiration: ts3}
+
+	proposed1 := Lease{Replica: r1, Start: ts1, Epoch: proto.Int64(1), ProposedTS: &ts1}
+	proposed2 := Lease{Replica: r1, Start: ts1, Epoch: proto.Int64(2), ProposedTS: &ts1}
+	proposed3 := Lease{Replica: r1, Start: ts1, Epoch: proto.Int64(1), ProposedTS: &ts2}
+
+	stasis1 := Lease{Replica: r1, Start: ts1, Epoch: proto.Int64(1), DeprecatedStartStasis: ts1}
+	stasis2 := Lease{Replica: r1, Start: ts1, Epoch: proto.Int64(1), DeprecatedStartStasis: ts2}
+
+	testCases := []struct {
+		l, ol      Lease
+		expSuccess bool
+	}{
+		{epoch1, epoch1, true},        // same epoch lease
+		{expire1, expire1, true},      // same expiration lease
+		{epoch1, epoch2, false},       // different epoch leases
+		{epoch1, epoch2TS2, false},    // different epoch leases
+		{expire1, expire2TS2, false},  // different expiration leases
+		{expire1, expire2, true},      // same expiration lease, extended
+		{expire2, expire1, false},     // same expiration lease, extended but backwards
+		{epoch1, expire1, false},      // epoch and expiration leases
+		{expire1, epoch1, false},      // expiration and epoch leases
+		{proposed1, proposed1, true},  // exact leases with identical timestamps
+		{proposed1, proposed2, false}, // same proposed timestamps, but diff epochs
+		{proposed1, proposed3, true},  // different proposed timestamps, same lease
+		{stasis1, stasis2, true},      // same lease, different stasis timestamps
+	}
+
+	for i, tc := range testCases {
+		if err := tc.l.Equivalent(tc.ol); tc.expSuccess != (err == nil) {
+			t.Errorf("%d: expected success? %t; got %s", i, tc.expSuccess, err)
 		}
 	}
 }
@@ -713,53 +767,6 @@ func TestRSpanIntersect(t *testing.T) {
 		desc.EndKey = test.endKey
 		if _, err := rs.Intersect(&desc); err == nil {
 			t.Errorf("%d: unexpected success", i)
-		}
-	}
-}
-
-func TestLeaseCovers(t *testing.T) {
-	mk := func(ds ...int64) (sl []hlc.Timestamp) {
-		for _, d := range ds {
-			sl = append(sl, hlc.ZeroTimestamp.Add(d, 0))
-		}
-		return sl
-	}
-
-	ts10 := mk(10)[0]
-	ts1K := mk(1000)[0]
-
-	for i, test := range []struct {
-		lease   Lease
-		in, out []hlc.Timestamp
-	}{
-		{
-			lease: Lease{
-				StartStasis: mk(1)[0],
-				Expiration:  ts1K,
-			},
-			in:  mk(0),
-			out: mk(1, 100, 500, 999, 1000),
-		},
-		{
-			lease: Lease{
-				Start:       ts10,
-				StartStasis: mk(500)[0],
-				Expiration:  ts1K,
-			},
-			out: mk(500, 999, 1000, 1001, 2000),
-			// Note that the lease covers timestamps before its start timestamp.
-			in: mk(0, 9, 10, 300, 499),
-		},
-	} {
-		for _, ts := range test.in {
-			if !test.lease.Covers(ts) {
-				t.Errorf("%d: should contain %s", i, ts)
-			}
-		}
-		for _, ts := range test.out {
-			if test.lease.Covers(ts) {
-				t.Errorf("%d: must not contain %s", i, ts)
-			}
 		}
 	}
 }

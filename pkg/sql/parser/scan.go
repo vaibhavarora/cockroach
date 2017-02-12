@@ -283,22 +283,8 @@ func (s *Scanner) scan(lval *sqlSymType) {
 		if t := s.peek(); t == singleQuote || t == s.stringQuote {
 			// [xX]'[a-f0-9]'
 			s.pos++
-			if s.scanString(lval, t, false, false) {
-				stringBytes, err := hex.DecodeString(lval.str)
-				if err != nil {
-					// Either the string has an odd number of characters or contains one or
-					// more invalid bytes.
-					lval.id = ERROR
-					lval.str = "invalid hexadecimal string literal"
-					return
-				}
-				if !utf8.Valid(stringBytes) {
-					lval.id = ERROR
-					lval.str = errInvalidUTF8
-					return
-				}
+			if s.scanStringOrHex(lval, t, false, true, true) {
 				lval.id = SCONST
-				lval.str = string(stringBytes)
 			}
 			return
 		}
@@ -634,6 +620,16 @@ func (s *Scanner) scanNumber(lval *sqlSymType, ch int) {
 			return
 		}
 
+		// Strip off leading zeros from non-hex (decimal) literals so that
+		// constant.MakeFromLiteral doesn't inappropriately interpret the
+		// string as an octal literal. Note: we can't use strings.TrimLeft
+		// here, because it will truncate '0' to ''.
+		if !isHex {
+			for len(lval.str) > 1 && lval.str[0] == '0' {
+				lval.str = lval.str[1:]
+			}
+		}
+
 		lval.id = ICONST
 		intConst := constant.MakeFromLiteral(lval.str, token.INT, 0)
 		if intConst.Kind() == constant.Unknown {
@@ -669,6 +665,12 @@ func (s *Scanner) scanPlaceholder(lval *sqlSymType) {
 }
 
 func (s *Scanner) scanString(lval *sqlSymType, ch int, allowEscapes, requireUTF8 bool) bool {
+	return s.scanStringOrHex(lval, ch, allowEscapes, requireUTF8, false)
+}
+
+func (s *Scanner) scanStringOrHex(
+	lval *sqlSymType, ch int, allowEscapes, requireUTF8 bool, decodeHex bool,
+) bool {
 	var buf []byte
 	var runeTmp [utf8.UTFMax]byte
 	start := s.pos
@@ -784,6 +786,19 @@ outer:
 		}
 	}
 
+	var decB []byte
+	if decodeHex {
+		decB = make([]byte, len(buf)/2)
+		_, err := hex.Decode(decB, buf)
+		if err != nil {
+			// Either the string has an odd number of characters or contains one or
+			// more invalid bytes.
+			lval.id = ERROR
+			lval.str = "invalid hexadecimal string literal"
+			return false
+		}
+		buf = decB
+	}
 	if requireUTF8 && !utf8.Valid(buf) {
 		lval.id = ERROR
 		lval.str = errInvalidUTF8

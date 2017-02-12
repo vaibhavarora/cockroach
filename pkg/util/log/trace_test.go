@@ -45,8 +45,10 @@ func testingTracer(ev *events) opentracing.Tracer {
 				*ev = append(*ev, fmt.Sprintf("%s:start", op))
 			case basictracer.EventFinish:
 				*ev = append(*ev, fmt.Sprintf("%s:finish", op))
+			case basictracer.EventLogFields:
+				*ev = append(*ev, fmt.Sprintf("%s:%s", op, t.Fields[0].Value()))
 			case basictracer.EventLog:
-				*ev = append(*ev, fmt.Sprintf("%s:%s", op, t.Event))
+				panic("EventLog is deprecated")
 			}
 		}
 	}
@@ -87,6 +89,10 @@ func compareTraces(expected, actual events) bool {
 
 func TestTrace(t *testing.T) {
 	ctx := context.Background()
+
+	// The test below merely cares about observing events in traces.
+	// Do not pollute the test's stderr with them.
+	logging.stderrThreshold = Severity_FATAL
 
 	// Events to context without a trace should be no-ops.
 	Event(ctx, "should-not-show-up")

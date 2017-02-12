@@ -30,7 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
@@ -101,7 +101,7 @@ func TestManualReplication(t *testing.T) {
 	// Transfer the lease to node 1.
 	leaseHolder, err := tc.FindRangeLeaseHolder(
 		tableRangeDesc,
-		&ReplicationTarget{
+		&base.ReplicationTarget{
 			NodeID:  tc.Servers[0].GetNode().Descriptor.NodeID,
 			StoreID: tc.Servers[0].GetFirstStoreID(),
 		})
@@ -123,7 +123,7 @@ func TestManualReplication(t *testing.T) {
 	// new lease.
 	leaseHolder, err = tc.FindRangeLeaseHolder(
 		tableRangeDesc,
-		&ReplicationTarget{
+		&base.ReplicationTarget{
 			NodeID:  tc.Servers[0].GetNode().Descriptor.NodeID,
 			StoreID: tc.Servers[0].GetFirstStoreID(),
 		})
@@ -158,8 +158,11 @@ func TestBasicManualReplication(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// TODO(peter): Removing the range leader (tc.Target(1)) causes the test to
-	// take ~13s vs ~1.5s for removing a non-leader. Track down that slowness.
+	// NB: Removing the leaseholder (tc.Target(1)) causes the test to take ~11s
+	// vs ~1.5s for removing a non-leaseholder. This is due to needing to wait
+	// for the lease to timeout which takes ~9s. Testing leaseholder removal is
+	// not necessary because internal rebalancing avoids ever removing the
+	// leaseholder for the exact reason that it causes performance hiccups.
 	desc, err = tc.RemoveReplicas(desc.StartKey.AsRawKey(), tc.Target(0))
 	if err != nil {
 		t.Fatal(err)
@@ -169,14 +172,12 @@ func TestBasicManualReplication(t *testing.T) {
 	}
 }
 
-func TestWaitForFullReplication(t *testing.T) {
+func TestBasicAutoReplication(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	tc := StartTestCluster(t, 3, base.TestClusterArgs{ReplicationMode: base.ReplicationAuto})
 	defer tc.Stopper().Stop()
-	if err := tc.WaitForFullReplication(); err != nil {
-		t.Error(err)
-	}
+	// NB: StartTestCluster will wait for full replication.
 }
 
 func TestStopServer(t *testing.T) {
@@ -192,20 +193,17 @@ func TestStopServer(t *testing.T) {
 		ReplicationMode: base.ReplicationAuto,
 	})
 	defer tc.Stopper().Stop()
-	if err := tc.WaitForFullReplication(); err != nil {
-		t.Fatal(err)
-	}
 
 	// Connect to server 1, ensure it is answering requests over HTTP and GRPC.
 	server1 := tc.Server(1)
-	var response serverpb.HealthResponse
+	var response serverpb.JSONResponse
 
 	httpClient1, err := server1.GetHTTPClient()
 	if err != nil {
 		t.Fatal(err)
 	}
-	url := server1.AdminURL() + "/_admin/v1/health"
-	if err := util.GetJSON(httpClient1, url, &response); err != nil {
+	url := server1.AdminURL() + "/_status/metrics/local"
+	if err := httputil.GetJSON(httpClient1, url, &response); err != nil {
 		t.Fatal(err)
 	}
 
@@ -216,10 +214,10 @@ func TestStopServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adminClient1 := serverpb.NewAdminClient(conn)
+	statusClient1 := serverpb.NewStatusClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := adminClient1.Health(ctx, &serverpb.HealthRequest{}); err != nil {
+	if _, err := statusClient1.Metrics(ctx, &serverpb.MetricsRequest{NodeId: "local"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -228,14 +226,14 @@ func TestStopServer(t *testing.T) {
 
 	// Verify HTTP and GRPC requests to server now fail.
 	httpErrorText := "connection refused"
-	if err := util.GetJSON(httpClient1, url, &response); err == nil {
+	if err := httputil.GetJSON(httpClient1, url, &response); err == nil {
 		t.Fatal("Expected HTTP Request to fail after server stopped")
 	} else if !testutils.IsError(err, httpErrorText) {
 		t.Fatalf("Expected error from server with text %q, got error with text %q", httpErrorText, err.Error())
 	}
 
 	grpcErrorText := "rpc error"
-	if _, err := adminClient1.Health(ctx, &serverpb.HealthRequest{}); err == nil {
+	if _, err := statusClient1.Metrics(ctx, &serverpb.MetricsRequest{NodeId: "local"}); err == nil {
 		t.Fatal("Expected GRPC Request to fail after server stopped")
 	} else if !testutils.IsError(err, grpcErrorText) {
 		t.Fatalf("Expected error from GRPC with text %q, got error with text %q", grpcErrorText, err.Error())
@@ -246,8 +244,8 @@ func TestStopServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	url = tc.Server(0).AdminURL() + "/_admin/v1/health"
-	if err := util.GetJSON(httpClient1, url, &response); err != nil {
+	url = tc.Server(0).AdminURL() + "/_status/metrics/local"
+	if err := httputil.GetJSON(httpClient1, url, &response); err != nil {
 		t.Fatal(err)
 	}
 }

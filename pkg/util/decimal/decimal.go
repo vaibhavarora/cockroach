@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pkg/errors"
 	"gopkg.in/inf.v0"
 )
 
@@ -243,30 +244,39 @@ func Cbrt(z, x *inf.Dec, s inf.Scale) *inf.Dec {
 // LogN computes the log of x with base n to the specified scale and
 // stores the result in z, which is also the return value. The function
 // will panic if x is a negative number or if n is a negative number.
-func LogN(z *inf.Dec, x *inf.Dec, n *inf.Dec, s inf.Scale) *inf.Dec {
+func LogN(z *inf.Dec, x *inf.Dec, n *inf.Dec, s inf.Scale) (*inf.Dec, error) {
 	if z == n {
 		n = new(inf.Dec).Set(n)
 	}
-	z = Log(z, x, s+1)
-	return z.QuoRound(z, Log(nil, n, s+1), s, inf.RoundHalfUp)
+	z, err := Log(z, x, s+1)
+	if err != nil {
+		return nil, err
+	}
+	ln, err := Log(nil, n, s+1)
+	if err != nil {
+		return nil, err
+	}
+	return z.QuoRound(z, ln, s, inf.RoundHalfUp), nil
 }
 
 // Log10 computes the log of x with base 10 to the specified scale and
 // stores the result in z, which is also the return value. The function
 // will panic if x is a negative number.
-func Log10(z *inf.Dec, x *inf.Dec, s inf.Scale) *inf.Dec {
-	z = Log(z, x, s)
-	return z.QuoRound(z, decimalLog10, s, inf.RoundHalfUp)
+func Log10(z *inf.Dec, x *inf.Dec, s inf.Scale) (*inf.Dec, error) {
+	z, err := Log(z, x, s)
+	if err != nil {
+		return nil, err
+	}
+	return z.QuoRound(z, decimalLog10, s, inf.RoundHalfUp), nil
 }
 
-// Log computes the natural log of x using the Maclaurin series for
-// log(1-x) to the specified scale and stores the result in z, which
-// is also the return value. The function will panic if x is a negative
-// number.
-func Log(z *inf.Dec, x *inf.Dec, s inf.Scale) *inf.Dec {
+// Log computes the natural log of x using the Taylor series to the specified
+// scale and stores the result in z, which is also the return value. The
+// function will return an error if x is a negative number.
+func Log(z *inf.Dec, x *inf.Dec, s inf.Scale) (*inf.Dec, error) {
 	// Validate the sign of x.
 	if x.Sign() <= 0 {
-		panic(fmt.Sprintf("natural log of non-positive value: %s", x))
+		return nil, errors.Errorf("natural log of non-positive value: %s", x)
 	}
 
 	// Allocate if needed and make sure args aren't mutated.
@@ -277,57 +287,73 @@ func Log(z *inf.Dec, x *inf.Dec, s inf.Scale) *inf.Dec {
 		z.SetUnscaled(0).SetScale(0)
 	}
 
-	// The series wants x < 1, and log 1/x == -log x, so exploit that.
-	invert := false
-	if x.Cmp(decimalOne) > 0 {
-		invert = true
-		x.QuoRound(decimalOne, x, s*2, inf.RoundHalfUp)
+	// Use a scale with an arbitrary amount of higher precision for Sqrt and
+	// QuoRound to achieve precision needed to get correct enough outputs. The
+	// current algorithm with this extra precision returns results with at least
+	// the same first 12 digits as postgres for inputs < ~1e-50.
+	ns := s + 20
+
+	fact := inf.NewDec(2, 0)
+
+	// Use the Taylor series approximation:
+	//
+	//   r = (x - 1) / (x + 1)
+	//   ln(x) = 2 * [ r + r^3 / 3 + r^5 / 5 + ... ]
+
+	// The taylor series of ln(x) converges much faster if 0.9 < x < 1.1. We
+	// can use the logarithmic identity:
+	// log_b (sqrt(x)) = log_b (x) / 2
+	// Thus, successively square-root x until it is in that region. Keep track
+	// of how many square-rootings were done using fact and multiply at the end.
+	for x.Cmp(decimalZeroPtNine) < 0 || x.Cmp(decimalOnePtOne) > 0 {
+		Sqrt(x, x, ns)
+		fact.Mul(fact, decimalTwo)
 	}
 
-	// x = mantissa * 2**exp, and 0.5 <= mantissa < 1.
-	// So log(x) is log(mantissa)+exp*log(2), and 1-x will be
-	// between 0 and 0.5, so the series for 1-x will converge well.
-	// (The series converges slowly in general.)
-	exp2 := int64(0)
-	for x.Cmp(decimalHalf) < 0 {
-		x.Mul(x, decimalTwo)
-		exp2--
-	}
-	exp := inf.NewDec(exp2, 0)
-	exp.Mul(exp, decimalLog2)
-	if invert {
-		exp.Neg(exp)
-	}
+	tmp1 := new(inf.Dec)
+	// tmp1 = x + 1
+	tmp1.Add(x, decimalOne)
+	tmp2 := new(inf.Dec)
+	// tmp2 = x - 1
+	tmp2.Sub(x, decimalOne)
+	elem := new(inf.Dec)
+	// elem = r = (x - 1) / (x + 1)
+	elem.QuoRound(tmp2, tmp1, ns, inf.RoundHalfUp)
+	// z will be the result. Initialize to elem.
+	z.Set(elem)
+	numerator := new(inf.Dec)
+	// numerator
+	numerator.Set(elem)
+	// elem = r^2 = ((x - 1) / (x + 1)) ^ 2
+	// Used since the series uses only odd powers of z.
+	elem.Mul(elem, elem)
+	tmp1.SetScale(0)
 
-	// y = 1-x (whereupon x = 1-y and we use that in the series).
-	y := inf.NewDec(1, 0)
-	y.Sub(y, x)
-
-	// The Maclaurin series for log(1-y) == log(x) is: -y - y²/2 - y³/3 ...
-	yN := new(inf.Dec).Set(y)
-	term := new(inf.Dec)
-	n := inf.NewDec(1, 0)
-
-	// Loop over the Maclaurin series given above until convergence.
 	for loop := newLoop("log", x, s, 40); ; {
-		n.SetUnscaled(int64(loop.i + 1))
-		term.QuoRound(yN, n, s+2, inf.RoundHalfUp)
-		z.Sub(z, term)
+		// tmp1 = n, the i'th odd power: 3, 5, 7, 9, etc.
+		tmp1.SetUnscaled(int64(loop.i)*2 + 3)
+		// numerator = r^n
+		numerator.Mul(numerator, elem)
+		// tmp2 = r^n / n
+		tmp2.QuoRound(numerator, tmp1, ns, inf.RoundHalfUp)
+		// z += r^n / n
+		z.Add(z, tmp2)
 		if loop.done(z) {
 			break
 		}
-		// Advance y**index (multiply by y).
-		yN.Mul(yN, y)
 	}
 
-	if invert {
-		z.Neg(z)
-	}
-	z.Add(z, exp)
+	// Undo input range reduction.
+	z.Mul(z, fact)
 
 	// Round to the desired scale.
-	return z.Round(z, s, inf.RoundHalfUp)
+	return z.Round(z, s, inf.RoundHalfUp), nil
 }
+
+var (
+	decimalZeroPtNine = inf.NewDec(9, 1)
+	decimalOnePtOne   = inf.NewDec(11, 1)
+)
 
 // For integers we use exponentiation by squaring.
 // See: https://en.wikipedia.org/wiki/Exponentiation_by_squaring
@@ -348,6 +374,13 @@ func integerPower(z, x *inf.Dec, y int64, s inf.Scale) *inf.Dec {
 		}
 		y >>= 1
 		x.Mul(x, x)
+
+		// integerPower is only ever called with `e` (decimalE), which is a constant
+		// with very high precision. When it is squared above, the number of digits
+		// needed to express it goes up quickly. If we are a large power of a small
+		// number (like 0.5 ^ 5000), this loop becomes very slow because of the very
+		// high number of digits it must compute. To prevent that, round x.
+		x.Round(x, s*2, inf.RoundHalfUp)
 	}
 
 	if neg {
@@ -410,10 +443,22 @@ func Exp(z, n *inf.Dec, s inf.Scale) *inf.Dec {
 	return smallExp(ex, y, s-2)
 }
 
-// Pow computes (x^y) as e^(y ln x) to the specified scale and stores
-// the result in z, which is also the return value. If y is not an
-// integer and x is negative nil is returned.
-func Pow(z, x, y *inf.Dec, s inf.Scale) *inf.Dec {
+var (
+	errPowZeroNegative  = errors.New("zero raised to a negative power is undefined")
+	errPowNegNonInteger = errors.New("a negative number raised to a non-integer power yields a complex result")
+	errArgumentTooLarge = errors.New("argument too large")
+)
+
+// maxPrecision is the largest number of decimal digits (sum of number of
+// digits before and after the decimal point) before an errArgumentTooLarge
+// is returned for any computation.
+const maxPrecision = 500
+
+// Pow computes (x^y) as e^(y ln x) to the specified scale and stores the
+// result in z, which is also the return value. If y is not an integer and
+// x is negative an error is returned. If x is zero and y is negative an
+// error is returned.
+func Pow(z, x, y *inf.Dec, s inf.Scale) (*inf.Dec, error) {
 	s = s + 2
 	if z == nil {
 		z = new(inf.Dec)
@@ -424,10 +469,23 @@ func Pow(z, x, y *inf.Dec, s inf.Scale) *inf.Dec {
 	tmp := new(inf.Dec).Abs(y)
 	isInt := tmp.Cmp(new(inf.Dec).Round(tmp, 0, inf.RoundDown)) == 0
 
-	neg := x.Sign() < 0
+	xs := x.Sign()
+	if xs == 0 {
+		switch y.Sign() {
+		case 0:
+			return z.SetUnscaled(1).SetScale(0), nil
+		case 1:
+			return z.SetUnscaled(0).SetScale(0), nil
+		default: // -1
+			// undefined for y < 0
+			return nil, errPowZeroNegative
+		}
+	}
+
+	neg := xs < 0
 
 	if !isInt && neg {
-		return nil
+		return nil, errPowNegNonInteger
 	}
 
 	// Exponent Precision Explanation (RaduBerinde):
@@ -450,10 +508,16 @@ func Pow(z, x, y *inf.Dec, s inf.Scale) *inf.Dec {
 	yu := float64(new(inf.Dec).Round(y, 0, inf.RoundUp).UnscaledBig().Int64())
 
 	// exponent precision = s + <the number of digits before decimal point in x> * y
-	es := s + inf.Scale(int32(numDigits*yu))
+	es := s + inf.Scale(numDigits*yu)
+	if es < 0 || es > maxPrecision {
+		return nil, errArgumentTooLarge
+	}
 
 	tmp = new(inf.Dec).Abs(x)
-	Log(tmp, tmp, es)
+	_, err := Log(tmp, tmp, es)
+	if err != nil {
+		return nil, err
+	}
 	tmp.Mul(tmp, y)
 	Exp(tmp, tmp, es)
 
@@ -462,5 +526,5 @@ func Pow(z, x, y *inf.Dec, s inf.Scale) *inf.Dec {
 	}
 
 	// Round to the desired scale.
-	return z.Round(tmp, s-2, inf.RoundHalfUp)
+	return z.Round(tmp, s-2, inf.RoundHalfUp), nil
 }

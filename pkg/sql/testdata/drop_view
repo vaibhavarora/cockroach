@@ -5,10 +5,10 @@ statement ok
 INSERT INTO a VALUES ('a', '1'), ('b', '2'), ('c', '3')
 
 statement ok
-CREATE VIEW b AS SELECT * from a
+CREATE VIEW b AS SELECT k,v from a
 
 statement ok
-CREATE VIEW c AS SELECT * from b
+CREATE VIEW c AS SELECT k,v from b
 
 query T
 SHOW TABLES FROM test
@@ -17,22 +17,22 @@ a
 b
 c
 
-statement error view "b" depends on table "a"
+statement error cannot drop table "a" because view "b" depends on it
 DROP TABLE a
 
 statement error pgcode 42809 "b" is not a table
 DROP TABLE b
 
-statement error view "c" depends on view "b"
+statement error cannot drop view "b" because view "c" depends on it
 DROP VIEW b
 
 statement ok
-CREATE VIEW d AS SELECT * FROM a
+CREATE VIEW d AS SELECT k,v FROM a
 
 statement ok
 CREATE VIEW diamond AS SELECT COUNT(*) FROM b AS b JOIN d AS d ON b.k = d.k
 
-statement error view "diamond" depends on view "d"
+statement error cannot drop view "d" because view "diamond" depends on it
 DROP VIEW d
 
 statement ok
@@ -52,19 +52,19 @@ user testuser
 statement error user testuser does not have DROP privilege on view diamond
 DROP VIEW diamond
 
-statement error view "diamond" depends on view "d"
+statement error cannot drop view "d" because view "diamond" depends on it
 DROP VIEW d
 
 user root
 
 statement ok
-CREATE VIEW testuser1 AS SELECT * FROM a
+CREATE VIEW testuser1 AS SELECT k,v FROM a
 
 statement ok
-CREATE VIEW testuser2 AS SELECT * FROM testuser1
+CREATE VIEW testuser2 AS SELECT k,v FROM testuser1
 
 statement ok
-CREATE VIEW testuser3 AS SELECT * FROM testuser2
+CREATE VIEW testuser3 AS SELECT k,v FROM testuser2
 
 statement ok
 GRANT ALL ON testuser1 to testuser
@@ -95,18 +95,14 @@ DROP VIEW testuser3
 query T
 SHOW TABLES FROM test
 ----
-a
-b
-c
 d
-diamond
 testuser1
 testuser2
 
-statement error view "testuser2" depends on view "testuser1"
+statement error cannot drop view "testuser1" because view "testuser2" depends on it
 DROP VIEW testuser1
 
-statement error view "testuser2" depends on view "testuser1"
+statement error cannot drop view "testuser1" because view "testuser2" depends on it
 DROP VIEW testuser1 RESTRICT
 
 statement ok
@@ -115,11 +111,7 @@ DROP VIEW testuser1 CASCADE
 query T
 SHOW TABLES FROM test
 ----
-a
-b
-c
 d
-diamond
 
 statement error pgcode 42P01 view "testuser2" does not exist
 DROP VIEW testuser2
@@ -156,9 +148,9 @@ statement ok
 CREATE VIEW x AS VALUES (1, 2), (3, 4)
 
 statement ok
-CREATE VIEW y AS SELECT * FROM x
+CREATE VIEW y AS SELECT column1, column2 FROM x
 
-statement error view "y" depends on view "x"
+statement error cannot drop view "x" because view "y" depends on it
 DROP VIEW x
 
 statement ok
@@ -168,9 +160,9 @@ statement ok
 CREATE VIEW x AS VALUES (1, 2), (3, 4)
 
 statement ok
-CREATE VIEW y AS SELECT * FROM x
+CREATE VIEW y AS SELECT column1, column2 FROM x
 
-statement error view "y" depends on view "x"
+statement error cannot drop view "x" because view "y" depends on it
 DROP VIEW x
 
 statement ok

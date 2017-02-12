@@ -17,7 +17,6 @@
 package sql
 
 import (
-	"bytes"
 	"fmt"
 	"math"
 
@@ -59,7 +58,9 @@ func (p *planner) Limit(n *parser.Limit) (*limitNode, error) {
 
 	for _, datum := range data {
 		if datum.src != nil {
-			if err := p.parser.AssertNoAggregationOrWindowing(datum.src, datum.name); err != nil {
+			if err := p.parser.AssertNoAggregationOrWindowing(
+				datum.src, datum.name, p.session.SearchPath,
+			); err != nil {
 				return nil, err
 			}
 
@@ -71,24 +72,6 @@ func (p *planner) Limit(n *parser.Limit) (*limitNode, error) {
 		}
 	}
 	return &res, nil
-}
-
-func (n *limitNode) wrap(plan planNode) planNode {
-	if n == nil {
-		return plan
-	}
-	n.plan = plan
-	return n
-}
-
-func (n *limitNode) expandPlan() error {
-	// We do not need to recurse into the child node here; selectTopNode
-	// does this for us.
-
-	if err := n.p.expandSubqueryPlans(n.countExpr); err != nil {
-		return err
-	}
-	return n.p.expandSubqueryPlans(n.offsetExpr)
 }
 
 func (n *limitNode) Start() error {
@@ -156,10 +139,6 @@ func (n *limitNode) evalLimit() error {
 
 	for _, datum := range data {
 		if datum.src != nil {
-			if err := n.p.startSubqueryPlans(datum.src); err != nil {
-				return err
-			}
-
 			dstDatum, err := datum.src.Eval(&n.p.evalCtx)
 			if err != nil {
 				return err
@@ -181,19 +160,8 @@ func (n *limitNode) evalLimit() error {
 	return nil
 }
 
-func (n *limitNode) ExplainTypes(regTypes func(string, string)) {
-	if n.countExpr != nil {
-		regTypes("count", parser.AsStringWithFlags(n.countExpr, parser.FmtShowTypes))
-	}
-	if n.offsetExpr != nil {
-		regTypes("offset", parser.AsStringWithFlags(n.offsetExpr, parser.FmtShowTypes))
-	}
-}
-
 // setTop connects the limitNode back to the selectTopNode that caused
-// its existence. This is needed because the limitNode needs to refer
-// to other nodes in the selectTopNode before its expandPlan() method
-// has ran and its child plan is known and connected.
+// its existence.
 func (n *limitNode) setTop(top *selectTopNode) {
 	if n != nil {
 		n.top = top
@@ -208,8 +176,14 @@ func (n *limitNode) Columns() ResultColumns {
 	return n.top.Columns()
 }
 
-func (n *limitNode) Values() parser.DTuple  { return n.plan.Values() }
-func (n *limitNode) Ordering() orderingInfo { return n.plan.Ordering() }
+func (n *limitNode) Values() parser.DTuple { return n.plan.Values() }
+func (n *limitNode) Ordering() orderingInfo {
+	if n.plan != nil {
+		return n.plan.Ordering()
+	}
+	// Pre-prepare: not connected yet. Ask the top select node.
+	return n.top.Ordering()
+}
 
 func (n *limitNode) MarkDebug(mode explainMode) {
 	if mode != explainDebug {
@@ -260,25 +234,6 @@ func (n *limitNode) Next() (bool, error) {
 		// Fetch the next row.
 	}
 	return true, nil
-}
-
-func (n *limitNode) ExplainPlan(_ bool) (string, string, []planNode) {
-	var buf bytes.Buffer
-	subplans := []planNode{n.plan}
-	prefix := ""
-	if n.countExpr != nil {
-		buf.WriteString("count: ")
-		n.countExpr.Format(&buf, parser.FmtSimple)
-		subplans = n.p.collectSubqueryPlans(n.countExpr, subplans)
-		prefix = ", "
-	}
-	if n.offsetExpr != nil {
-		buf.WriteString(prefix)
-		buf.WriteString("offset: ")
-		n.offsetExpr.Format(&buf, parser.FmtSimple)
-		subplans = n.p.collectSubqueryPlans(n.offsetExpr, subplans)
-	}
-	return "limit", buf.String(), subplans
 }
 
 func (n *limitNode) Close() {

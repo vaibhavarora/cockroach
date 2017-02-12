@@ -99,11 +99,6 @@ DBStatus DBFlush(DBEngine* db);
 // Forces an immediate compaction over all keys.
 DBStatus DBCompact(DBEngine* db);
 
-// Checkpoint creates a point-in-time snapshot of the database,
-// hard-linking sstable files and copying the manifest and other
-// files.
-DBStatus DBCheckpoint(DBEngine* db, DBSlice dir);
-
 // Sets the database entry for "key" to "value".
 DBStatus DBPut(DBEngine* db, DBKey key, DBSlice value);
 
@@ -116,10 +111,15 @@ DBStatus DBGet(DBEngine* db, DBKey key, DBString* value);
 // Deletes the database entry for "key".
 DBStatus DBDelete(DBEngine* db, DBKey key);
 
+// Deletes a range of keys from start (inclusive) to end (exclusive).
+DBStatus DBDeleteRange(DBEngine* db, DBIterator *iter, DBKey start, DBKey end);
+
 // Applies a batch of operations (puts, merges and deletes) to the
-// database atomically. It is only valid to call this function on an
-// engine created by DBNewBatch.
-DBStatus DBCommitBatch(DBEngine* db);
+// database atomically and closes the batch. It is only valid to call
+// this function on an engine created by DBNewBatch. If an error is
+// returned, the batch is not closed and it is the caller's
+// responsibility to call DBClose.
+DBStatus DBCommitAndCloseBatch(DBEngine* db);
 
 // ApplyBatchRepr applies a batch of mutations encoded using that
 // batch representation returned by DBBatchRepr(). It is only valid to
@@ -139,9 +139,12 @@ DBEngine* DBNewSnapshot(DBEngine* db);
 
 // Creates a new batch for performing a series of operations
 // atomically. Use DBCommitBatch() on the returned engine to apply the
-// batch to the database. It is the caller's responsibility to call
-// DBClose().
-DBEngine* DBNewBatch(DBEngine* db);
+// batch to the database. The writeOnly parameter controls whether the
+// batch can be used for reads or only for writes. A writeOnly batch
+// does not need to index keys for reading and can be faster if the
+// number of keys is large (and reads are not necessary). It is the
+// caller's responsibility to call DBClose().
+DBEngine* DBNewBatch(DBEngine* db, bool writeOnly);
 
 // Creates a new database iterator. When prefix is true, Seek will use
 // the user-key prefix of the key supplied to DBIterSeek() to restrict
@@ -231,6 +234,11 @@ typedef struct {
 // array must be freed along with the start_key and end_key of each
 // table.
 DBSSTable* DBGetSSTables(DBEngine* db, int* n);
+
+// DBGetUserProperties fetches the user properties stored in each sstable's
+// metadata. These are returned as a serialized SSTUserPropertiesCollection
+// proto.
+DBString DBGetUserProperties(DBEngine* db);
 
 // Bulk adds the file at the given path to a database. See the RocksDB
 // documentation on `AddFile` for the various restrictions on what can be added.

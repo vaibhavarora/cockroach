@@ -29,6 +29,7 @@ import (
 
 	"golang.org/x/net/context"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -38,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/pkg/errors"
 )
@@ -111,7 +113,7 @@ func Backup(
 		txn := client.NewTxn(ctx, db)
 		err := txn.Exec(opt, func(txn *client.Txn, opt *client.TxnExecOptions) error {
 			var err error
-			setTxnTimestamps(txn, endTime)
+			SetTxnTimestamps(txn, endTime)
 
 			rangeDescs, err = AllRangeDescriptors(txn)
 			if err != nil {
@@ -150,7 +152,7 @@ func Backup(
 		txn := client.NewTxn(ctx, db)
 		err := txn.Exec(opt, func(txn *client.Txn, opt *client.TxnExecOptions) error {
 			var err error
-			setTxnTimestamps(txn, endTime)
+			SetTxnTimestamps(txn, endTime)
 
 			// TODO(dan): Iterate with some batch size.
 			kvs, err = txn.Scan(backupDescs[i].StartKey, backupDescs[i].EndKey, 0)
@@ -356,7 +358,7 @@ func restoreTable(
 		// our keys will, too. We should someday figure out how to overwrite an
 		// existing table and steal its ID.
 		var err error
-		newTableID, err = generateUniqueDescID(txn)
+		newTableID, err = GenerateUniqueDescID(txn)
 		return err
 	}); err != nil {
 		return err
@@ -389,17 +391,30 @@ func restoreTable(
 			// should be possible to remove it from the one txn this is all currently
 			// run under. If we do that, make sure this data gets cleaned up on errors.
 			wg.Add(1)
-			go func(r sqlbase.BackupRangeDescriptor) {
-				if err := db.Txn(ctx, func(txn *client.Txn) error {
-					return Ingest(ctx, txn, r.Path, r.CRC, intersectBegin, intersectEnd, newTableID)
-				}); err != nil {
-					log.Error(ctx, err)
-					result.Lock()
-					defer result.Unlock()
-					if result.firstErr != nil {
-						result.firstErr = err
+			go func(desc sqlbase.BackupRangeDescriptor) {
+				for r := retry.StartWithCtx(ctx, base.DefaultRetryOptions()); r.Next(); {
+					err := db.Txn(ctx, func(txn *client.Txn) error {
+						return Ingest(ctx, txn, desc.Path, desc.CRC, intersectBegin, intersectEnd, newTableID)
+					})
+					if _, ok := err.(*client.AutoCommitError); ok {
+						log.Errorf(ctx, "auto commit error during ingest: %s", err)
+						// TODO(dan): Ingest currently does not rely on the
+						// range being empty, but the plan is that it will. When
+						// that change happens, this will have to delete any
+						// partially ingested data or something.
+						continue
 					}
-					result.numErrs++
+
+					if err != nil {
+						log.Errorf(ctx, "%T %s", err, err)
+						result.Lock()
+						defer result.Unlock()
+						if result.firstErr != nil {
+							result.firstErr = err
+						}
+						result.numErrs++
+					}
+					break
 				}
 				wg.Done()
 			}(rangeDesc)
@@ -471,7 +486,7 @@ func restoreTableDesc(
 		// fix the empty range interleaved table TODO below.
 		existingDataPrefix := roachpb.Key(keys.MakeTablePrefix(uint32(existingTable.ID)))
 		b.DelRange(existingDataPrefix, existingDataPrefix.PrefixEnd(), false)
-		zoneKey, _, descKey := getKeysForTableDescriptor(existingTable)
+		zoneKey, _, descKey := GetKeysForTableDescriptor(existingTable)
 		// Delete the desc and zone entries. Leave the name because the new
 		// table is using it.
 		b.Del(descKey)
@@ -483,8 +498,8 @@ func restoreTableDesc(
 func userTablesAndDBsMatchingName(
 	descs []sqlbase.Descriptor, name parser.TableName,
 ) ([]sqlbase.Descriptor, error) {
-	tableName := sqlbase.NormalizeName(name.TableName)
-	dbName := sqlbase.NormalizeName(name.DatabaseName)
+	tableName := name.TableName.Normalize()
+	dbName := name.DatabaseName.Normalize()
 
 	matches := make([]sqlbase.Descriptor, 0, len(descs))
 	dbIDsToName := make(map[sqlbase.ID]string)
@@ -493,7 +508,7 @@ func userTablesAndDBsMatchingName(
 			if db.ID == keys.SystemDatabaseID {
 				continue // Not a user database.
 			}
-			if n := sqlbase.NormalizeName(parser.Name(db.Name)); dbName == "*" || n == dbName {
+			if n := parser.Name(db.Name).Normalize(); dbName == "*" || n == dbName {
 				matches = append(matches, desc)
 				dbIDsToName[db.ID] = n
 			}
@@ -505,7 +520,7 @@ func userTablesAndDBsMatchingName(
 			if _, ok := dbIDsToName[table.ParentID]; !ok {
 				continue
 			}
-			if tableName == "*" || sqlbase.NormalizeName(parser.Name(table.Name)) == tableName {
+			if tableName == "*" || parser.Name(table.Name).Normalize() == tableName {
 				matches = append(matches, desc)
 			}
 		}
@@ -535,7 +550,7 @@ func Restore(
 		return nil, err
 	}
 	if len(matches) == 0 {
-		return nil, errors.Errorf("no tables found: %q", table)
+		return nil, errors.Errorf("no tables found: %s", &table)
 	}
 	databasesByID := make(map[sqlbase.ID]*sqlbase.DatabaseDescriptor)
 	for _, desc := range matches {

@@ -36,6 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
 )
 
@@ -51,12 +52,20 @@ var serverCfg = server.MakeConfig()
 var baseCfg = serverCfg.Config
 var cliCtx = cliContext{Config: baseCfg}
 var sqlCtx = sqlContext{cliContext: &cliCtx}
+var dumpCtx = dumpContext{cliContext: &cliCtx, dumpMode: dumpBoth}
 var debugCtx = debugContext{
 	startKey:   engine.NilKey,
 	endKey:     engine.MVCCKeyMax,
 	replicated: false,
 }
 
+// InitCLIDefaults is used for testing.
+func InitCLIDefaults() {
+	cliCtx.prettyFmt = false
+	dumpCtx.dumpMode = dumpBoth
+}
+
+var sqlSize *bytesValue
 var cacheSize *bytesValue
 var insecure *insecureValue
 
@@ -196,41 +205,25 @@ func setFlagFromEnv(f *pflag.FlagSet, flagInfo cliflags.FlagInfo) {
 }
 
 func stringFlag(f *pflag.FlagSet, valPtr *string, flagInfo cliflags.FlagInfo, defaultVal string) {
-	if flagInfo.Shorthand == "" {
-		f.StringVar(valPtr, flagInfo.Name, defaultVal, makeUsageString(flagInfo))
-	} else {
-		f.StringVarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
-	}
+	f.StringVarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
 
 	setFlagFromEnv(f, flagInfo)
 }
 
 func intFlag(f *pflag.FlagSet, valPtr *int, flagInfo cliflags.FlagInfo, defaultVal int) {
-	if flagInfo.Shorthand == "" {
-		f.IntVar(valPtr, flagInfo.Name, defaultVal, makeUsageString(flagInfo))
-	} else {
-		f.IntVarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
-	}
+	f.IntVarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
 
 	setFlagFromEnv(f, flagInfo)
 }
 
 func int64Flag(f *pflag.FlagSet, valPtr *int64, flagInfo cliflags.FlagInfo, defaultVal int64) {
-	if flagInfo.Shorthand == "" {
-		f.Int64Var(valPtr, flagInfo.Name, defaultVal, makeUsageString(flagInfo))
-	} else {
-		f.Int64VarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
-	}
+	f.Int64VarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
 
 	setFlagFromEnv(f, flagInfo)
 }
 
 func boolFlag(f *pflag.FlagSet, valPtr *bool, flagInfo cliflags.FlagInfo, defaultVal bool) {
-	if flagInfo.Shorthand == "" {
-		f.BoolVar(valPtr, flagInfo.Name, defaultVal, makeUsageString(flagInfo))
-	} else {
-		f.BoolVarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
-	}
+	f.BoolVarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
 
 	setFlagFromEnv(f, flagInfo)
 }
@@ -238,21 +231,13 @@ func boolFlag(f *pflag.FlagSet, valPtr *bool, flagInfo cliflags.FlagInfo, defaul
 func durationFlag(
 	f *pflag.FlagSet, valPtr *time.Duration, flagInfo cliflags.FlagInfo, defaultVal time.Duration,
 ) {
-	if flagInfo.Shorthand == "" {
-		f.DurationVar(valPtr, flagInfo.Name, defaultVal, makeUsageString(flagInfo))
-	} else {
-		f.DurationVarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
-	}
+	f.DurationVarP(valPtr, flagInfo.Name, flagInfo.Shorthand, defaultVal, makeUsageString(flagInfo))
 
 	setFlagFromEnv(f, flagInfo)
 }
 
 func varFlag(f *pflag.FlagSet, value pflag.Value, flagInfo cliflags.FlagInfo) {
-	if flagInfo.Shorthand == "" {
-		f.Var(value, flagInfo.Name, makeUsageString(flagInfo))
-	} else {
-		f.VarP(value, flagInfo.Name, flagInfo.Shorthand, makeUsageString(flagInfo))
-	}
+	f.VarP(value, flagInfo.Name, flagInfo.Shorthand, makeUsageString(flagInfo))
 
 	setFlagFromEnv(f, flagInfo)
 }
@@ -261,6 +246,16 @@ func init() {
 	// Change the logging defaults for the main cockroach binary.
 	if err := flag.Lookup(logflags.LogToStderrName).Value.Set("false"); err != nil {
 		panic(err)
+	}
+
+	// Every command but start will inherit the following setting.
+	cockroachCmd.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		return setDefaultStderrVerbosity(cmd, log.Severity_WARNING)
+	}
+
+	// The following only runs for `start`.
+	startCmd.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		return setDefaultStderrVerbosity(cmd, log.Severity_INFO)
 	}
 
 	// Map any flags registered in the standard "flag" package into the
@@ -321,9 +316,12 @@ func init() {
 		varFlag(f, &serverCfg.JoinList, cliflags.Join)
 
 		// Engine flags.
-		setDefaultCacheSize(&serverCfg)
+		setDefaultSizeParameters(&serverCfg)
 		cacheSize = newBytesValue(&serverCfg.CacheSize)
 		varFlag(f, cacheSize, cliflags.Cache)
+
+		sqlSize = newBytesValue(&serverCfg.SQLMemoryPoolSize)
+		varFlag(f, sqlSize, cliflags.SQLMem)
 	}
 
 	for _, cmd := range certCmds {
@@ -336,7 +334,7 @@ func init() {
 		intFlag(f, &keySize, cliflags.KeySize, defaultKeySize)
 	}
 
-	stringFlag(setUserCmd.Flags(), &password, cliflags.Password, "")
+	boolFlag(setUserCmd.Flags(), &password, cliflags.Password, false)
 
 	clientCmds := []*cobra.Command{
 		sqlShellCmd, quitCmd, freezeClusterCmd, dumpCmd, /* startCmd is covered above */
@@ -346,7 +344,6 @@ func init() {
 	clientCmds = append(clientCmds, userCmds...)
 	clientCmds = append(clientCmds, zoneCmds...)
 	clientCmds = append(clientCmds, nodeCmds...)
-	clientCmds = append(clientCmds, backupCmd, restoreCmd)
 	for _, cmd := range clientCmds {
 		f := cmd.PersistentFlags()
 		stringFlag(f, &connHost, cliflags.ClientHost, "")
@@ -359,11 +356,6 @@ func init() {
 		stringFlag(f, &baseCfg.SSLCA, cliflags.CACert, baseCfg.SSLCA)
 		stringFlag(f, &baseCfg.SSLCert, cliflags.Cert, baseCfg.SSLCert)
 		stringFlag(f, &baseCfg.SSLCertKey, cliflags.Key, baseCfg.SSLCertKey)
-
-		// By default, client commands print their output as
-		// pretty-formatted tables on terminals, and TSV when redirected
-		// to a file. The user can override with --pretty.
-		boolFlag(f, &cliCtx.prettyFmt, cliflags.Pretty, isInteractive)
 	}
 
 	zf := setZoneCmd.Flags()
@@ -371,6 +363,7 @@ func init() {
 	boolFlag(zf, &zoneDisableReplication, cliflags.ZoneDisableReplication, false)
 
 	varFlag(sqlShellCmd.Flags(), &sqlCtx.execStmts, cliflags.Execute)
+	varFlag(dumpCmd.Flags(), &dumpCtx.dumpMode, cliflags.DumpMode)
 
 	boolFlag(freezeClusterCmd.PersistentFlags(), &undoFreezeCluster, cliflags.UndoFreezeCluster, false)
 
@@ -395,6 +388,19 @@ func init() {
 		stringFlag(f, &connUser, cliflags.User, security.RootUser)
 		stringFlag(f, &connPort, cliflags.ClientPort, base.DefaultPort)
 		stringFlag(f, &connDBName, cliflags.Database, "")
+	}
+
+	// Commands that print tables.
+	tableOutputCommands := []*cobra.Command{sqlShellCmd}
+	tableOutputCommands = append(tableOutputCommands, userCmds...)
+	tableOutputCommands = append(tableOutputCommands, nodeCmds...)
+	for _, cmd := range tableOutputCommands {
+		f := cmd.Flags()
+
+		// By default, these commands print their output as pretty-formatted
+		// tables on terminals, and TSV when redirected to a file. The user
+		// can override with --pretty.
+		boolFlag(f, &cliCtx.prettyFmt, cliflags.Pretty, isInteractive)
 	}
 
 	// Max results flag for scan, reverse scan, and range list.
@@ -441,4 +447,34 @@ func extraFlagInit() {
 		httpHost = connHost
 	}
 	serverCfg.HTTPAddr = net.JoinHostPort(httpHost, httpPort)
+}
+
+func setDefaultStderrVerbosity(cmd *cobra.Command, defaultSeverity log.Severity) error {
+	pf := cmd.Flags()
+
+	if vf := pf.Lookup(logflags.AlsoLogToStderrName); !vf.Changed {
+		ls := pf.Lookup(logflags.LogToStderrName)
+
+		// If `--logtostderr` is specified, the base default is
+		// everything, otherwise it's nothing (subject to the additional
+		// setting below).
+		if ls.Value.String() == "true" {
+			if err := vf.Value.Set(log.Severity_INFO.String()); err != nil {
+				return err
+			}
+		} else {
+			if err := vf.Value.Set(log.Severity_NONE.String()); err != nil {
+				return err
+			}
+		}
+		// If no log directory has been set, reduce the logging verbosity
+		// to the given default.
+		if !log.DirSet() {
+			if err := vf.Value.Set(defaultSeverity.String()); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

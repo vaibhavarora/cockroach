@@ -24,23 +24,23 @@ SELECT * FROM t WHERE a = '2015-08-25 05:45:45.53453+01:00'::timestamp
 query ITTT
 EXPLAIN (DEBUG) SELECT * FROM t WHERE a = '2015-08-25 06:45:45.53453+02:00'::timestamp
 ----
-0 /t/primary/2015-08-25 04:45:45.53453+00:00   NULL        PARTIAL
-0 /t/primary/2015-08-25 04:45:45.53453+00:00/b 2015-08-25  PARTIAL
-0 /t/primary/2015-08-25 04:45:45.53453+00:00/c 2h45m2.234s ROW
+0 /t/primary/'2015-08-25 04:45:45.53453+00:00'   NULL                   PARTIAL
+0 /t/primary/'2015-08-25 04:45:45.53453+00:00'/b '2015-08-25'           PARTIAL
+0 /t/primary/'2015-08-25 04:45:45.53453+00:00'/c INTERVAL '2h45m2.234s' ROW
 
 query ITTT
 EXPLAIN (DEBUG) SELECT b FROM t WHERE b < '2015-08-29'::date
 ----
-0 /t/t_b_key/2015-08-25 /2015-08-25 04:45:45.53453+00:00 ROW
+0 /t/t_b_key/'2015-08-25' /'2015-08-25 04:45:45.53453+00:00' ROW
 
 query ITTT
 EXPLAIN (DEBUG) SELECT c FROM t WHERE c < '234h45m2s234ms'::interval
 ----
-0 /t/t_c_key/2h45m2.234s /2015-08-25 04:45:45.53453+00:00 ROW
-1 /t/t_c_key/34h0m2s     /2015-08-30 03:34:45.34567+00:00 ROW
+0 /t/t_c_key/INTERVAL '2h45m2.234s' /'2015-08-25 04:45:45.53453+00:00' ROW
+1 /t/t_c_key/INTERVAL '34h0m2s'     /'2015-08-30 03:34:45.34567+00:00' ROW
 
 # insert duplicate value with different time zone offset
-statement error duplicate key value \(a\)=\(2015-08-30 03:34:45\.34567\+00:00\) violates unique constraint "primary"
+statement error duplicate key value \(a\)=\('2015-08-30 03:34:45\.34567\+00:00'\) violates unique constraint "primary"
 INSERT INTO t VALUES
   ('2015-08-29 20:34:45.34567-07:00', '2015-08-31', '35h2s')
 
@@ -341,82 +341,82 @@ SELECT k FROM kv ORDER BY v
 6
 
 query I
-SELECT extract(year from '2001-04-10 12:04:59')
+SELECT extract(year from '2001-04-10 12:04:59'::timestamp)
 ----
 2001
 
 query I
-SELECT extract(quarter from '2001-04-10 12:04:59')
+SELECT extract(quarter from '2001-04-10 12:04:59'::timestamp)
 ----
 2
 
 query I
-SELECT extract(month from '2001-04-10 12:04:59')
+SELECT extract(month from '2001-04-10 12:04:59'::timestamp)
 ----
 4
 
 query I
-SELECT extract(week from '2001-04-10 12:04:59')
+SELECT extract(week from '2001-04-10 12:04:59'::timestamp)
 ----
 15
 
 query I
-SELECT extract(day from '2001-04-10 12:04:59')
+SELECT extract(day from '2001-04-10 12:04:59'::timestamp)
 ----
 10
 
 query I
-SELECT extract(dayofweek from '2001-04-10 12:04:59')
+SELECT extract(dayofweek from '2001-04-10 12:04:59'::timestamp)
 ----
 2
 
 query I
-SELECT extract(dow from '2001-04-12 12:04:59')
+SELECT extract(dow from '2001-04-12 12:04:59'::timestamp)
 ----
 4
 
 query I
-SELECT extract(dayofyear from '2001-04-10 12:04:59')
+SELECT extract(dayofyear from '2001-04-10 12:04:59'::timestamp)
 ----
 100
 
 query I
-SELECT extract(doy from '2001-04-12 12:04:59')
+SELECT extract(doy from '2001-04-12 12:04:59'::timestamp)
 ----
 102
 
 query I
-SELECT extract(epoch from '2001-04-10 12:04:59')
+SELECT extract(epoch from '2001-04-10 12:04:59'::timestamp)
 ----
 986904299
 
 query I
-SELECT extract(hour from '2001-04-10 12:04:59')
+SELECT extract(hour from '2001-04-10 12:04:59'::timestamp)
 ----
 12
 
 query I
-SELECT extract(minute from '2001-04-10 12:04:59')
+SELECT extract(minute from '2001-04-10 12:04:59'::timestamp)
 ----
 4
 
 query I
-SELECT extract(second from '2001-04-10 12:04:59.234')
+SELECT extract(second from '2001-04-10 12:04:59.234'::timestamp)
 ----
 59
 
 query I
-SELECT extract(millisecond from '2001-04-10 12:04:59.234567')
+SELECT extract(millisecond from '2001-04-10 12:04:59.234567'::timestamp)
 ----
 234
 
 query I
-SELECT extract(microsecond from '2001-04-10 12:04:59.34565423')
+SELECT extract(microsecond from '2001-04-10 12:04:59.34565423'::timestamp)
 ----
 345654
 
-query error extract: unsupported timespan: nansecond
-SELECT extract(nansecond from '2001-04-10 12:04:59.34565423')
+query error extract\(\): unsupported timespan: nansecond
+SELECT extract(nansecond from '2001-04-10 12:04:59.34565423'::timestamp)
 
 # Test SET TIME ZONE
 
@@ -687,9 +687,100 @@ SHOW TIME ZONE
 -5
 
 statement ok
+SET TIME ZONE INTERVAL '+04:00' HOUR TO MINUTE;
+
+query T
+SELECT '2015-08-24 21:45:45.53453'::timestamptz
+----
+2015-08-24 21:45:45.53453 +0400 +0400
+
+statement ok
+SET TIME ZONE INTERVAL '-04:00' MINUTE TO SECOND;
+
+query T
+SELECT '2015-08-24 21:45:45.53453'::timestamptz
+----
+2015-08-24 21:45:45.53453 -0400 -0400
+
+statement ok
 SET TIME ZONE 0
 
 query T
 SHOW TIME ZONE
 ----
 0
+
+query T
+SELECT DATE '1999-01-01' + INTERVAL '4 minutes'
+----
+1999-01-01 00:04:00 +0000 +0000
+
+query T
+SELECT INTERVAL '4 minutes' + DATE '1999-01-01'
+----
+1999-01-01 00:04:00 +0000 +0000
+
+query T
+SELECT DATE '1999-01-01' - INTERVAL '4 minutes';
+----
+1998-12-31 23:56:00 +0000 +0000
+
+query B
+SELECT DATE '1999-01-02' < TIMESTAMPTZ '1999-01-01';
+----
+false
+
+query B
+SELECT DATE '1999-01-02' < TIMESTAMP '1999-01-01';
+----
+false
+
+query B
+SELECT DATE '1999-01-02' <= TIMESTAMPTZ '1999-01-01';
+----
+false
+
+query B
+SELECT DATE '1999-01-02' <= TIMESTAMP '1999-01-01';
+----
+false
+
+query B
+SELECT DATE '1999-01-02' <= TIMESTAMPTZ '1999-01-02';
+----
+true
+
+query B
+SELECT DATE '1999-01-02' <= TIMESTAMP '1999-01-02';
+----
+true
+
+query B
+SELECT DATE '1999-01-02' > TIMESTAMPTZ '1999-01-01';
+----
+true
+
+query B
+SELECT DATE '1999-01-02' > TIMESTAMP '1999-01-01';
+----
+true
+
+query B
+SELECT DATE '1999-01-02' >= TIMESTAMPTZ '1999-01-01';
+----
+true
+
+query B
+SELECT DATE '1999-01-02' >= TIMESTAMP '1999-01-01';
+----
+true
+
+query B
+SELECT DATE '1999-01-02' = TIMESTAMPTZ '1999-01-01';
+----
+false
+
+query B
+SELECT DATE '1999-01-01' = TIMESTAMP '1999-01-01';
+----
+true

@@ -70,12 +70,14 @@ import (
 	"github.com/pkg/errors"
 	circuit "github.com/rubyist/circuitbreaker"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -113,9 +115,11 @@ const (
 	// efficiently targeted connection to the most distant node.
 	defaultCullInterval = 60 * time.Second
 
-	// DefaultGossipStoresInterval is the default interval for gossiping storage-
-	// related info.
-	DefaultGossipStoresInterval = 5 * time.Second
+	// defaultGossipStoresInterval is the default interval for gossiping
+	// store descriptors.
+	defaultGossipStoresInterval = 60 * time.Second
+
+	unknownNodeID roachpb.NodeID = 0
 )
 
 // Gossip metrics counter names.
@@ -126,6 +130,12 @@ var (
 	MetaInfosReceivedRates       = metric.Metadata{Name: "gossip.infos.received"}
 	MetaBytesSentRates           = metric.Metadata{Name: "gossip.bytes.sent"}
 	MetaBytesReceivedRates       = metric.Metadata{Name: "gossip.bytes.received"}
+)
+
+var (
+	// GossipStoresInterval is the interval for gossipping storage-related info.
+	GossipStoresInterval = envutil.EnvOrDefaultDuration("COCKROACH_GOSSIP_STORES_INTERVAL",
+		defaultGossipStoresInterval)
 )
 
 // Storage is an interface which allows the gossip instance
@@ -145,12 +155,11 @@ type Storage interface {
 // During bootstrapping, the bootstrap list contains candidates for
 // entry to the gossip network.
 type Gossip struct {
-	log.AmbientContext
+	*server // Embedded gossip RPC server
 
 	Connected     chan struct{}       // Closed upon initial connection
 	hasConnected  bool                // Set first time network is connected
 	rpcContext    *rpc.Context        // The context required for RPC
-	*server                           // Embedded gossip RPC server
 	outgoing      nodeSet             // Set of outgoing client node IDs
 	storage       Storage             // Persistent storage interface
 	bootstrapInfo BootstrapInfo       // BootstrapInfo proto for persistent storage
@@ -192,13 +201,19 @@ type Gossip struct {
 	nodeDescs      map[roachpb.NodeID]*roachpb.NodeDescriptor
 
 	// Membership sets for resolvers and bootstrap addresses.
+	// bootstrapAddrs also tracks which address is associated with which
+	// node ID to enable faster node lookup by address.
 	resolverAddrs  map[util.UnresolvedAddr]resolver.Resolver
-	bootstrapAddrs map[util.UnresolvedAddr]struct{}
+	bootstrapAddrs map[util.UnresolvedAddr]roachpb.NodeID
 }
 
 // New creates an instance of a gossip node.
+// The higher level manages the NodeIDContainer instance (which can be shared by
+// various server components). The ambient context is expected to already
+// contain the node ID.
 func New(
 	ambient log.AmbientContext,
+	nodeID *base.NodeIDContainer,
 	rpcContext *rpc.Context,
 	grpcServer *grpc.Server,
 	resolvers []resolver.Resolver,
@@ -207,10 +222,9 @@ func New(
 ) *Gossip {
 	ambient.SetEventLog("gossip", "gossip")
 	g := &Gossip{
-		AmbientContext:    ambient,
+		server:            newServer(ambient, nodeID, stopper, registry),
 		Connected:         make(chan struct{}),
 		rpcContext:        rpcContext,
-		server:            newServer(ambient, stopper, registry),
 		outgoing:          makeNodeSet(minPeers, metric.NewGauge(MetaConnectionsOutgoingGauge)),
 		bootstrapping:     map[string]struct{}{},
 		disconnected:      make(chan *client, 10),
@@ -220,11 +234,9 @@ func New(
 		cullInterval:      defaultCullInterval,
 		nodeDescs:         map[roachpb.NodeID]*roachpb.NodeDescriptor{},
 		resolverAddrs:     map[util.UnresolvedAddr]resolver.Resolver{},
-		bootstrapAddrs:    map[util.UnresolvedAddr]struct{}{},
+		bootstrapAddrs:    map[util.UnresolvedAddr]roachpb.NodeID{},
 	}
-	stopper.AddCloser(stop.CloserFn(func() {
-		g.AmbientContext.FinishEventLog()
-	}))
+	stopper.AddCloser(stop.CloserFn(g.server.AmbientContext.FinishEventLog))
 
 	registry.AddMetric(g.outgoing.gauge)
 	g.clientsMu.breakers = map[string]*circuit.Breaker{}
@@ -233,7 +245,9 @@ func New(
 		resolverAddrs[i] = resolver.Addr()
 	}
 	ctx := g.AnnotateCtx(context.Background())
-	log.Infof(ctx, "initial resolvers: %v", resolverAddrs)
+	if log.V(1) {
+		log.Infof(ctx, "initial resolvers: %v", resolverAddrs)
+	}
 	g.SetResolvers(resolvers)
 
 	g.mu.Lock()
@@ -247,40 +261,32 @@ func New(
 	return g
 }
 
+// NewTest is a simplified wrapper around New that creates the NodeIDContainer
+// internally. Used for testing.
+func NewTest(
+	nodeID roachpb.NodeID,
+	rpcContext *rpc.Context,
+	grpcServer *grpc.Server,
+	resolvers []resolver.Resolver,
+	stopper *stop.Stopper,
+	registry *metric.Registry,
+) *Gossip {
+	n := &base.NodeIDContainer{}
+	var ac log.AmbientContext
+	ac.AddLogTag("n", n)
+	gossip := New(ac, n, rpcContext, grpcServer, resolvers, stopper, registry)
+	if nodeID != 0 {
+		n.Set(context.TODO(), nodeID)
+	}
+	return gossip
+}
+
 // GetNodeMetrics returns the gossip node metrics.
 func (g *Gossip) GetNodeMetrics() *Metrics {
 	return g.server.GetNodeMetrics()
 }
 
-// GetNodeID returns the instance's saved node ID.
-func (g *Gossip) GetNodeID() roachpb.NodeID {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.mu.is.NodeID
-}
-
-// SetNodeID sets the infostore's node ID.
-func (g *Gossip) SetNodeID(nodeID roachpb.NodeID) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.mu.is.NodeID != 0 && g.mu.is.NodeID != nodeID {
-		panic(fmt.Sprintf("different node IDs were set for the same gossip instance (%d, %d)", g.mu.is.NodeID, nodeID))
-	}
-	g.mu.is.NodeID = nodeID
-	ctx := g.AnnotateCtx(context.TODO())
-	log.Infof(ctx, "NodeID set to %d", nodeID)
-}
-
-// ResetNodeID resets the infostore's node ID.
-// NOTE: use only from unittests.
-func (g *Gossip) ResetNodeID(nodeID roachpb.NodeID) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.mu.is.NodeID = nodeID
-}
-
-// SetNodeDescriptor adds the node descriptor to the gossip network
-// and sets the infostore's node ID.
+// SetNodeDescriptor adds the node descriptor to the gossip network.
 func (g *Gossip) SetNodeDescriptor(desc *roachpb.NodeDescriptor) error {
 	ctx := g.AnnotateCtx(context.TODO())
 	log.Infof(ctx, "NodeDescriptor set to %+v", desc)
@@ -344,7 +350,7 @@ func (g *Gossip) SetStorage(storage Storage) error {
 	for _, addr := range storedBI.Addresses {
 		// If the address is new, and isn't our own address, add it.
 		if _, ok := existing[makeKey(addr)]; !ok && addr != g.mu.is.NodeAddr {
-			g.maybeAddBootstrapAddress(addr)
+			g.maybeAddBootstrapAddress(addr, unknownNodeID)
 		}
 	}
 	// Persist merged addresses.
@@ -496,12 +502,15 @@ func (g *Gossip) maybeAddResolver(addr util.UnresolvedAddr) bool {
 // maybeAddBootstrapAddress adds the specified address to the list of
 // bootstrap addresses if not already present. Returns whether a new
 // bootstrap address was added. The caller must hold the gossip mutex.
-func (g *Gossip) maybeAddBootstrapAddress(addr util.UnresolvedAddr) bool {
-	if _, ok := g.bootstrapAddrs[addr]; ok {
+func (g *Gossip) maybeAddBootstrapAddress(addr util.UnresolvedAddr, nodeID roachpb.NodeID) bool {
+	if existingNodeID, ok := g.bootstrapAddrs[addr]; ok {
+		if existingNodeID == unknownNodeID || existingNodeID != nodeID {
+			g.bootstrapAddrs[addr] = nodeID
+		}
 		return false
 	}
 	g.bootstrapInfo.Addresses = append(g.bootstrapInfo.Addresses, addr)
-	g.bootstrapAddrs[addr] = struct{}{}
+	g.bootstrapAddrs[addr] = nodeID
 	ctx := g.AnnotateCtx(context.TODO())
 	log.Eventf(ctx, "add bootstrap %s", addr)
 	return true
@@ -521,7 +530,7 @@ func (g *Gossip) maybeCleanupBootstrapAddressesLocked() {
 	g.resolvers = g.resolvers[:0]
 	g.resolverIdx = 0
 	g.bootstrapInfo.Addresses = g.bootstrapInfo.Addresses[:0]
-	g.bootstrapAddrs = map[util.UnresolvedAddr]struct{}{}
+	g.bootstrapAddrs = map[util.UnresolvedAddr]roachpb.NodeID{}
 	g.resolverAddrs = map[util.UnresolvedAddr]resolver.Resolver{}
 	g.resolversTried = map[int]struct{}{}
 
@@ -531,11 +540,11 @@ func (g *Gossip) maybeCleanupBootstrapAddressesLocked() {
 			if err := i.Value.GetProto(&desc); err != nil {
 				return err
 			}
-			if desc.Address == g.mu.is.NodeAddr {
+			if desc.Address.IsEmpty() || desc.Address == g.mu.is.NodeAddr {
 				return nil
 			}
 			g.maybeAddResolver(desc.Address)
-			g.maybeAddBootstrapAddress(desc.Address)
+			g.maybeAddBootstrapAddress(desc.Address, desc.NodeID)
 		}
 		return nil
 	}); err != nil {
@@ -571,7 +580,7 @@ func (g *Gossip) maxPeers(nodeCount int) int {
 // new resolvers for each encountered host and to write the
 // set of gossip node addresses to persistent storage when it
 // changes.
-func (g *Gossip) updateNodeAddress(_ string, content roachpb.Value) {
+func (g *Gossip) updateNodeAddress(key string, content roachpb.Value) {
 	ctx := g.AnnotateCtx(context.TODO())
 	var desc roachpb.NodeDescriptor
 	if err := content.GetProto(&desc); err != nil {
@@ -582,18 +591,28 @@ func (g *Gossip) updateNodeAddress(_ string, content roachpb.Value) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// If desc is the empty descriptor, that indicates that the node has been
+	// removed from the cluster. If that's the case, remove it from our map of
+	// nodes to prevent other parts of the system from trying to talk to it.
+	// We can't directly compare the node against the empty descriptor because
+	// the proto has a repeated field and thus isn't comparable.
+	if desc.NodeID == 0 && desc.Address.IsEmpty() {
+		nodeID, err := NodeIDFromKey(key)
+		if err != nil {
+			log.Errorf(ctx, "unable to update node address for removed node: %s", err)
+			return
+		}
+		log.Infof(ctx, "removed node %d from gossip", nodeID)
+		g.removeNodeDescriptorLocked(nodeID)
+		return
+	}
+
 	// Skip if the node has already been seen.
 	if _, ok := g.nodeDescs[desc.NodeID]; ok {
 		return
 	}
-
 	g.nodeDescs[desc.NodeID] = &desc
-
-	// Recompute max peers based on size of network and set the max
-	// sizes for incoming and outgoing node sets.
-	maxPeers := g.maxPeers(len(g.nodeDescs))
-	g.mu.incoming.setMaxSize(maxPeers)
-	g.outgoing.setMaxSize(maxPeers)
+	g.recomputeMaxPeersLocked()
 
 	// Skip if it's our own address.
 	if desc.Address == g.mu.is.NodeAddr {
@@ -605,13 +624,57 @@ func (g *Gossip) updateNodeAddress(_ string, content roachpb.Value) {
 	// resolvers go offline.
 	g.maybeAddResolver(desc.Address)
 
+	// We ignore empty addresses for the sake of not breaking the many tests
+	// that don't bother specifying addresses.
+	if desc.Address.IsEmpty() {
+		return
+	}
+
+	// If the new node's address conflicts with another node's address, then it
+	// must be the case that the new node has replaced the previous one. Remove
+	// it from our set of tracked descriptors to ensure we don't attempt to
+	// connect to its previous identity (as came up in issue #10266).
+	oldNodeID, ok := g.bootstrapAddrs[desc.Address]
+	if ok && oldNodeID != unknownNodeID && oldNodeID != desc.NodeID {
+		log.Infof(ctx, "removing node %d which was at same address (%s) as new node %v",
+			oldNodeID, desc.Address, desc)
+		g.removeNodeDescriptorLocked(oldNodeID)
+
+		// Deleting the local copy isn't enough to remove the node from the gossip
+		// network. We also have to clear it out in the infoStore by overwriting
+		// it with an empty descriptor, which can be represented as just an empty
+		// byte array due to how protocol buffers are serialied.
+		// Calling addInfoLocked here is somewhat recursive since
+		// updateNodeAddress is typically called in response to the infoStore
+		// being updated but won't lead to deadlock because it's called
+		// asynchronously.
+		key := MakeNodeIDKey(oldNodeID)
+		var emptyProto []byte
+		if err := g.addInfoLocked(key, emptyProto, ttlNodeDescriptorGossip); err != nil {
+			log.Errorf(ctx, "failed to empty node descriptor for node %d: %s", oldNodeID, err)
+		}
+	}
 	// Add new address (if it's not already there) to bootstrap info and
 	// persist if possible.
-	if g.storage != nil && g.maybeAddBootstrapAddress(desc.Address) {
+	added := g.maybeAddBootstrapAddress(desc.Address, desc.NodeID)
+	if added && g.storage != nil {
 		if err := g.storage.WriteBootstrapInfo(&g.bootstrapInfo); err != nil {
 			log.Error(ctx, err)
 		}
 	}
+}
+
+func (g *Gossip) removeNodeDescriptorLocked(nodeID roachpb.NodeID) {
+	delete(g.nodeDescs, nodeID)
+	g.recomputeMaxPeersLocked()
+}
+
+// recomputeMaxPeersLocked recomputes max peers based on size of
+// network and set the max sizes for incoming and outgoing node sets.
+func (g *Gossip) recomputeMaxPeersLocked() {
+	maxPeers := g.maxPeers(len(g.nodeDescs))
+	g.mu.incoming.setMaxSize(maxPeers)
+	g.outgoing.setMaxSize(maxPeers)
 }
 
 // getNodeDescriptorLocked looks up the descriptor of the node by ID. The mutex
@@ -636,10 +699,14 @@ func (g *Gossip) getNodeDescriptorLocked(nodeID roachpb.NodeID) (*roachpb.NodeDe
 		if err := i.Value.GetProto(nodeDescriptor); err != nil {
 			return nil, err
 		}
-		return nodeDescriptor, nil
+		// Don't return node descriptors that are empty, because that's meant to
+		// indicate that the node has been removed from the cluster.
+		if !(nodeDescriptor.NodeID == 0 && nodeDescriptor.Address.IsEmpty()) {
+			return nodeDescriptor, nil
+		}
 	}
 
-	return nil, errors.Errorf("unable to lookup descriptor for node %d", nodeID)
+	return nil, errors.Errorf("unable to look up descriptor for node %d", nodeID)
 }
 
 // getNodeIDAddressLocked looks up the address of the node by ID. The mutex is
@@ -659,6 +726,12 @@ func (g *Gossip) getNodeIDAddressLocked(nodeID roachpb.NodeID) (*util.Unresolved
 func (g *Gossip) AddInfo(key string, val []byte, ttl time.Duration) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.addInfoLocked(key, val, ttl)
+}
+
+// addInfoLocked adds or updates an info object. The mutex is assumed held by
+// the caller. Returns an error if info couldn't be added.
+func (g *Gossip) addInfoLocked(key string, val []byte, ttl time.Duration) error {
 	err := g.mu.is.addInfo(key, g.mu.is.newInfo(val, ttl))
 	if err == nil {
 		g.signalConnectedLocked()
@@ -908,7 +981,7 @@ func (g *Gossip) bootstrap() {
 				if !haveClients || !haveSentinel {
 					// Try to get another bootstrap address from the resolvers.
 					if addr := g.getNextBootstrapAddress(); addr != nil {
-						g.startClient(addr, g.mu.is.NodeID)
+						g.startClient(addr)
 					} else {
 						bootstrapAddrs := make([]string, 0, len(g.bootstrapping))
 						for addr := range g.bootstrapping {
@@ -1025,13 +1098,11 @@ func (g *Gossip) tightenNetwork(distantNodeID roachpb.NodeID) {
 	if g.outgoing.hasSpace() {
 		ctx := g.AnnotateCtx(context.TODO())
 		if nodeAddr, err := g.getNodeIDAddressLocked(distantNodeID); err != nil {
-			log.Errorf(ctx, "node %d: unable to get address for node %d: %s",
-				g.mu.is.NodeID, distantNodeID, err)
+			log.Errorf(ctx, "unable to get address for node %d: %s", distantNodeID, err)
 		} else {
-			log.Infof(ctx, "node %d: starting client to distant node %d to tighten network graph",
-				g.mu.is.NodeID, distantNodeID)
+			log.Infof(ctx, "starting client to distant node %d to tighten network graph", distantNodeID)
 			log.Eventf(ctx, "tightening network with new client to %s", nodeAddr)
-			g.startClient(nodeAddr, g.mu.is.NodeID)
+			g.startClient(nodeAddr)
 		}
 	}
 }
@@ -1043,7 +1114,7 @@ func (g *Gossip) doDisconnected(c *client) {
 
 	// If the client was disconnected with a forwarding address, connect now.
 	if c.forwardAddr != nil {
-		g.startClient(c.forwardAddr, g.mu.is.NodeID)
+		g.startClient(c.forwardAddr)
 	}
 	g.maybeSignalStatusChangeLocked()
 }
@@ -1060,7 +1131,9 @@ func (g *Gossip) maybeSignalStatusChangeLocked() {
 			log.Eventf(ctx, "now stalled")
 			if orphaned {
 				if len(g.resolvers) == 0 {
-					log.Warningf(ctx, "no resolvers found; use --join to specify a connected node")
+					if log.V(1) {
+						log.Warningf(ctx, "no resolvers found; use --join to specify a connected node")
+					}
 				} else {
 					log.Warningf(ctx, "no incoming or outgoing connections")
 				}
@@ -1112,7 +1185,7 @@ func (g *Gossip) signalConnectedLocked() {
 // startClient launches a new client connected to remote address.
 // The client is added to the outgoing address set and launched in
 // a goroutine.
-func (g *Gossip) startClient(addr net.Addr, nodeID roachpb.NodeID) {
+func (g *Gossip) startClient(addr net.Addr) {
 	g.clientsMu.Lock()
 	defer g.clientsMu.Unlock()
 	breaker, ok := g.clientsMu.breakers[addr.String()]
@@ -1122,9 +1195,9 @@ func (g *Gossip) startClient(addr net.Addr, nodeID roachpb.NodeID) {
 	}
 	ctx := g.AnnotateCtx(context.TODO())
 	log.Eventf(ctx, "starting new client to %s", addr)
-	c := newClient(g.AmbientContext, addr, g.serverMetrics)
+	c := newClient(g.server.AmbientContext, addr, g.serverMetrics)
 	g.clientsMu.clients = append(g.clientsMu.clients, c)
-	c.start(g, g.disconnected, g.rpcContext, g.server.stopper, nodeID, breaker)
+	c.start(g, g.disconnected, g.rpcContext, g.server.stopper, breaker)
 }
 
 // removeClient removes the specified client. Called when a client

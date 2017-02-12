@@ -16,7 +16,13 @@
 
 package parser
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/cockroachdb/cockroach/pkg/util"
+)
 
 // PlaceholderTypes relates placeholder names to their resolved type.
 type PlaceholderTypes map[string]Type
@@ -53,6 +59,34 @@ func (p *PlaceholderInfo) Assign(src *PlaceholderInfo) {
 	}
 }
 
+// FillUnassigned sets all unsassigned placeholders to NULL.
+func (p *PlaceholderInfo) FillUnassigned() {
+	for pn := range p.Types {
+		if _, ok := p.Values[pn]; !ok {
+			p.Values[pn] = DNull
+		}
+	}
+}
+
+// AssertAllAssigned ensures that all placeholders that are used also
+// have a value assigned.
+func (p *PlaceholderInfo) AssertAllAssigned() error {
+	var missing []string
+	for pn := range p.Types {
+		if _, ok := p.Values[pn]; !ok {
+			missing = append(missing, "$"+pn)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("no value provided for placeholder%s: %s",
+			util.Pluralize(int64(len(missing))),
+			strings.Join(missing, ", "),
+		)
+	}
+	return nil
+}
+
 // Type returns the known type of a placeholder.
 // Returns false in the 2nd value if the placeholder is not typed.
 func (p *PlaceholderInfo) Type(name string) (Type, bool) {
@@ -87,7 +121,7 @@ func (p *PlaceholderInfo) SetValue(name string, val Datum) {
 // SetType assignes a known type to a placeholder.
 // Reports an error if another type was previously assigned.
 func (p *PlaceholderInfo) SetType(name string, typ Type) error {
-	if t, ok := p.Types[name]; ok && !typ.Equal(t) {
+	if t, ok := p.Types[name]; ok && !typ.Equivalent(t) {
 		return fmt.Errorf("placeholder %s already has type %s, cannot assign %s", name, t, typ)
 	}
 	p.Types[name] = typ

@@ -5,13 +5,16 @@
 1.  Install the following prerequisites, as necessary:
   - A C++ compiler that supports C++11. Note that GCC prior to 6.0 doesn't
     work due to https://gcc.gnu.org/bugzilla/show_bug.cgi?id=48891
-  - A Go environment with a 64-bit version of Go 1.7.1
+  - A Go environment with a recent 64-bit version of the toolchain. Note that
+    the Makefile enforces the specific version required, as it is updated
+    frequently.
   - Git 1.8+
   - Bash
 
+
 2.  Get the CockroachDB code:
 
-	```bash
+	```shell
 	go get -d github.com/cockroachdb/cockroach
 	cd $GOPATH/src/github.com/cockroachdb/cockroach
 	```
@@ -24,27 +27,24 @@ will be in your current directory and can be run as shown in the
 [README](README.md).
 
 Note that if you edit a `.proto` or `.ts` file, you will need to manually
-regenerate the associated `.pb.{go,cc,h}` or `.js` files using `go generate
-./...`.
+regenerate the associated `.pb.{go,cc,h}` or `.js` files using
+`go generate ./pkg/...`.
 
 We advise to run `go generate` using our embedded Docker setup.
 `build/builder.sh` is a wrapper script designed to make this convenient. You can
-run `build/builder.sh env SKIP_BOOTSTRAP=0 go generate ./...` from the repository
+run `build/builder.sh go generate ./pkg/...` from the repository
 root to get the intended result.
 
-If you want to run it outside of Docker, `go generate` requires a collection of
-Node.js modules which are installed via npm.
+If you want to run it outside of Docker, `go generate` requires a collection
+of Node.js modules which will be automatically installed into the project tree
+(not globally).
 
 If you plan on working on the UI, check out [the ui readme](pkg/ui).
 
 To add or update a go dependency:
 
-- `(cd $GOPATH/src && go get -u ./...)` to update the dependencies or `go get
-  `({package}` to add a dependency
-- `glock save github.com/cockroachdb/cockroach` to update the GLOCKFILE
-- `go generate ./...` to update generated files -- prefer
-  `go generate ./the-updated-package` instead of `...` when possible to avoid
-  re-generating files in directories where you haven't made any changes.
+- see `build/README.md` for details on adding or updating dependencies
+- run `go generate ./pkg/...` to update generated files.
 - create a PR with all the changes
 
 ### Style guide
@@ -67,7 +67,7 @@ To add or update a go dependency:
   Remember to write tests! The following are helpful for running specific
   subsets of tests:
 
-  ```bash
+  ```shell
   make test
   # Run all tests in ./pkg/storage
   make test PKG=./pkg/storage
@@ -88,9 +88,9 @@ To add or update a go dependency:
   not point to a specific package; those commits may begin with "*:" or "all:"
   to indicate their reach.
 
-+ Run the whole CI test suite locally: `./build/circle-local.sh`. This requires
-  the Docker setup; if you don't have/want that,
-  `go generate ./... && make check test testrace` is a good first approximation.
++ Run the test suite locally:
+
+  `go generate ./pkg/... && make check test testrace`
 
 + When you’re ready for review, groom your work: each commit should pass tests
   and contain a substantial (but not overwhelming) unit of work. You may also
@@ -152,11 +152,11 @@ Peeking into a running cluster can be done in several ways:
 An easy way to locally run a workload against a cluster are the acceptance
 tests. For example,
 
-```bash
+```shell
 make acceptance TESTS='TestPut$$' TESTFLAGS='-v -d 1200s -l .' TESTTIMEOUT=1210s
 ```
 
 runs the `Put` acceptance test for 20 minutes with logging (useful to look at
-the stacktrace in case of a node dying). When it starts, all the relevant
+the stack trace in case of a node dying). When it starts, all the relevant
 commands for `pprof`, `trace` and logs are logged to allow for convenient
 inspection of the cluster.

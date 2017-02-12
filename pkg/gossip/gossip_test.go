@@ -26,10 +26,10 @@ import (
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -42,10 +42,8 @@ func TestGossipInfoStore(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	rpcContext := rpc.NewContext(log.AmbientContext{}, &base.Config{Insecure: true}, nil, stopper)
-	g := New(log.AmbientContext{}, rpcContext, rpc.NewServer(rpcContext), nil, stopper, metric.NewRegistry())
-	// Have to call g.SetNodeID before call g.AddInfo
-	g.SetNodeID(roachpb.NodeID(1))
+	rpcContext := newInsecureRPCContext(stopper)
+	g := NewTest(1, rpcContext, rpc.NewServer(rpcContext), nil, stopper, metric.NewRegistry())
 	slice := []byte("b")
 	if err := g.AddInfo("s", slice, time.Hour); err != nil {
 		t.Fatal(err)
@@ -55,6 +53,55 @@ func TestGossipInfoStore(t *testing.T) {
 	}
 	if _, err := g.GetInfo("s2"); err == nil {
 		t.Errorf("expected error fetching nonexistent key \"s2\"")
+	}
+}
+
+// TestGossipOverwriteNode verifies that if a new node is added with the same
+// address as an old node, that old node is removed from the cluster.
+func TestGossipOverwriteNode(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	stopper := stop.NewStopper()
+	defer stopper.Stop()
+	rpcContext := newInsecureRPCContext(stopper)
+	g := NewTest(1, rpcContext, rpc.NewServer(rpcContext), nil, stopper, metric.NewRegistry())
+	node1 := &roachpb.NodeDescriptor{NodeID: 1, Address: util.MakeUnresolvedAddr("tcp", "1.1.1.1:1")}
+	node2 := &roachpb.NodeDescriptor{NodeID: 2, Address: util.MakeUnresolvedAddr("tcp", "2.2.2.2:2")}
+	if err := g.SetNodeDescriptor(node1); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetNodeDescriptor(node2); err != nil {
+		t.Fatal(err)
+	}
+	if val, err := g.GetNodeDescriptor(node1.NodeID); err != nil {
+		t.Error(err)
+	} else if val.NodeID != node1.NodeID {
+		t.Errorf("expected node %d, got %+v", node1.NodeID, val)
+	}
+	if val, err := g.GetNodeDescriptor(node2.NodeID); err != nil {
+		t.Error(err)
+	} else if val.NodeID != node2.NodeID {
+		t.Errorf("expected node %d, got %+v", node2.NodeID, val)
+	}
+
+	// Give node3 the same address as node1, which should cause node1 to be
+	// removed from the cluster.
+	node3 := &roachpb.NodeDescriptor{NodeID: 3, Address: node1.Address}
+	if err := g.SetNodeDescriptor(node3); err != nil {
+		t.Fatal(err)
+	}
+	if val, err := g.GetNodeDescriptor(node3.NodeID); err != nil {
+		t.Error(err)
+	} else if val.NodeID != node3.NodeID {
+		t.Errorf("expected node %d, got %+v", node3.NodeID, val)
+	}
+
+	// Quiesce the stopper now to ensure that the update has propagated before
+	// checking whether node 1 has been removed from the infoStore.
+	stopper.Quiesce()
+	expectedErr := "unable to look up descriptor for node"
+	if val, err := g.GetNodeDescriptor(node1.NodeID); !testutils.IsError(err, expectedErr) {
+		t.Errorf("expected error %q fetching node %d; got error %v and node %+v",
+			expectedErr, node1.NodeID, err, val)
 	}
 }
 
@@ -79,8 +126,8 @@ func TestGossipGetNextBootstrapAddress(t *testing.T) {
 	if len(resolvers) != 3 {
 		t.Errorf("expected 3 resolvers; got %d", len(resolvers))
 	}
-	server := rpc.NewServer(rpc.NewContext(log.AmbientContext{}, &base.Config{Insecure: true}, nil, stopper))
-	g := New(log.AmbientContext{}, nil, server, resolvers, stop.NewStopper(), metric.NewRegistry())
+	server := rpc.NewServer(newInsecureRPCContext(stopper))
+	g := NewTest(0, nil, server, resolvers, stop.NewStopper(), metric.NewRegistry())
 
 	// Using specified resolvers, fetch bootstrap addresses 3 times
 	// and verify the results match expected addresses.
@@ -107,7 +154,7 @@ func TestGossipRaceLogStatus(t *testing.T) {
 
 	local.mu.Lock()
 	peer := startGossip(2, stopper, t, metric.NewRegistry())
-	local.startClient(&peer.mu.is.NodeAddr, peer.mu.is.NodeID)
+	local.startClient(&peer.mu.is.NodeAddr)
 	local.mu.Unlock()
 
 	// Race gossiping against LogStatus.
@@ -169,7 +216,7 @@ func TestGossipNoForwardSelf(t *testing.T) {
 	for _, peer := range peers {
 		c := newClient(log.AmbientContext{}, local.GetNodeAddr(), makeMetrics())
 
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			conn, err := peer.rpcContext.GRPCDial(c.addr.String(), grpc.WithBlock())
 			if err != nil {
 				return err
@@ -204,7 +251,7 @@ func TestGossipNoForwardSelf(t *testing.T) {
 		for {
 			localAddr := local.GetNodeAddr()
 			c := newClient(log.AmbientContext{}, localAddr, makeMetrics())
-			c.start(peer, disconnectedCh, peer.rpcContext, stopper, peer.GetNodeID(), peer.rpcContext.NewBreaker())
+			c.start(peer, disconnectedCh, peer.rpcContext, stopper, peer.rpcContext.NewBreaker())
 
 			disconnectedClient := <-disconnectedCh
 			if disconnectedClient != c {
@@ -212,10 +259,10 @@ func TestGossipNoForwardSelf(t *testing.T) {
 			} else if c.forwardAddr == nil {
 				// Under high load, clients sometimes fail to connect for reasons
 				// unrelated to the test, so we need to permit some.
-				t.Logf("node #%d: got nil forwarding address", peer.GetNodeID())
+				t.Logf("node #%d: got nil forwarding address", peer.NodeID.Get())
 				continue
 			} else if *c.forwardAddr == *localAddr {
-				t.Errorf("node #%d: got local's forwarding address", peer.GetNodeID())
+				t.Errorf("node #%d: got local's forwarding address", peer.NodeID.Get())
 			}
 			break
 		}
@@ -235,7 +282,7 @@ func TestGossipCullNetwork(t *testing.T) {
 	local.mu.Lock()
 	for i := 0; i < minPeers; i++ {
 		peer := startGossip(roachpb.NodeID(i+2), stopper, t, metric.NewRegistry())
-		local.startClient(peer.GetNodeAddr(), peer.GetNodeID())
+		local.startClient(peer.GetNodeAddr())
 	}
 	local.mu.Unlock()
 
@@ -280,13 +327,13 @@ func TestGossipOrphanedStallDetection(t *testing.T) {
 	peerStopper := stop.NewStopper()
 	peer := startGossip(2, peerStopper, t, metric.NewRegistry())
 
-	peerNodeID := peer.GetNodeID()
+	peerNodeID := peer.NodeID.Get()
 	peerAddr := peer.GetNodeAddr()
 	peerAddrStr := peerAddr.String()
 
-	local.startClient(peerAddr, peerNodeID)
+	local.startClient(peerAddr)
 
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		for _, peerID := range local.Outgoing() {
 			if peerID == peerNodeID {
 				return nil
@@ -295,7 +342,7 @@ func TestGossipOrphanedStallDetection(t *testing.T) {
 		return errors.Errorf("node %d not yet connected", peerNodeID)
 	})
 
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		for _, resolver := range local.GetResolvers() {
 			if resolver.Addr() == peerAddrStr {
 				return nil
@@ -309,7 +356,7 @@ func TestGossipOrphanedStallDetection(t *testing.T) {
 
 	peerStopper.Stop()
 
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		for _, peerID := range local.Outgoing() {
 			if peerID == peerNodeID {
 				return errors.Errorf("node %d still connected", peerNodeID)
@@ -320,9 +367,9 @@ func TestGossipOrphanedStallDetection(t *testing.T) {
 
 	peerStopper = stop.NewStopper()
 	defer peerStopper.Stop()
-	peer = startGossipAtAddr(peerNodeID, peerAddr, peerStopper, t, metric.NewRegistry())
+	startGossipAtAddr(peerNodeID, peerAddr, peerStopper, t, metric.NewRegistry())
 
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		for _, peerID := range local.Outgoing() {
 			if peerID == peerNodeID {
 				return nil

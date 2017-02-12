@@ -49,21 +49,15 @@ type copyNode struct {
 	rowsMemAcc    WrappableMemoryAccount
 }
 
-func (n *copyNode) Columns() ResultColumns            { return n.resultColumns }
-func (*copyNode) Ordering() orderingInfo              { return orderingInfo{} }
-func (*copyNode) Values() parser.DTuple               { return nil }
-func (*copyNode) ExplainTypes(_ func(string, string)) {}
-func (*copyNode) SetLimitHint(_ int64, _ bool)        {}
-func (*copyNode) MarkDebug(_ explainMode)             {}
-func (*copyNode) expandPlan() error                   { return nil }
-func (*copyNode) Next() (bool, error)                 { return false, nil }
+func (n *copyNode) Columns() ResultColumns     { return n.resultColumns }
+func (*copyNode) Ordering() orderingInfo       { return orderingInfo{} }
+func (*copyNode) Values() parser.DTuple        { return nil }
+func (*copyNode) SetLimitHint(_ int64, _ bool) {}
+func (*copyNode) MarkDebug(_ explainMode)      {}
+func (*copyNode) Next() (bool, error)          { return false, nil }
 
 func (n *copyNode) Close() {
-	n.rowsMemAcc.W(n.p.session).Close()
-}
-
-func (*copyNode) ExplainPlan(_ bool) (name, description string, children []planNode) {
-	return "copy", "-", nil
+	n.rowsMemAcc.Wtxn(n.p.session).Close()
 }
 
 func (*copyNode) DebugValues() debugValues {
@@ -176,6 +170,9 @@ func (p *planner) ProcessCopyData(data string, msg copyMsg) (parser.StatementLis
 		if len(line) > 0 && line[len(line)-1] == '\r' {
 			line = line[:len(line)-1]
 		}
+		if buf.Len() == 0 && bytes.Equal(line, []byte(`\.`)) {
+			break
+		}
 		if err := cf.addRow(line); err != nil {
 			return nil, err
 		}
@@ -190,7 +187,7 @@ func (n *copyNode) addRow(line []byte) error {
 		return fmt.Errorf("expected %d values, got %d", len(n.resultColumns), len(parts))
 	}
 	exprs := make(parser.Exprs, len(parts))
-	acc := n.rowsMemAcc.W(n.p.session)
+	acc := n.rowsMemAcc.Wtxn(n.p.session)
 	for i, part := range parts {
 		s := string(part)
 		if s == nullString {
@@ -370,7 +367,7 @@ func (p *planner) CopyData(n CopyDataBlock, autoCommit bool) (planNode, error) {
 	vc := &parser.ValuesClause{Tuples: cf.rows}
 	// Reuse the same backing array once the Insert is complete.
 	cf.rows = cf.rows[:0]
-	cf.rowsMemAcc.W(p.session).Clear()
+	cf.rowsMemAcc.Wtxn(p.session).Clear()
 
 	in := parser.Insert{
 		Table:   cf.table,

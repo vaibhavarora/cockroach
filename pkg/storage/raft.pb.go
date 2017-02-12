@@ -9,6 +9,7 @@ import fmt "fmt"
 import math "math"
 import cockroach_roachpb3 "github.com/cockroachdb/cockroach/pkg/roachpb"
 import cockroach_roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
+import cockroach_storage_storagebase "github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 import raftpb "github.com/coreos/etcd/raft/raftpb"
 
 import github_com_cockroachdb_cockroach_pkg_roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -67,11 +68,32 @@ func (x *SnapshotResponse_Status) UnmarshalJSON(data []byte) error {
 	return nil
 }
 func (SnapshotResponse_Status) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptorRaft, []int{5, 0}
+	return fileDescriptorRaft, []int{6, 0}
 }
 
+// RaftHeartbeat is a request that contains the barebones information for a
+// raftpb.MsgHeartbeat raftpb.Message. RaftHeartbeats are coalesced and sent
+// in a RaftMessageRequest, and reconstructed by the receiver into individual
+// raftpb.Message protos.
+type RaftHeartbeat struct {
+	RangeID       github_com_cockroachdb_cockroach_pkg_roachpb.RangeID   `protobuf:"varint,1,opt,name=range_id,json=rangeId,casttype=github.com/cockroachdb/cockroach/pkg/roachpb.RangeID" json:"range_id"`
+	FromReplicaID github_com_cockroachdb_cockroach_pkg_roachpb.ReplicaID `protobuf:"varint,2,opt,name=from_replica_id,json=fromReplicaId,casttype=github.com/cockroachdb/cockroach/pkg/roachpb.ReplicaID" json:"from_replica_id"`
+	ToReplicaID   github_com_cockroachdb_cockroach_pkg_roachpb.ReplicaID `protobuf:"varint,3,opt,name=to_replica_id,json=toReplicaId,casttype=github.com/cockroachdb/cockroach/pkg/roachpb.ReplicaID" json:"to_replica_id"`
+	Term          uint64                                                 `protobuf:"varint,4,opt,name=term" json:"term"`
+	Commit        uint64                                                 `protobuf:"varint,5,opt,name=commit" json:"commit"`
+	Quiesce       bool                                                   `protobuf:"varint,6,opt,name=quiesce" json:"quiesce"`
+}
+
+func (m *RaftHeartbeat) Reset()                    { *m = RaftHeartbeat{} }
+func (m *RaftHeartbeat) String() string            { return proto.CompactTextString(m) }
+func (*RaftHeartbeat) ProtoMessage()               {}
+func (*RaftHeartbeat) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{0} }
+
 // RaftMessageRequest is the request used to send raft messages using our
-// protobuf-based RPC codec.
+// protobuf-based RPC codec. If a RaftMessageRequest has a non-empty number of
+// heartbeats or heartbeat_resps, the contents of the message field is treated
+// as a dummy message and discarded. A coalesced heartbeat request's replica
+// descriptor's range ID must be zero.
 type RaftMessageRequest struct {
 	RangeID     github_com_cockroachdb_cockroach_pkg_roachpb.RangeID `protobuf:"varint,1,opt,name=range_id,json=rangeId,casttype=github.com/cockroachdb/cockroach/pkg/roachpb.RangeID" json:"range_id"`
 	FromReplica cockroach_roachpb.ReplicaDescriptor                  `protobuf:"bytes,2,opt,name=from_replica,json=fromReplica" json:"from_replica"`
@@ -85,12 +107,16 @@ type RaftMessageRequest struct {
 	// Raft which will generate a MsgHeartbeatResp that will unquiesce
 	// the sender.
 	Quiesce bool `protobuf:"varint,5,opt,name=quiesce" json:"quiesce"`
+	// A coalesced heartbeat request is any RaftMessageRequest with a nonzero number of
+	// heartbeats or heartbeat_resps.
+	Heartbeats     []RaftHeartbeat `protobuf:"bytes,6,rep,name=heartbeats" json:"heartbeats"`
+	HeartbeatResps []RaftHeartbeat `protobuf:"bytes,7,rep,name=heartbeat_resps,json=heartbeatResps" json:"heartbeat_resps"`
 }
 
 func (m *RaftMessageRequest) Reset()                    { *m = RaftMessageRequest{} }
 func (m *RaftMessageRequest) String() string            { return proto.CompactTextString(m) }
 func (*RaftMessageRequest) ProtoMessage()               {}
-func (*RaftMessageRequest) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{0} }
+func (*RaftMessageRequest) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{1} }
 
 type RaftMessageRequestBatch struct {
 	Requests []RaftMessageRequest `protobuf:"bytes,1,rep,name=requests" json:"requests"`
@@ -99,7 +125,7 @@ type RaftMessageRequestBatch struct {
 func (m *RaftMessageRequestBatch) Reset()                    { *m = RaftMessageRequestBatch{} }
 func (m *RaftMessageRequestBatch) String() string            { return proto.CompactTextString(m) }
 func (*RaftMessageRequestBatch) ProtoMessage()               {}
-func (*RaftMessageRequestBatch) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{1} }
+func (*RaftMessageRequestBatch) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{2} }
 
 type RaftMessageResponseUnion struct {
 	Error *cockroach_roachpb3.Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
@@ -108,7 +134,7 @@ type RaftMessageResponseUnion struct {
 func (m *RaftMessageResponseUnion) Reset()                    { *m = RaftMessageResponseUnion{} }
 func (m *RaftMessageResponseUnion) String() string            { return proto.CompactTextString(m) }
 func (*RaftMessageResponseUnion) ProtoMessage()               {}
-func (*RaftMessageResponseUnion) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{2} }
+func (*RaftMessageResponseUnion) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{3} }
 
 // RaftMessageResponse may be sent to the sender of a
 // RaftMessageRequest. RaftMessage does not use the usual
@@ -127,7 +153,7 @@ type RaftMessageResponse struct {
 func (m *RaftMessageResponse) Reset()                    { *m = RaftMessageResponse{} }
 func (m *RaftMessageResponse) String() string            { return proto.CompactTextString(m) }
 func (*RaftMessageResponse) ProtoMessage()               {}
-func (*RaftMessageResponse) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{3} }
+func (*RaftMessageResponse) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{4} }
 
 // SnapshotRequest is the request used to send streaming snapshot requests.
 type SnapshotRequest struct {
@@ -144,10 +170,15 @@ type SnapshotRequest struct {
 func (m *SnapshotRequest) Reset()                    { *m = SnapshotRequest{} }
 func (m *SnapshotRequest) String() string            { return proto.CompactTextString(m) }
 func (*SnapshotRequest) ProtoMessage()               {}
-func (*SnapshotRequest) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{4} }
+func (*SnapshotRequest) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{5} }
 
 type SnapshotRequest_Header struct {
-	RangeDescriptor cockroach_roachpb.RangeDescriptor `protobuf:"bytes,1,opt,name=range_descriptor,json=rangeDescriptor" json:"range_descriptor"`
+	// The replica state at the time the snapshot was generated. Note
+	// that ReplicaState.Desc differs from the above range_descriptor
+	// field which holds the updated descriptor after the new replica
+	// has been added while ReplicaState.Desc holds the descriptor
+	// before the new replica has been added.
+	State cockroach_storage_storagebase.ReplicaState `protobuf:"bytes,5,opt,name=state" json:"state"`
 	// The inner raft message is of type MsgSnap, and its snapshot data contains a UUID.
 	RaftMessageRequest RaftMessageRequest `protobuf:"bytes,2,opt,name=raft_message_request,json=raftMessageRequest" json:"raft_message_request"`
 	// The estimated size of the range, to be used in reservation decisions.
@@ -161,18 +192,17 @@ type SnapshotRequest_Header struct {
 func (m *SnapshotRequest_Header) Reset()                    { *m = SnapshotRequest_Header{} }
 func (m *SnapshotRequest_Header) String() string            { return proto.CompactTextString(m) }
 func (*SnapshotRequest_Header) ProtoMessage()               {}
-func (*SnapshotRequest_Header) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{4, 0} }
+func (*SnapshotRequest_Header) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{5, 0} }
 
 type SnapshotResponse struct {
-	Status        SnapshotResponse_Status          `protobuf:"varint,1,opt,name=status,enum=cockroach.storage.SnapshotResponse_Status" json:"status"`
-	Message       string                           `protobuf:"bytes,2,opt,name=message" json:"message"`
-	StoreCapacity *cockroach_roachpb.StoreCapacity `protobuf:"bytes,3,opt,name=store_capacity,json=storeCapacity" json:"store_capacity,omitempty"`
+	Status  SnapshotResponse_Status `protobuf:"varint,1,opt,name=status,enum=cockroach.storage.SnapshotResponse_Status" json:"status"`
+	Message string                  `protobuf:"bytes,2,opt,name=message" json:"message"`
 }
 
 func (m *SnapshotResponse) Reset()                    { *m = SnapshotResponse{} }
 func (m *SnapshotResponse) String() string            { return proto.CompactTextString(m) }
 func (*SnapshotResponse) ProtoMessage()               {}
-func (*SnapshotResponse) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{5} }
+func (*SnapshotResponse) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{6} }
 
 // ConfChangeContext is encoded in the raftpb.ConfChange.Context field.
 type ConfChangeContext struct {
@@ -187,9 +217,10 @@ type ConfChangeContext struct {
 func (m *ConfChangeContext) Reset()                    { *m = ConfChangeContext{} }
 func (m *ConfChangeContext) String() string            { return proto.CompactTextString(m) }
 func (*ConfChangeContext) ProtoMessage()               {}
-func (*ConfChangeContext) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{6} }
+func (*ConfChangeContext) Descriptor() ([]byte, []int) { return fileDescriptorRaft, []int{7} }
 
 func init() {
+	proto.RegisterType((*RaftHeartbeat)(nil), "cockroach.storage.RaftHeartbeat")
 	proto.RegisterType((*RaftMessageRequest)(nil), "cockroach.storage.RaftMessageRequest")
 	proto.RegisterType((*RaftMessageRequestBatch)(nil), "cockroach.storage.RaftMessageRequestBatch")
 	proto.RegisterType((*RaftMessageResponseUnion)(nil), "cockroach.storage.RaftMessageResponseUnion")
@@ -207,7 +238,7 @@ var _ grpc.ClientConn
 
 // This is a compile-time assertion to ensure that this generated file
 // is compatible with the grpc package it is being compiled against.
-const _ = grpc.SupportPackageIsVersion3
+const _ = grpc.SupportPackageIsVersion4
 
 // Client API for MultiRaft service
 
@@ -367,83 +398,118 @@ var _MultiRaft_serviceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: fileDescriptorRaft,
+	Metadata: "cockroach/pkg/storage/raft.proto",
 }
 
-func (m *RaftMessageRequest) Marshal() (data []byte, err error) {
+func (m *RaftHeartbeat) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *RaftMessageRequest) MarshalTo(data []byte) (int, error) {
+func (m *RaftHeartbeat) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0x8
+	dAtA[i] = 0x8
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.RangeID))
-	data[i] = 0x12
+	i = encodeVarintRaft(dAtA, i, uint64(m.RangeID))
+	dAtA[i] = 0x10
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.FromReplica.Size()))
-	n1, err := m.FromReplica.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n1
-	data[i] = 0x1a
+	i = encodeVarintRaft(dAtA, i, uint64(m.FromReplicaID))
+	dAtA[i] = 0x18
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.ToReplica.Size()))
-	n2, err := m.ToReplica.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n2
-	data[i] = 0x22
+	i = encodeVarintRaft(dAtA, i, uint64(m.ToReplicaID))
+	dAtA[i] = 0x20
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.Message.Size()))
-	n3, err := m.Message.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n3
-	data[i] = 0x28
+	i = encodeVarintRaft(dAtA, i, uint64(m.Term))
+	dAtA[i] = 0x28
+	i++
+	i = encodeVarintRaft(dAtA, i, uint64(m.Commit))
+	dAtA[i] = 0x30
 	i++
 	if m.Quiesce {
-		data[i] = 1
+		dAtA[i] = 1
 	} else {
-		data[i] = 0
+		dAtA[i] = 0
 	}
 	i++
 	return i, nil
 }
 
-func (m *RaftMessageRequestBatch) Marshal() (data []byte, err error) {
+func (m *RaftMessageRequest) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *RaftMessageRequestBatch) MarshalTo(data []byte) (int, error) {
+func (m *RaftMessageRequest) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	if len(m.Requests) > 0 {
-		for _, msg := range m.Requests {
-			data[i] = 0xa
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintRaft(dAtA, i, uint64(m.RangeID))
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintRaft(dAtA, i, uint64(m.FromReplica.Size()))
+	n1, err := m.FromReplica.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n1
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintRaft(dAtA, i, uint64(m.ToReplica.Size()))
+	n2, err := m.ToReplica.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n2
+	dAtA[i] = 0x22
+	i++
+	i = encodeVarintRaft(dAtA, i, uint64(m.Message.Size()))
+	n3, err := m.Message.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n3
+	dAtA[i] = 0x28
+	i++
+	if m.Quiesce {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
+	if len(m.Heartbeats) > 0 {
+		for _, msg := range m.Heartbeats {
+			dAtA[i] = 0x32
 			i++
-			i = encodeVarintRaft(data, i, uint64(msg.Size()))
-			n, err := msg.MarshalTo(data[i:])
+			i = encodeVarintRaft(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
+			}
+			i += n
+		}
+	}
+	if len(m.HeartbeatResps) > 0 {
+		for _, msg := range m.HeartbeatResps {
+			dAtA[i] = 0x3a
+			i++
+			i = encodeVarintRaft(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
 			if err != nil {
 				return 0, err
 			}
@@ -453,26 +519,56 @@ func (m *RaftMessageRequestBatch) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *RaftMessageResponseUnion) Marshal() (data []byte, err error) {
+func (m *RaftMessageRequestBatch) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *RaftMessageResponseUnion) MarshalTo(data []byte) (int, error) {
+func (m *RaftMessageRequestBatch) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if len(m.Requests) > 0 {
+		for _, msg := range m.Requests {
+			dAtA[i] = 0xa
+			i++
+			i = encodeVarintRaft(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
+			}
+			i += n
+		}
+	}
+	return i, nil
+}
+
+func (m *RaftMessageResponseUnion) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *RaftMessageResponseUnion) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
 	if m.Error != nil {
-		data[i] = 0xa
+		dAtA[i] = 0xa
 		i++
-		i = encodeVarintRaft(data, i, uint64(m.Error.Size()))
-		n4, err := m.Error.MarshalTo(data[i:])
+		i = encodeVarintRaft(dAtA, i, uint64(m.Error.Size()))
+		n4, err := m.Error.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
@@ -481,44 +577,44 @@ func (m *RaftMessageResponseUnion) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *RaftMessageResponse) Marshal() (data []byte, err error) {
+func (m *RaftMessageResponse) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *RaftMessageResponse) MarshalTo(data []byte) (int, error) {
+func (m *RaftMessageResponse) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0x8
+	dAtA[i] = 0x8
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.RangeID))
-	data[i] = 0x12
+	i = encodeVarintRaft(dAtA, i, uint64(m.RangeID))
+	dAtA[i] = 0x12
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.FromReplica.Size()))
-	n5, err := m.FromReplica.MarshalTo(data[i:])
+	i = encodeVarintRaft(dAtA, i, uint64(m.FromReplica.Size()))
+	n5, err := m.FromReplica.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n5
-	data[i] = 0x1a
+	dAtA[i] = 0x1a
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.ToReplica.Size()))
-	n6, err := m.ToReplica.MarshalTo(data[i:])
+	i = encodeVarintRaft(dAtA, i, uint64(m.ToReplica.Size()))
+	n6, err := m.ToReplica.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n6
-	data[i] = 0x22
+	dAtA[i] = 0x22
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.Union.Size()))
-	n7, err := m.Union.MarshalTo(data[i:])
+	i = encodeVarintRaft(dAtA, i, uint64(m.Union.Size()))
+	n7, err := m.Union.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -526,199 +622,201 @@ func (m *RaftMessageResponse) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *SnapshotRequest) Marshal() (data []byte, err error) {
+func (m *SnapshotRequest) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *SnapshotRequest) MarshalTo(data []byte) (int, error) {
+func (m *SnapshotRequest) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
 	if m.Header != nil {
-		data[i] = 0xa
+		dAtA[i] = 0xa
 		i++
-		i = encodeVarintRaft(data, i, uint64(m.Header.Size()))
-		n8, err := m.Header.MarshalTo(data[i:])
+		i = encodeVarintRaft(dAtA, i, uint64(m.Header.Size()))
+		n8, err := m.Header.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n8
 	}
 	if m.KVBatch != nil {
-		data[i] = 0x12
+		dAtA[i] = 0x12
 		i++
-		i = encodeVarintRaft(data, i, uint64(len(m.KVBatch)))
-		i += copy(data[i:], m.KVBatch)
+		i = encodeVarintRaft(dAtA, i, uint64(len(m.KVBatch)))
+		i += copy(dAtA[i:], m.KVBatch)
 	}
 	if len(m.LogEntries) > 0 {
 		for _, b := range m.LogEntries {
-			data[i] = 0x1a
+			dAtA[i] = 0x1a
 			i++
-			i = encodeVarintRaft(data, i, uint64(len(b)))
-			i += copy(data[i:], b)
+			i = encodeVarintRaft(dAtA, i, uint64(len(b)))
+			i += copy(dAtA[i:], b)
 		}
 	}
-	data[i] = 0x20
+	dAtA[i] = 0x20
 	i++
 	if m.Final {
-		data[i] = 1
+		dAtA[i] = 1
 	} else {
-		data[i] = 0
+		dAtA[i] = 0
 	}
 	i++
 	return i, nil
 }
 
-func (m *SnapshotRequest_Header) Marshal() (data []byte, err error) {
+func (m *SnapshotRequest_Header) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *SnapshotRequest_Header) MarshalTo(data []byte) (int, error) {
+func (m *SnapshotRequest_Header) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0x12
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.RangeDescriptor.Size()))
-	n9, err := m.RangeDescriptor.MarshalTo(data[i:])
+	i = encodeVarintRaft(dAtA, i, uint64(m.RaftMessageRequest.Size()))
+	n9, err := m.RaftMessageRequest.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n9
-	data[i] = 0x12
+	dAtA[i] = 0x18
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.RaftMessageRequest.Size()))
-	n10, err := m.RaftMessageRequest.MarshalTo(data[i:])
+	i = encodeVarintRaft(dAtA, i, uint64(m.RangeSize))
+	dAtA[i] = 0x20
+	i++
+	if m.CanDecline {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
+	dAtA[i] = 0x2a
+	i++
+	i = encodeVarintRaft(dAtA, i, uint64(m.State.Size()))
+	n10, err := m.State.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n10
-	data[i] = 0x18
-	i++
-	i = encodeVarintRaft(data, i, uint64(m.RangeSize))
-	data[i] = 0x20
-	i++
-	if m.CanDecline {
-		data[i] = 1
-	} else {
-		data[i] = 0
-	}
-	i++
 	return i, nil
 }
 
-func (m *SnapshotResponse) Marshal() (data []byte, err error) {
+func (m *SnapshotResponse) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *SnapshotResponse) MarshalTo(data []byte) (int, error) {
+func (m *SnapshotResponse) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0x8
+	dAtA[i] = 0x8
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.Status))
-	data[i] = 0x12
+	i = encodeVarintRaft(dAtA, i, uint64(m.Status))
+	dAtA[i] = 0x12
 	i++
-	i = encodeVarintRaft(data, i, uint64(len(m.Message)))
-	i += copy(data[i:], m.Message)
-	if m.StoreCapacity != nil {
-		data[i] = 0x1a
-		i++
-		i = encodeVarintRaft(data, i, uint64(m.StoreCapacity.Size()))
-		n11, err := m.StoreCapacity.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n11
-	}
+	i = encodeVarintRaft(dAtA, i, uint64(len(m.Message)))
+	i += copy(dAtA[i:], m.Message)
 	return i, nil
 }
 
-func (m *ConfChangeContext) Marshal() (data []byte, err error) {
+func (m *ConfChangeContext) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *ConfChangeContext) MarshalTo(data []byte) (int, error) {
+func (m *ConfChangeContext) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintRaft(data, i, uint64(len(m.CommandID)))
-	i += copy(data[i:], m.CommandID)
+	i = encodeVarintRaft(dAtA, i, uint64(len(m.CommandID)))
+	i += copy(dAtA[i:], m.CommandID)
 	if m.Payload != nil {
-		data[i] = 0x12
+		dAtA[i] = 0x12
 		i++
-		i = encodeVarintRaft(data, i, uint64(len(m.Payload)))
-		i += copy(data[i:], m.Payload)
+		i = encodeVarintRaft(dAtA, i, uint64(len(m.Payload)))
+		i += copy(dAtA[i:], m.Payload)
 	}
-	data[i] = 0x1a
+	dAtA[i] = 0x1a
 	i++
-	i = encodeVarintRaft(data, i, uint64(m.Replica.Size()))
-	n12, err := m.Replica.MarshalTo(data[i:])
+	i = encodeVarintRaft(dAtA, i, uint64(m.Replica.Size()))
+	n11, err := m.Replica.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n12
+	i += n11
 	return i, nil
 }
 
-func encodeFixed64Raft(data []byte, offset int, v uint64) int {
-	data[offset] = uint8(v)
-	data[offset+1] = uint8(v >> 8)
-	data[offset+2] = uint8(v >> 16)
-	data[offset+3] = uint8(v >> 24)
-	data[offset+4] = uint8(v >> 32)
-	data[offset+5] = uint8(v >> 40)
-	data[offset+6] = uint8(v >> 48)
-	data[offset+7] = uint8(v >> 56)
+func encodeFixed64Raft(dAtA []byte, offset int, v uint64) int {
+	dAtA[offset] = uint8(v)
+	dAtA[offset+1] = uint8(v >> 8)
+	dAtA[offset+2] = uint8(v >> 16)
+	dAtA[offset+3] = uint8(v >> 24)
+	dAtA[offset+4] = uint8(v >> 32)
+	dAtA[offset+5] = uint8(v >> 40)
+	dAtA[offset+6] = uint8(v >> 48)
+	dAtA[offset+7] = uint8(v >> 56)
 	return offset + 8
 }
-func encodeFixed32Raft(data []byte, offset int, v uint32) int {
-	data[offset] = uint8(v)
-	data[offset+1] = uint8(v >> 8)
-	data[offset+2] = uint8(v >> 16)
-	data[offset+3] = uint8(v >> 24)
+func encodeFixed32Raft(dAtA []byte, offset int, v uint32) int {
+	dAtA[offset] = uint8(v)
+	dAtA[offset+1] = uint8(v >> 8)
+	dAtA[offset+2] = uint8(v >> 16)
+	dAtA[offset+3] = uint8(v >> 24)
 	return offset + 4
 }
-func encodeVarintRaft(data []byte, offset int, v uint64) int {
+func encodeVarintRaft(dAtA []byte, offset int, v uint64) int {
 	for v >= 1<<7 {
-		data[offset] = uint8(v&0x7f | 0x80)
+		dAtA[offset] = uint8(v&0x7f | 0x80)
 		v >>= 7
 		offset++
 	}
-	data[offset] = uint8(v)
+	dAtA[offset] = uint8(v)
 	return offset + 1
 }
+func (m *RaftHeartbeat) Size() (n int) {
+	var l int
+	_ = l
+	n += 1 + sovRaft(uint64(m.RangeID))
+	n += 1 + sovRaft(uint64(m.FromReplicaID))
+	n += 1 + sovRaft(uint64(m.ToReplicaID))
+	n += 1 + sovRaft(uint64(m.Term))
+	n += 1 + sovRaft(uint64(m.Commit))
+	n += 2
+	return n
+}
+
 func (m *RaftMessageRequest) Size() (n int) {
 	var l int
 	_ = l
@@ -730,6 +828,18 @@ func (m *RaftMessageRequest) Size() (n int) {
 	l = m.Message.Size()
 	n += 1 + l + sovRaft(uint64(l))
 	n += 2
+	if len(m.Heartbeats) > 0 {
+		for _, e := range m.Heartbeats {
+			l = e.Size()
+			n += 1 + l + sovRaft(uint64(l))
+		}
+	}
+	if len(m.HeartbeatResps) > 0 {
+		for _, e := range m.HeartbeatResps {
+			l = e.Size()
+			n += 1 + l + sovRaft(uint64(l))
+		}
+	}
 	return n
 }
 
@@ -792,12 +902,12 @@ func (m *SnapshotRequest) Size() (n int) {
 func (m *SnapshotRequest_Header) Size() (n int) {
 	var l int
 	_ = l
-	l = m.RangeDescriptor.Size()
-	n += 1 + l + sovRaft(uint64(l))
 	l = m.RaftMessageRequest.Size()
 	n += 1 + l + sovRaft(uint64(l))
 	n += 1 + sovRaft(uint64(m.RangeSize))
 	n += 2
+	l = m.State.Size()
+	n += 1 + l + sovRaft(uint64(l))
 	return n
 }
 
@@ -807,10 +917,6 @@ func (m *SnapshotResponse) Size() (n int) {
 	n += 1 + sovRaft(uint64(m.Status))
 	l = len(m.Message)
 	n += 1 + l + sovRaft(uint64(l))
-	if m.StoreCapacity != nil {
-		l = m.StoreCapacity.Size()
-		n += 1 + l + sovRaft(uint64(l))
-	}
 	return n
 }
 
@@ -857,8 +963,8 @@ func (this *RaftMessageResponseUnion) SetValue(value interface{}) bool {
 	}
 	return true
 }
-func (m *RaftMessageRequest) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *RaftHeartbeat) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -870,7 +976,172 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: RaftHeartbeat: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: RaftHeartbeat: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field RangeID", wireType)
+			}
+			m.RangeID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRaft
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.RangeID |= (github_com_cockroachdb_cockroach_pkg_roachpb.RangeID(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field FromReplicaID", wireType)
+			}
+			m.FromReplicaID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRaft
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.FromReplicaID |= (github_com_cockroachdb_cockroach_pkg_roachpb.ReplicaID(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ToReplicaID", wireType)
+			}
+			m.ToReplicaID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRaft
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.ToReplicaID |= (github_com_cockroachdb_cockroach_pkg_roachpb.ReplicaID(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Term", wireType)
+			}
+			m.Term = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRaft
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Term |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 5:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Commit", wireType)
+			}
+			m.Commit = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRaft
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Commit |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Quiesce", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRaft
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.Quiesce = bool(v != 0)
+		default:
+			iNdEx = preIndex
+			skippy, err := skipRaft(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthRaft
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *RaftMessageRequest) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowRaft
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -898,7 +1169,7 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				m.RangeID |= (github_com_cockroachdb_cockroach_pkg_roachpb.RangeID(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -917,7 +1188,7 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -931,7 +1202,7 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.FromReplica.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.FromReplica.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -947,7 +1218,7 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -961,7 +1232,7 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.ToReplica.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ToReplica.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -977,7 +1248,7 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -991,7 +1262,7 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.Message.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Message.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -1007,7 +1278,7 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1015,9 +1286,71 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 				}
 			}
 			m.Quiesce = bool(v != 0)
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Heartbeats", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRaft
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthRaft
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Heartbeats = append(m.Heartbeats, RaftHeartbeat{})
+			if err := m.Heartbeats[len(m.Heartbeats)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 7:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field HeartbeatResps", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRaft
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthRaft
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.HeartbeatResps = append(m.HeartbeatResps, RaftHeartbeat{})
+			if err := m.HeartbeatResps[len(m.HeartbeatResps)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipRaft(data[iNdEx:])
+			skippy, err := skipRaft(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1036,8 +1369,8 @@ func (m *RaftMessageRequest) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *RaftMessageRequestBatch) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *RaftMessageRequestBatch) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1049,7 +1382,7 @@ func (m *RaftMessageRequestBatch) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1077,7 +1410,7 @@ func (m *RaftMessageRequestBatch) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1092,13 +1425,13 @@ func (m *RaftMessageRequestBatch) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.Requests = append(m.Requests, RaftMessageRequest{})
-			if err := m.Requests[len(m.Requests)-1].Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Requests[len(m.Requests)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipRaft(data[iNdEx:])
+			skippy, err := skipRaft(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1117,8 +1450,8 @@ func (m *RaftMessageRequestBatch) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *RaftMessageResponseUnion) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *RaftMessageResponseUnion) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1130,7 +1463,7 @@ func (m *RaftMessageResponseUnion) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1158,7 +1491,7 @@ func (m *RaftMessageResponseUnion) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1175,13 +1508,13 @@ func (m *RaftMessageResponseUnion) Unmarshal(data []byte) error {
 			if m.Error == nil {
 				m.Error = &cockroach_roachpb3.Error{}
 			}
-			if err := m.Error.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Error.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipRaft(data[iNdEx:])
+			skippy, err := skipRaft(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1200,8 +1533,8 @@ func (m *RaftMessageResponseUnion) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *RaftMessageResponse) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *RaftMessageResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1213,7 +1546,7 @@ func (m *RaftMessageResponse) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1241,7 +1574,7 @@ func (m *RaftMessageResponse) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				m.RangeID |= (github_com_cockroachdb_cockroach_pkg_roachpb.RangeID(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1260,7 +1593,7 @@ func (m *RaftMessageResponse) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1274,7 +1607,7 @@ func (m *RaftMessageResponse) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.FromReplica.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.FromReplica.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -1290,7 +1623,7 @@ func (m *RaftMessageResponse) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1304,7 +1637,7 @@ func (m *RaftMessageResponse) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.ToReplica.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ToReplica.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -1320,7 +1653,7 @@ func (m *RaftMessageResponse) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1334,13 +1667,13 @@ func (m *RaftMessageResponse) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.Union.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Union.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipRaft(data[iNdEx:])
+			skippy, err := skipRaft(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1359,8 +1692,8 @@ func (m *RaftMessageResponse) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *SnapshotRequest) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *SnapshotRequest) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1372,7 +1705,7 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1400,7 +1733,7 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1417,7 +1750,7 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 			if m.Header == nil {
 				m.Header = &SnapshotRequest_Header{}
 			}
-			if err := m.Header.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Header.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -1433,7 +1766,7 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				byteLen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1447,7 +1780,7 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.KVBatch = append(m.KVBatch[:0], data[iNdEx:postIndex]...)
+			m.KVBatch = append(m.KVBatch[:0], dAtA[iNdEx:postIndex]...)
 			if m.KVBatch == nil {
 				m.KVBatch = []byte{}
 			}
@@ -1464,7 +1797,7 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				byteLen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1479,7 +1812,7 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.LogEntries = append(m.LogEntries, make([]byte, postIndex-iNdEx))
-			copy(m.LogEntries[len(m.LogEntries)-1], data[iNdEx:postIndex])
+			copy(m.LogEntries[len(m.LogEntries)-1], dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 4:
 			if wireType != 0 {
@@ -1493,7 +1826,7 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1503,7 +1836,7 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 			m.Final = bool(v != 0)
 		default:
 			iNdEx = preIndex
-			skippy, err := skipRaft(data[iNdEx:])
+			skippy, err := skipRaft(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1522,8 +1855,8 @@ func (m *SnapshotRequest) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *SnapshotRequest_Header) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *SnapshotRequest_Header) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1535,7 +1868,7 @@ func (m *SnapshotRequest_Header) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1551,36 +1884,6 @@ func (m *SnapshotRequest_Header) Unmarshal(data []byte) error {
 			return fmt.Errorf("proto: Header: illegal tag %d (wire type %d)", fieldNum, wire)
 		}
 		switch fieldNum {
-		case 1:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field RangeDescriptor", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowRaft
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthRaft
-			}
-			postIndex := iNdEx + msglen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if err := m.RangeDescriptor.Unmarshal(data[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
 		case 2:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field RaftMessageRequest", wireType)
@@ -1593,7 +1896,7 @@ func (m *SnapshotRequest_Header) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1607,7 +1910,7 @@ func (m *SnapshotRequest_Header) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.RaftMessageRequest.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.RaftMessageRequest.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -1623,7 +1926,7 @@ func (m *SnapshotRequest_Header) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				m.RangeSize |= (int64(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1642,7 +1945,7 @@ func (m *SnapshotRequest_Header) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1650,9 +1953,39 @@ func (m *SnapshotRequest_Header) Unmarshal(data []byte) error {
 				}
 			}
 			m.CanDecline = bool(v != 0)
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field State", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowRaft
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthRaft
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.State.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipRaft(data[iNdEx:])
+			skippy, err := skipRaft(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1671,8 +2004,8 @@ func (m *SnapshotRequest_Header) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *SnapshotResponse) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *SnapshotResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1684,7 +2017,7 @@ func (m *SnapshotResponse) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1712,7 +2045,7 @@ func (m *SnapshotResponse) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				m.Status |= (SnapshotResponse_Status(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1731,7 +2064,7 @@ func (m *SnapshotResponse) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1746,44 +2079,11 @@ func (m *SnapshotResponse) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Message = string(data[iNdEx:postIndex])
-			iNdEx = postIndex
-		case 3:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field StoreCapacity", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowRaft
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthRaft
-			}
-			postIndex := iNdEx + msglen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if m.StoreCapacity == nil {
-				m.StoreCapacity = &cockroach_roachpb.StoreCapacity{}
-			}
-			if err := m.StoreCapacity.Unmarshal(data[iNdEx:postIndex]); err != nil {
-				return err
-			}
+			m.Message = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipRaft(data[iNdEx:])
+			skippy, err := skipRaft(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1802,8 +2102,8 @@ func (m *SnapshotResponse) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *ConfChangeContext) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *ConfChangeContext) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1815,7 +2115,7 @@ func (m *ConfChangeContext) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1843,7 +2143,7 @@ func (m *ConfChangeContext) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1858,7 +2158,7 @@ func (m *ConfChangeContext) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.CommandID = string(data[iNdEx:postIndex])
+			m.CommandID = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 2:
 			if wireType != 2 {
@@ -1872,7 +2172,7 @@ func (m *ConfChangeContext) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				byteLen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1886,7 +2186,7 @@ func (m *ConfChangeContext) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Payload = append(m.Payload[:0], data[iNdEx:postIndex]...)
+			m.Payload = append(m.Payload[:0], dAtA[iNdEx:postIndex]...)
 			if m.Payload == nil {
 				m.Payload = []byte{}
 			}
@@ -1903,7 +2203,7 @@ func (m *ConfChangeContext) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1917,13 +2217,13 @@ func (m *ConfChangeContext) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.Replica.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Replica.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipRaft(data[iNdEx:])
+			skippy, err := skipRaft(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1942,8 +2242,8 @@ func (m *ConfChangeContext) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func skipRaft(data []byte) (n int, err error) {
-	l := len(data)
+func skipRaft(dAtA []byte) (n int, err error) {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		var wire uint64
@@ -1954,7 +2254,7 @@ func skipRaft(data []byte) (n int, err error) {
 			if iNdEx >= l {
 				return 0, io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1972,7 +2272,7 @@ func skipRaft(data []byte) (n int, err error) {
 					return 0, io.ErrUnexpectedEOF
 				}
 				iNdEx++
-				if data[iNdEx-1] < 0x80 {
+				if dAtA[iNdEx-1] < 0x80 {
 					break
 				}
 			}
@@ -1989,7 +2289,7 @@ func skipRaft(data []byte) (n int, err error) {
 				if iNdEx >= l {
 					return 0, io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				length |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2012,7 +2312,7 @@ func skipRaft(data []byte) (n int, err error) {
 					if iNdEx >= l {
 						return 0, io.ErrUnexpectedEOF
 					}
-					b := data[iNdEx]
+					b := dAtA[iNdEx]
 					iNdEx++
 					innerWire |= (uint64(b) & 0x7F) << shift
 					if b < 0x80 {
@@ -2023,7 +2323,7 @@ func skipRaft(data []byte) (n int, err error) {
 				if innerWireType == 4 {
 					break
 				}
-				next, err := skipRaft(data[start:])
+				next, err := skipRaft(dAtA[start:])
 				if err != nil {
 					return 0, err
 				}
@@ -2050,61 +2350,69 @@ var (
 func init() { proto.RegisterFile("cockroach/pkg/storage/raft.proto", fileDescriptorRaft) }
 
 var fileDescriptorRaft = []byte{
-	// 883 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x09, 0x6e, 0x88, 0x02, 0xff, 0xe4, 0x54, 0xcd, 0x8e, 0x1a, 0x47,
-	0x10, 0x66, 0xf8, 0xd9, 0x81, 0x82, 0x78, 0xd9, 0x8e, 0xa5, 0x8c, 0x88, 0x04, 0x64, 0xfc, 0x23,
-	0xe2, 0x48, 0x83, 0x85, 0x72, 0xca, 0x6d, 0x61, 0xd0, 0x1a, 0xd9, 0xbb, 0x5e, 0x0d, 0x71, 0x22,
-	0x45, 0xb2, 0x50, 0x33, 0xd3, 0x0c, 0xa3, 0x85, 0xe9, 0xf1, 0x74, 0x63, 0xc5, 0x7e, 0x82, 0x1c,
-	0xfd, 0x08, 0xb9, 0xe4, 0x4d, 0x72, 0xd8, 0x63, 0x8e, 0x3e, 0x44, 0xab, 0x04, 0xbf, 0x45, 0x4e,
-	0x51, 0xff, 0x0c, 0xde, 0x35, 0x28, 0xde, 0xcd, 0xd5, 0x17, 0x34, 0x5d, 0xf5, 0x7d, 0xd5, 0xcd,
-	0x57, 0x5f, 0x15, 0xb4, 0x7d, 0xea, 0x9f, 0xa5, 0x14, 0xfb, 0xf3, 0x6e, 0x72, 0x16, 0x76, 0x19,
-	0xa7, 0x29, 0x0e, 0x49, 0x37, 0xc5, 0x33, 0xee, 0x24, 0x29, 0xe5, 0x14, 0x1d, 0x6c, 0x10, 0x8e,
-	0xce, 0x36, 0xec, 0xab, 0x24, 0xf9, 0x95, 0x4c, 0xbb, 0x24, 0x4d, 0x69, 0xca, 0x14, 0xad, 0x71,
-	0x77, 0x37, 0x66, 0x49, 0x38, 0x0e, 0x30, 0xc7, 0x1a, 0xf5, 0x25, 0xe1, 0x7e, 0x20, 0x6f, 0x93,
-	0x3f, 0xc9, 0xf4, 0xd2, 0xcd, 0x8d, 0xdb, 0x21, 0x0d, 0xa9, 0xfc, 0xec, 0x8a, 0x2f, 0x15, 0xb5,
-	0xdf, 0xe5, 0x01, 0x79, 0x78, 0xc6, 0x8f, 0x09, 0x63, 0x38, 0x24, 0x1e, 0x79, 0xb1, 0x22, 0x8c,
-	0xa3, 0x29, 0x94, 0x53, 0x1c, 0x87, 0x64, 0x12, 0x05, 0x96, 0xd1, 0x36, 0x3a, 0xc5, 0xfe, 0xd1,
-	0xf9, 0x45, 0x2b, 0xb7, 0xbe, 0x68, 0x99, 0x9e, 0x88, 0x8f, 0xdc, 0x7f, 0x2e, 0x5a, 0xdf, 0x86,
-	0x11, 0x9f, 0xaf, 0xa6, 0x8e, 0x4f, 0x97, 0xdd, 0xcd, 0xfb, 0x82, 0x69, 0x77, 0xe7, 0x5b, 0x1d,
-	0xcd, 0xf3, 0x4c, 0x59, 0x78, 0x14, 0xa0, 0x63, 0xa8, 0xcd, 0x52, 0xba, 0x9c, 0xa4, 0x24, 0x59,
-	0x44, 0x3e, 0xb6, 0xf2, 0x6d, 0xa3, 0x53, 0xed, 0xdd, 0x75, 0xde, 0x2b, 0xb4, 0xa1, 0x2a, 0x84,
-	0x4b, 0x98, 0x9f, 0x46, 0x09, 0xa7, 0x69, 0xbf, 0x28, 0x5e, 0xe3, 0x55, 0x05, 0x5f, 0x27, 0xd1,
-	0x08, 0x80, 0xd3, 0x4d, 0xb1, 0xc2, 0x8d, 0x8b, 0x55, 0x38, 0xcd, 0x4a, 0x75, 0xc1, 0x5c, 0x2a,
-	0x3d, 0xac, 0xa2, 0xac, 0xb3, 0xef, 0x28, 0x3d, 0x1d, 0x2d, 0x93, 0xa6, 0x64, 0x28, 0xd4, 0x04,
-	0xf3, 0xc5, 0x2a, 0x22, 0xcc, 0x27, 0x56, 0xa9, 0x6d, 0x74, 0xca, 0x59, 0x5e, 0x07, 0xed, 0x29,
-	0x7c, 0xb1, 0x2d, 0x72, 0x1f, 0x73, 0x7f, 0x8e, 0x8e, 0xa0, 0x9c, 0xaa, 0x33, 0xb3, 0x8c, 0x76,
-	0xa1, 0x53, 0xed, 0xdd, 0x73, 0xb6, 0x3c, 0xe2, 0xec, 0x60, 0xab, 0x2b, 0x36, 0x64, 0xfb, 0x14,
-	0xac, 0x2b, 0x28, 0x96, 0xd0, 0x98, 0x91, 0x67, 0x71, 0x44, 0x63, 0xe4, 0x40, 0x49, 0xda, 0x49,
-	0xf6, 0xb2, 0xda, 0xb3, 0x76, 0xc8, 0x32, 0x14, 0x79, 0x4f, 0xc1, 0xbe, 0x2b, 0x9e, 0xff, 0xda,
-	0x32, 0xec, 0x3f, 0xf3, 0xf0, 0xf9, 0x8e, 0x92, 0x9f, 0xb8, 0x39, 0x8e, 0xa0, 0xb4, 0x12, 0xa2,
-	0x6a, 0x6b, 0x7c, 0xf3, 0xb1, 0x6e, 0x5d, 0xea, 0x83, 0x2e, 0xa6, 0xf8, 0xf6, 0xef, 0x05, 0xd8,
-	0x1f, 0xc7, 0x38, 0x61, 0x73, 0xca, 0xb3, 0xb9, 0x3b, 0x84, 0xbd, 0x39, 0xc1, 0x01, 0xc9, 0x3a,
-	0xf5, 0xf5, 0x8e, 0xea, 0x1f, 0x70, 0x9c, 0x47, 0x92, 0xe0, 0x69, 0x22, 0xba, 0x0f, 0xe5, 0xb3,
-	0x97, 0x93, 0xa9, 0x30, 0x97, 0x54, 0xad, 0xd6, 0xaf, 0x8a, 0xce, 0x3c, 0xfe, 0x41, 0xfa, 0xcd,
-	0x33, 0xcf, 0x5e, 0x2a, 0xe3, 0xb5, 0xa0, 0xba, 0xa0, 0xe1, 0x84, 0xc4, 0x3c, 0x8d, 0x08, 0xb3,
-	0x0a, 0xed, 0x42, 0xa7, 0xe6, 0xc1, 0x82, 0x86, 0x43, 0x15, 0x41, 0x0d, 0x28, 0xcd, 0xa2, 0x18,
-	0x2f, 0xe4, 0x1f, 0xcd, 0x2c, 0xad, 0x42, 0x8d, 0x5f, 0xf2, 0xb0, 0xa7, 0xee, 0x45, 0x63, 0xa8,
-	0x2b, 0x37, 0x04, 0x1b, 0xd1, 0xf4, 0xe3, 0xed, 0x5d, 0x02, 0x0b, 0xe8, 0x96, 0xbc, 0xfb, 0xe9,
-	0xd5, 0x30, 0x7a, 0x0e, 0xb7, 0xc5, 0xc4, 0x4d, 0xf4, 0x80, 0x4d, 0xb4, 0xcb, 0xb5, 0x0d, 0x6e,
-	0x34, 0x21, 0x28, 0xdd, 0x5e, 0x6f, 0x77, 0x00, 0xd4, 0x9b, 0x59, 0xf4, 0x9a, 0x48, 0x3b, 0x14,
-	0xb2, 0x46, 0xcb, 0xf8, 0x38, 0x7a, 0x4d, 0xd0, 0x3d, 0xa8, 0xfa, 0x38, 0x9e, 0x04, 0xc4, 0x5f,
-	0x44, 0x31, 0xb9, 0xa2, 0x02, 0xf8, 0x38, 0x76, 0x55, 0xdc, 0x7e, 0x93, 0x87, 0xfa, 0xfb, 0x96,
-	0xe8, 0x11, 0x79, 0x04, 0x7b, 0x8c, 0x63, 0xbe, 0x62, 0x52, 0x8a, 0x5b, 0xbd, 0x07, 0xff, 0xd9,
-	0x47, 0x45, 0x72, 0xc6, 0x92, 0xa1, 0xaf, 0xd0, 0x7c, 0xb1, 0x5a, 0xb2, 0x5d, 0x24, 0xfe, 0x7c,
-	0xe5, 0xc3, 0xd5, 0x73, 0x04, 0xb7, 0x44, 0x41, 0x32, 0xf1, 0x71, 0x82, 0xfd, 0x88, 0xbf, 0xd2,
-	0xee, 0x6e, 0xef, 0x10, 0x7f, 0x2c, 0x80, 0x03, 0x8d, 0xf3, 0x3e, 0x63, 0x97, 0x8f, 0xf6, 0x08,
-	0xf6, 0xd4, 0x03, 0x50, 0x15, 0xcc, 0x67, 0x27, 0x8f, 0x4f, 0x9e, 0xfe, 0x78, 0x52, 0xcf, 0xa1,
-	0x1a, 0x94, 0x0f, 0x07, 0x83, 0xe1, 0xe9, 0xf7, 0x43, 0xb7, 0x6e, 0x88, 0xd4, 0xe1, 0xe9, 0xe9,
-	0x93, 0xd1, 0xd0, 0xad, 0xe7, 0x51, 0x05, 0x4a, 0x43, 0xcf, 0x7b, 0xea, 0xd5, 0x0b, 0x02, 0xe5,
-	0x0e, 0x07, 0x4f, 0x46, 0x27, 0x43, 0xb7, 0x5e, 0xb4, 0x7f, 0x33, 0xe0, 0x60, 0x40, 0xe3, 0xd9,
-	0x60, 0x2e, 0xc4, 0x1c, 0xd0, 0x98, 0x93, 0x9f, 0x39, 0x7a, 0x08, 0xe0, 0xd3, 0xe5, 0x12, 0xc7,
-	0x41, 0xb6, 0x38, 0x2a, 0xfd, 0x03, 0xbd, 0x38, 0x2a, 0x03, 0x95, 0x19, 0xb9, 0x5e, 0x45, 0x83,
-	0x46, 0x01, 0xb2, 0xc0, 0x4c, 0xf0, 0xab, 0x05, 0xc5, 0x81, 0x72, 0xb2, 0x97, 0x1d, 0x91, 0x0b,
-	0xe6, 0xff, 0x1f, 0xe6, 0x8c, 0xda, 0x7b, 0x6b, 0x40, 0xe5, 0x78, 0xb5, 0xe0, 0x91, 0x30, 0x0f,
-	0x5a, 0x40, 0xfd, 0x92, 0x89, 0xd4, 0x90, 0x3c, 0xb8, 0x9e, 0xd3, 0x04, 0xb6, 0x71, 0xff, 0x7a,
-	0x9b, 0xc0, 0xce, 0x75, 0x8c, 0x87, 0x06, 0x7a, 0x0e, 0x35, 0x91, 0xcc, 0x4c, 0x80, 0xec, 0x8f,
-	0x4f, 0x7a, 0xe3, 0xce, 0x35, 0x5c, 0xa4, 0xca, 0xf7, 0xbf, 0x3a, 0xff, 0xbb, 0x99, 0x3b, 0x5f,
-	0x37, 0x8d, 0x3f, 0xd6, 0x4d, 0xe3, 0xed, 0xba, 0x69, 0xfc, 0xb5, 0x6e, 0x1a, 0x6f, 0xde, 0x35,
-	0x73, 0x3f, 0x99, 0x9a, 0xf9, 0x6f, 0x00, 0x00, 0x00, 0xff, 0xff, 0x85, 0x45, 0xc9, 0xc6, 0xad,
-	0x08, 0x00, 0x00,
+	// 1021 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x09, 0x6e, 0x88, 0x02, 0xff, 0xe4, 0x56, 0xcd, 0x6e, 0x23, 0x45,
+	0x10, 0xce, 0x64, 0x6c, 0x8f, 0x5d, 0xe3, 0x6c, 0x9c, 0x66, 0x25, 0x46, 0x06, 0xd9, 0x66, 0xf6,
+	0x47, 0x66, 0x11, 0xe3, 0x95, 0x85, 0x38, 0x70, 0x8b, 0x7f, 0x36, 0xf1, 0xee, 0xe6, 0x47, 0x93,
+	0x5d, 0x90, 0x90, 0x56, 0x56, 0x7b, 0xdc, 0xb6, 0x47, 0xb1, 0xa7, 0x27, 0x33, 0xed, 0x05, 0xf6,
+	0xc8, 0x13, 0xf0, 0x08, 0x5c, 0x78, 0x06, 0x6e, 0x9c, 0x73, 0x41, 0xe2, 0xb8, 0x07, 0x14, 0x81,
+	0x79, 0x0b, 0xc4, 0x01, 0xf5, 0xcf, 0x38, 0x93, 0xc4, 0xb0, 0x09, 0x42, 0x5c, 0xb8, 0x24, 0x3d,
+	0x55, 0xf5, 0x55, 0x75, 0xd7, 0xf7, 0x55, 0xb7, 0xa1, 0xe6, 0x51, 0xef, 0x38, 0xa2, 0xd8, 0x9b,
+	0x34, 0xc2, 0xe3, 0x71, 0x23, 0x66, 0x34, 0xc2, 0x63, 0xd2, 0x88, 0xf0, 0x88, 0x39, 0x61, 0x44,
+	0x19, 0x45, 0x5b, 0xcb, 0x08, 0x47, 0x79, 0xcb, 0xf6, 0x45, 0x90, 0x58, 0x85, 0x83, 0x06, 0x89,
+	0x22, 0x1a, 0xc5, 0x12, 0x56, 0xbe, 0xbb, 0x3a, 0x66, 0x46, 0x18, 0x1e, 0x62, 0x86, 0x55, 0xd4,
+	0x87, 0xab, 0xcb, 0xab, 0xff, 0x03, 0x1c, 0xf3, 0x35, 0x66, 0x44, 0x85, 0xbf, 0x43, 0x98, 0x37,
+	0x14, 0x9b, 0x13, 0x7f, 0xc2, 0x41, 0x6a, 0xa3, 0xe5, 0xdb, 0x63, 0x3a, 0xa6, 0x62, 0xd9, 0xe0,
+	0x2b, 0x69, 0xb5, 0xbf, 0xd7, 0x61, 0xc3, 0xc5, 0x23, 0xb6, 0x4b, 0x70, 0xc4, 0x06, 0x04, 0x33,
+	0x34, 0x80, 0x7c, 0x84, 0x83, 0x31, 0xe9, 0xfb, 0x43, 0x4b, 0xab, 0x69, 0xf5, 0x4c, 0x6b, 0xe7,
+	0xf4, 0xac, 0xba, 0xb6, 0x38, 0xab, 0x1a, 0x2e, 0xb7, 0xf7, 0x3a, 0xbf, 0x9f, 0x55, 0x3f, 0x1a,
+	0xfb, 0x6c, 0x32, 0x1f, 0x38, 0x1e, 0x9d, 0x35, 0x96, 0x7b, 0x1c, 0x0e, 0x1a, 0x2b, 0x4f, 0xe5,
+	0x28, 0x9c, 0x6b, 0x88, 0xc4, 0xbd, 0x21, 0xfa, 0x02, 0x36, 0x47, 0x11, 0x9d, 0xf5, 0x23, 0x12,
+	0x4e, 0x7d, 0x0f, 0xf3, 0x52, 0xeb, 0x35, 0xad, 0xbe, 0xd1, 0x3a, 0x50, 0xa5, 0x36, 0x1e, 0x45,
+	0x74, 0xe6, 0x4a, 0xaf, 0x28, 0xf8, 0xf1, 0xcd, 0x0a, 0x26, 0x48, 0x77, 0x63, 0x94, 0x4a, 0x34,
+	0x44, 0x27, 0xb0, 0xc1, 0x68, 0xba, 0xac, 0x2e, 0xca, 0xee, 0xa9, 0xb2, 0xe6, 0x33, 0xfa, 0x6f,
+	0x14, 0x35, 0x19, 0x3d, 0x2f, 0x69, 0x41, 0x86, 0x91, 0x68, 0x66, 0x65, 0x44, 0x2f, 0x33, 0xbc,
+	0x92, 0x2b, 0x2c, 0xe8, 0x5d, 0xc8, 0x79, 0x74, 0x36, 0xf3, 0x99, 0x95, 0x4d, 0xf9, 0x94, 0x0d,
+	0x55, 0xc0, 0x38, 0x99, 0xfb, 0x24, 0xf6, 0x88, 0x95, 0xab, 0x69, 0xf5, 0xbc, 0x72, 0x27, 0x46,
+	0xfb, 0x0f, 0x1d, 0x10, 0x67, 0x6e, 0x8f, 0xc4, 0x31, 0x1e, 0x13, 0x97, 0x9c, 0xcc, 0x49, 0xfc,
+	0xdf, 0xd0, 0xb7, 0x07, 0xc5, 0x34, 0x7d, 0x82, 0x3b, 0xb3, 0x79, 0xd7, 0x39, 0x1f, 0x85, 0x4b,
+	0x3d, 0xe9, 0x90, 0xd8, 0x8b, 0xfc, 0x90, 0xd1, 0x48, 0x9d, 0xc2, 0x4c, 0xd1, 0x82, 0x7a, 0x00,
+	0xe7, 0xa4, 0x08, 0x46, 0x6e, 0x96, 0xac, 0xb0, 0x6c, 0x37, 0x6a, 0x80, 0x31, 0x93, 0xfd, 0x10,
+	0xfd, 0x36, 0x9b, 0x9b, 0x8e, 0x9c, 0x04, 0x47, 0xb5, 0x29, 0xe9, 0xa2, 0x8a, 0x4a, 0x77, 0x39,
+	0xbb, 0xa2, 0xcb, 0xe8, 0x11, 0xc0, 0x24, 0x19, 0x8d, 0xd8, 0xca, 0xd5, 0xf4, 0xba, 0xd9, 0xac,
+	0x39, 0x57, 0x66, 0xde, 0xb9, 0x30, 0x43, 0x2a, 0x49, 0x0a, 0x89, 0x0e, 0x60, 0x73, 0xf9, 0xd5,
+	0x8f, 0x48, 0x1c, 0xc6, 0x96, 0x71, 0xa3, 0x64, 0xb7, 0x96, 0x70, 0x97, 0xa3, 0xed, 0x01, 0xbc,
+	0x7d, 0x95, 0xfd, 0x16, 0x66, 0xde, 0x04, 0xed, 0x40, 0x3e, 0x92, 0xdf, 0xb1, 0xa5, 0x89, 0x22,
+	0xf7, 0xfe, 0xa2, 0xc8, 0x25, 0xb4, 0xac, 0xb4, 0x04, 0xdb, 0x87, 0x60, 0x5d, 0x88, 0x8a, 0x43,
+	0x1a, 0xc4, 0xe4, 0x79, 0xe0, 0xd3, 0x00, 0x39, 0x90, 0x15, 0x17, 0x9a, 0x10, 0x99, 0xd9, 0xb4,
+	0x56, 0xf0, 0xd5, 0xe5, 0x7e, 0x57, 0x86, 0x7d, 0x92, 0x39, 0xfd, 0xb6, 0xaa, 0xd9, 0x3f, 0xaf,
+	0xc3, 0x5b, 0x2b, 0x52, 0xfe, 0xcf, 0x55, 0xbb, 0x03, 0xd9, 0x39, 0x6f, 0xaa, 0xd2, 0xec, 0x07,
+	0x6f, 0x62, 0x2b, 0xc5, 0x83, 0x4a, 0x26, 0xf1, 0xf6, 0x0f, 0x3a, 0x6c, 0x1e, 0x05, 0x38, 0x8c,
+	0x27, 0x94, 0x25, 0x17, 0xc2, 0x36, 0xe4, 0x26, 0x04, 0x0f, 0x49, 0xc2, 0xd4, 0xfb, 0x2b, 0xb2,
+	0x5f, 0xc2, 0x38, 0xbb, 0x02, 0xe0, 0x2a, 0x20, 0xba, 0x0f, 0xf9, 0xe3, 0x97, 0xfd, 0x01, 0x17,
+	0x97, 0xe8, 0x5a, 0xb1, 0x65, 0x72, 0x66, 0x9e, 0x7c, 0x2a, 0xf4, 0xe6, 0x1a, 0xc7, 0x2f, 0xa5,
+	0xf0, 0xaa, 0x60, 0x4e, 0xe9, 0xb8, 0x4f, 0x02, 0x16, 0xf9, 0x24, 0xb6, 0xf4, 0x9a, 0x5e, 0x2f,
+	0xba, 0x30, 0xa5, 0xe3, 0xae, 0xb4, 0xa0, 0x32, 0x64, 0x47, 0x7e, 0x80, 0xa7, 0xe2, 0xa0, 0xc9,
+	0xac, 0x49, 0x53, 0xf9, 0xeb, 0x75, 0xc8, 0xc9, 0xba, 0xe8, 0x05, 0xdc, 0xe6, 0x53, 0xdb, 0x57,
+	0x43, 0xda, 0x57, 0x82, 0x54, 0x8c, 0xdd, 0x48, 0xcc, 0x28, 0xba, 0x7a, 0x45, 0xde, 0x01, 0x90,
+	0x62, 0x8b, 0xfd, 0x57, 0x44, 0x30, 0xa7, 0x27, 0x9c, 0x08, 0xfb, 0x91, 0xff, 0x8a, 0xa0, 0x7b,
+	0x60, 0x7a, 0x38, 0xe8, 0x0f, 0x89, 0x37, 0xf5, 0x03, 0x72, 0x61, 0xc3, 0xe0, 0xe1, 0xa0, 0x23,
+	0xed, 0x9c, 0x3a, 0xf1, 0x02, 0x8b, 0xdb, 0x63, 0x35, 0x75, 0xa9, 0xd7, 0x3a, 0x11, 0xc3, 0x11,
+	0x87, 0x24, 0xc7, 0x17, 0xf8, 0xc7, 0x99, 0xbc, 0x56, 0x5a, 0xb7, 0x7f, 0xd4, 0xa0, 0x74, 0x4e,
+	0x86, 0x1a, 0x8e, 0x5d, 0xc8, 0xf1, 0x98, 0x79, 0x2c, 0x18, 0xbc, 0xd5, 0x7c, 0xf0, 0xb7, 0x0c,
+	0x4a, 0x90, 0x73, 0x24, 0x10, 0xc9, 0x9b, 0x22, 0xf1, 0xfc, 0xb6, 0x4b, 0xae, 0x47, 0xde, 0xcb,
+	0xc2, 0xa5, 0xdb, 0xd0, 0xee, 0x41, 0x4e, 0xe2, 0x90, 0x09, 0xc6, 0xf3, 0xfd, 0x27, 0xfb, 0x07,
+	0x9f, 0xed, 0x97, 0xd6, 0x50, 0x11, 0xf2, 0xdb, 0xed, 0x76, 0xf7, 0xf0, 0x59, 0xb7, 0x53, 0xd2,
+	0xb8, 0x6b, 0xfb, 0xf0, 0xf0, 0x69, 0xaf, 0xdb, 0x29, 0xad, 0xa3, 0x02, 0x64, 0xbb, 0xae, 0x7b,
+	0xe0, 0x96, 0x74, 0x1e, 0xd5, 0xe9, 0xb6, 0x9f, 0xf6, 0xf6, 0xbb, 0x9d, 0x52, 0xe6, 0x71, 0x26,
+	0xaf, 0x97, 0x32, 0xf6, 0x77, 0x1a, 0x6c, 0xb5, 0x69, 0x30, 0x6a, 0x4f, 0x78, 0x63, 0xdb, 0x34,
+	0x60, 0xe4, 0x4b, 0x86, 0x1e, 0x02, 0xf0, 0x47, 0x0e, 0x07, 0xc3, 0x64, 0xde, 0x0b, 0xad, 0x2d,
+	0x35, 0xef, 0x85, 0xb6, 0xf4, 0xf4, 0x3a, 0x6e, 0x41, 0x05, 0x89, 0x47, 0xd4, 0x08, 0xf1, 0x57,
+	0x53, 0x8a, 0xe5, 0x0f, 0x85, 0xa2, 0x9b, 0x7c, 0xa2, 0x0e, 0x18, 0xff, 0x7c, 0x06, 0x13, 0x68,
+	0xf3, 0xb5, 0x06, 0x85, 0xbd, 0xf9, 0x94, 0xf9, 0x5c, 0x48, 0x68, 0x0a, 0xa5, 0x94, 0xa0, 0xa4,
+	0xb6, 0x1f, 0x5c, 0x4f, 0x75, 0x3c, 0xb6, 0x7c, 0xff, 0x7a, 0x03, 0x6c, 0xaf, 0xd5, 0xb5, 0x87,
+	0x1a, 0x7a, 0x01, 0x45, 0xee, 0x4c, 0x18, 0x44, 0xf6, 0x9b, 0x07, 0xb4, 0x7c, 0xe7, 0x1a, 0x12,
+	0x90, 0xe9, 0x5b, 0xef, 0x9d, 0xfe, 0x5a, 0x59, 0x3b, 0x5d, 0x54, 0xb4, 0x9f, 0x16, 0x15, 0xed,
+	0xf5, 0xa2, 0xa2, 0xfd, 0xb2, 0xa8, 0x68, 0xdf, 0xfc, 0x56, 0x59, 0xfb, 0xdc, 0x50, 0xc8, 0x3f,
+	0x03, 0x00, 0x00, 0xff, 0xff, 0x58, 0x4b, 0xb7, 0xac, 0xe6, 0x0a, 0x00, 0x00,
 }

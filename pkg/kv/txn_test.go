@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
@@ -33,9 +34,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/localtestcluster"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/pkg/errors"
 )
 
 // TestTxnDBBasics verifies that a simple transaction can be run and
@@ -373,14 +373,12 @@ func TestPriorityRatchetOnAbortOrPush(t *testing.T) {
 // uncertainty, which interferes with the tests. The feature is disabled simply
 // by poisoning the gossip NodeID; this may break other functionality which
 // is usually not relevant in uncertainty tests.
-func disableOwnNodeCertain(tc *localtestcluster.LocalTestCluster) {
+func disableOwnNodeCertain(tc *localtestcluster.LocalTestCluster) error {
 	distSender := tc.Sender.(*TxnCoordSender).wrapped.(*DistSender)
 	desc := distSender.getNodeDescriptor()
 	desc.NodeID = 999
-	distSender.gossip.ResetNodeID(desc.NodeID)
-	if err := distSender.gossip.SetNodeDescriptor(desc); err != nil {
-		panic(err)
-	}
+	distSender.gossip.NodeID.Reset(desc.NodeID)
+	return distSender.gossip.SetNodeDescriptor(desc)
 }
 
 // TestUncertaintyRestart verifies that a transaction which finds a write in
@@ -388,25 +386,29 @@ func disableOwnNodeCertain(tc *localtestcluster.LocalTestCluster) {
 // that node's clock for its new timestamp.
 func TestUncertaintyRestart(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	s, _ := createTestDB(t)
-	disableOwnNodeCertain(s)
-	defer s.Stop()
+
 	const maxOffset = 250 * time.Millisecond
-	s.Clock.SetMaxOffset(maxOffset)
-	s.Manual.Set(maxOffset.Nanoseconds() + 1)
+	dbCtx := client.DefaultDBContext()
+	s := &localtestcluster.LocalTestCluster{
+		Clock:     hlc.NewClock(hlc.UnixNano, maxOffset),
+		DBContext: &dbCtx,
+	}
+	s.Start(t, testutils.NewNodeTestBaseContext(), InitSenderForLocalTestCluster)
+	defer s.Stop()
+	if err := disableOwnNodeCertain(s); err != nil {
+		t.Fatal(err)
+	}
+	s.Manual.Increment(s.Clock.MaxOffset().Nanoseconds() + 1)
 
 	var key = roachpb.Key("a")
 
-	done := make(chan struct{})
+	errChan := make(chan error)
 	start := make(chan struct{})
 	go func() {
-		defer close(done)
 		<-start
-		if err := s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
+		errChan <- s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
 			return txn.Put(key, "hi")
-		}); err != nil {
-			t.Fatal(err)
-		}
+		})
 	}()
 
 	if err := s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
@@ -419,15 +421,17 @@ func TestUncertaintyRestart(t *testing.T) {
 		}
 		if txn.Proto.Epoch == 0 {
 			close(start) // let someone write into our future
-			<-done       // when they're done, try to read
+			// when they're done, try to read
+			if err := <-errChan; err != nil {
+				t.Fatal(err)
+			}
 		}
-		_, err := txn.Get(key.Next())
-		if err != nil {
+		if _, err := txn.Get(key.Next()); err != nil {
 			if _, ok := err.(*roachpb.ReadWithinUncertaintyIntervalError); !ok {
 				t.Fatalf("unexpected error: %T: %s", err, err)
 			}
 		}
-		return err
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -438,13 +442,20 @@ func TestUncertaintyRestart(t *testing.T) {
 // timestamp) is free from uncertainty. See roachpb.Transaction for details.
 func TestUncertaintyMaxTimestampForwarding(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	s, _ := createTestDB(t)
-	disableOwnNodeCertain(s)
+
+	dbCtx := client.DefaultDBContext()
+	s := &localtestcluster.LocalTestCluster{
+		// Large offset so that any value in the future is an uncertain read. Also
+		// makes sure that the values we write in the future below don't actually
+		// wind up in the past.
+		Clock:     hlc.NewClock(hlc.UnixNano, 50*time.Second),
+		DBContext: &dbCtx,
+	}
+	s.Start(t, testutils.NewNodeTestBaseContext(), InitSenderForLocalTestCluster)
 	defer s.Stop()
-	// Large offset so that any value in the future is an uncertain read.
-	// Also makes sure that the values we write in the future below don't
-	// actually wind up in the past.
-	s.Clock.SetMaxOffset(50 * time.Second)
+	if err := disableOwnNodeCertain(s); err != nil {
+		t.Fatal(err)
+	}
 
 	offsetNS := int64(100)
 	keySlow := roachpb.Key("slow")
@@ -480,7 +491,7 @@ func TestUncertaintyMaxTimestampForwarding(t *testing.T) {
 		txn.Proto.ResetObservedTimestamps()
 
 		// The server's clock suddenly jumps ahead of keyFast's timestamp.
-		s.Manual.Set(2*offsetNS + 1)
+		s.Manual.Increment(2*offsetNS + 1)
 
 		// Now read slowKey first. It should read at 0, catch an uncertainty error,
 		// and get keySlow's timestamp in that error, but upgrade it to the larger
@@ -563,8 +574,9 @@ func TestTxnLongDelayBetweenWritesWithConcurrentRead(t *testing.T) {
 	keyA := roachpb.Key("a")
 	keyB := roachpb.Key("b")
 	ch := make(chan struct{})
+	errChan := make(chan error)
 	go func() {
-		err := s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
+		errChan <- s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
 			// Use snapshot isolation.
 			if err := txn.SetIsolation(enginepb.SNAPSHOT); err != nil {
 				return err
@@ -580,18 +592,13 @@ func TestTxnLongDelayBetweenWritesWithConcurrentRead(t *testing.T) {
 			// Write now to keyB.
 			return txn.Put(keyB, "value2")
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		// Notify txnB do 2nd get(b).
-		ch <- struct{}{}
 	}()
 
 	// Wait till txnA finish put(a).
 	<-ch
 	// Delay for longer than the cache window.
-	s.Manual.Set((storage.MinTSCacheWindow + time.Second).Nanoseconds())
-	err := s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
+	s.Manual.Increment((storage.MinTSCacheWindow + time.Second).Nanoseconds())
+	if err := s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
 		// Use snapshot isolation.
 		if err := txn.SetIsolation(enginepb.SNAPSHOT); err != nil {
 			return err
@@ -605,7 +612,9 @@ func TestTxnLongDelayBetweenWritesWithConcurrentRead(t *testing.T) {
 		// Notify txnA put(b).
 		ch <- struct{}{}
 		// Wait for txnA finish commit.
-		<-ch
+		if err := <-errChan; err != nil {
+			t.Fatal(err)
+		}
 		// get(b) again.
 		gr2, err := txn.Get(keyB)
 		if err != nil {
@@ -616,8 +625,7 @@ func TestTxnLongDelayBetweenWritesWithConcurrentRead(t *testing.T) {
 			t.Fatalf("Repeat read same key in same txn but get different value gr1: %q, gr2 %q", gr1.Value, gr2.Value)
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -636,8 +644,9 @@ func TestTxnRepeatGetWithRangeSplit(t *testing.T) {
 	keyC := roachpb.Key("c")
 	splitKey := roachpb.Key("b")
 	ch := make(chan struct{})
+	errChan := make(chan error)
 	go func() {
-		err := s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
+		errChan <- s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
 			// Use snapshot isolation.
 			if err := txn.SetIsolation(enginepb.SNAPSHOT); err != nil {
 				return err
@@ -653,17 +662,12 @@ func TestTxnRepeatGetWithRangeSplit(t *testing.T) {
 			// Write now to keyC, which will keep timestamp.
 			return txn.Put(keyC, "value2")
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		// Notify txnB do 2nd get(c).
-		ch <- struct{}{}
 	}()
 
 	// Wait till txnA finish put(a).
 	<-ch
 
-	err := s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
+	if err := s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
 		// Use snapshot isolation.
 		if err := txn.SetIsolation(enginepb.SNAPSHOT); err != nil {
 			return err
@@ -674,14 +678,14 @@ func TestTxnRepeatGetWithRangeSplit(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		s.Manual.Set(time.Second.Nanoseconds())
+		s.Manual.Increment(time.Second.Nanoseconds())
 		// Split range by keyB.
 		if err := s.DB.AdminSplit(context.TODO(), splitKey); err != nil {
 			t.Fatal(err)
 		}
 		// Wait till split complete.
 		// Check that we split 1 times in allotted time.
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			// Scan the meta records.
 			rows, serr := s.DB.Scan(context.TODO(), keys.Meta2Prefix, keys.MetaMax, 0)
 			if serr != nil {
@@ -695,7 +699,9 @@ func TestTxnRepeatGetWithRangeSplit(t *testing.T) {
 		// Notify txnA put(c).
 		ch <- struct{}{}
 		// Wait for txnA finish commit.
-		<-ch
+		if err := <-errChan; err != nil {
+			t.Fatal(err)
+		}
 		// Get(c) again.
 		gr2, err := txn.Get(keyC)
 		if err != nil {
@@ -706,8 +712,7 @@ func TestTxnRepeatGetWithRangeSplit(t *testing.T) {
 			t.Fatalf("Repeat read same key in same txn but get different value gr1 nil gr2 %v", gr2.Value)
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -723,9 +728,10 @@ func TestTxnRestartedSerializableTimestampRegression(t *testing.T) {
 	keyA := "a"
 	keyB := "b"
 	ch := make(chan struct{})
+	errChan := make(chan error)
 	var count int
 	go func() {
-		err := s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
+		errChan <- s.DB.Txn(context.TODO(), func(txn *client.Txn) error {
 			count++
 			// Use a low priority for the transaction so that it can be pushed.
 			txn.InternalSetPriority(1)
@@ -741,16 +747,8 @@ func TestTxnRestartedSerializableTimestampRegression(t *testing.T) {
 				<-ch
 			}
 			// Do a write to keyB, which will forward txn timestamp.
-			if err := txn.Put(keyB, "value2"); err != nil {
-				return err
-			}
-			// Now commit...
-			return nil
+			return txn.Put(keyB, "value2")
 		})
-		close(ch)
-		if err != nil {
-			t.Fatal(err)
-		}
 	}()
 
 	// Wait until txnA finishes put(a).
@@ -769,8 +767,10 @@ func TestTxnRestartedSerializableTimestampRegression(t *testing.T) {
 	<-ch
 	// Notify txnA to commit.
 	ch <- struct{}{}
+
 	// Wait for txnA to finish.
-	for range ch {
+	if err := <-errChan; err != nil {
+		t.Fatal(err)
 	}
 	// We expect one restart (so a count of two). The transaction continues
 	// despite the push and timestamp forwarding in order to lay down all

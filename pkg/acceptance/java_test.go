@@ -19,11 +19,19 @@ package acceptance
 import (
 	"strings"
 	"testing"
+
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+
+	"golang.org/x/net/context"
 )
 
 func TestDockerJava(t *testing.T) {
-	testDockerSuccess(t, "java", []string{"/bin/sh", "-c", strings.Replace(java, "%v", "Int(2, 3)", 1)})
-	testDockerFail(t, "java", []string{"/bin/sh", "-c", strings.Replace(java, "%v", `String(2, "a")`, 1)})
+	s := log.Scope(t, "")
+	defer s.Close(t)
+
+	ctx := context.Background()
+	testDockerSuccess(ctx, t, "java", []string{"/bin/sh", "-c", strings.Replace(java, "%v", "Int(2, 3)", 1)})
+	testDockerFail(ctx, t, "java", []string{"/bin/sh", "-c", strings.Replace(java, "%v", `String(2, "a")`, 1)})
 }
 
 const java = `

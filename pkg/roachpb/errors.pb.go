@@ -77,6 +77,11 @@ type NotLeaseHolderError struct {
 	// current lease, but having a guess about who the leader is.
 	Lease   *Lease  `protobuf:"bytes,4,opt,name=lease" json:"lease,omitempty"`
 	RangeID RangeID `protobuf:"varint,3,opt,name=range_id,json=rangeId,casttype=RangeID" json:"range_id"`
+	// If set, the Error() method will return this instead of composing its
+	// regular spiel. Useful because we reuse this error when rejecting a command
+	// because the lease under which its application was attempted is different
+	// than the lease under which it had been proposed.
+	CustomMsg string `protobuf:"bytes,5,opt,name=custom_msg,json=customMsg" json:"custom_msg"`
 }
 
 func (m *NotLeaseHolderError) Reset()                    { *m = NotLeaseHolderError{} }
@@ -295,6 +300,18 @@ func (m *SendError) String() string            { return proto.CompactTextString(
 func (*SendError) ProtoMessage()               {}
 func (*SendError) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{16} }
 
+// An AmbiguousResultError indicates that an EndTransaction request
+// may have succeeded or failed, but the response was not received and
+// the final result is ambiguous.
+type AmbiguousResultError struct {
+	Message string `protobuf:"bytes,1,opt,name=message" json:"message"`
+}
+
+func (m *AmbiguousResultError) Reset()                    { *m = AmbiguousResultError{} }
+func (m *AmbiguousResultError) String() string            { return proto.CompactTextString(m) }
+func (*AmbiguousResultError) ProtoMessage()               {}
+func (*AmbiguousResultError) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{17} }
+
 // A RaftGroupDeletedError indicates a raft group has been deleted for
 // the replica.
 type RaftGroupDeletedError struct {
@@ -303,7 +320,7 @@ type RaftGroupDeletedError struct {
 func (m *RaftGroupDeletedError) Reset()                    { *m = RaftGroupDeletedError{} }
 func (m *RaftGroupDeletedError) String() string            { return proto.CompactTextString(m) }
 func (*RaftGroupDeletedError) ProtoMessage()               {}
-func (*RaftGroupDeletedError) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{17} }
+func (*RaftGroupDeletedError) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{18} }
 
 // A ReplicaCorruptionError indicates that the replica has experienced
 // an error which puts its integrity at risk.
@@ -317,18 +334,31 @@ type ReplicaCorruptionError struct {
 func (m *ReplicaCorruptionError) Reset()                    { *m = ReplicaCorruptionError{} }
 func (m *ReplicaCorruptionError) String() string            { return proto.CompactTextString(m) }
 func (*ReplicaCorruptionError) ProtoMessage()               {}
-func (*ReplicaCorruptionError) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{18} }
+func (*ReplicaCorruptionError) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{19} }
 
 // ReplicaTooOldError is sent in response to a raft message when the
 // recipient of the raft message believes the sender of the raft
 // message to have been removed from the raft group
 type ReplicaTooOldError struct {
+	// replica_id is the ID of the replica that is too old.
+	ReplicaID ReplicaID `protobuf:"varint,1,opt,name=replica_id,json=replicaId,casttype=ReplicaID" json:"replica_id"`
 }
 
 func (m *ReplicaTooOldError) Reset()                    { *m = ReplicaTooOldError{} }
 func (m *ReplicaTooOldError) String() string            { return proto.CompactTextString(m) }
 func (*ReplicaTooOldError) ProtoMessage()               {}
-func (*ReplicaTooOldError) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{19} }
+func (*ReplicaTooOldError) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{20} }
+
+// A StoreNotFoundError indicates that a command was sent to a store
+// which is not hosted on this node.
+type StoreNotFoundError struct {
+	StoreID StoreID `protobuf:"varint,1,opt,name=store_id,json=storeId,casttype=StoreID" json:"store_id"`
+}
+
+func (m *StoreNotFoundError) Reset()                    { *m = StoreNotFoundError{} }
+func (m *StoreNotFoundError) String() string            { return proto.CompactTextString(m) }
+func (*StoreNotFoundError) ProtoMessage()               {}
+func (*StoreNotFoundError) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{21} }
 
 // ErrorDetail is a union type containing all available errors.
 type ErrorDetail struct {
@@ -349,6 +379,8 @@ type ErrorDetail struct {
 	NodeUnavailable               *NodeUnavailableError               `protobuf:"bytes,14,opt,name=node_unavailable,json=nodeUnavailable" json:"node_unavailable,omitempty"`
 	Send                          *SendError                          `protobuf:"bytes,15,opt,name=send" json:"send,omitempty"`
 	RangeFrozen                   *RangeFrozenError                   `protobuf:"bytes,25,opt,name=range_frozen,json=rangeFrozen" json:"range_frozen,omitempty"`
+	AmbiguousResult               *AmbiguousResultError               `protobuf:"bytes,26,opt,name=ambiguous_result,json=ambiguousResult" json:"ambiguous_result,omitempty"`
+	StoreNotFound                 *StoreNotFoundError                 `protobuf:"bytes,27,opt,name=store_not_found,json=storeNotFound" json:"store_not_found,omitempty"`
 	// TODO(kaneda): Following are added to preserve the type when
 	// converting Go errors from/to proto Errors. Revisit this design.
 	RaftGroupDeleted  *RaftGroupDeletedError  `protobuf:"bytes,16,opt,name=raft_group_deleted,json=raftGroupDeleted" json:"raft_group_deleted,omitempty"`
@@ -359,7 +391,7 @@ type ErrorDetail struct {
 func (m *ErrorDetail) Reset()                    { *m = ErrorDetail{} }
 func (m *ErrorDetail) String() string            { return proto.CompactTextString(m) }
 func (*ErrorDetail) ProtoMessage()               {}
-func (*ErrorDetail) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{20} }
+func (*ErrorDetail) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{22} }
 
 // ErrPosition describes the position of an error in a Batch. A simple nullable
 // primitive field would break compatibility with proto3, where primitive fields
@@ -371,7 +403,7 @@ type ErrPosition struct {
 func (m *ErrPosition) Reset()                    { *m = ErrPosition{} }
 func (m *ErrPosition) String() string            { return proto.CompactTextString(m) }
 func (*ErrPosition) ProtoMessage()               {}
-func (*ErrPosition) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{21} }
+func (*ErrPosition) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{23} }
 
 // Error is a generic representation including a string message
 // and information about retryability.
@@ -398,7 +430,7 @@ type Error struct {
 
 func (m *Error) Reset()                    { *m = Error{} }
 func (*Error) ProtoMessage()               {}
-func (*Error) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{22} }
+func (*Error) Descriptor() ([]byte, []int) { return fileDescriptorErrors, []int{24} }
 
 func init() {
 	proto.RegisterType((*NotLeaseHolderError)(nil), "cockroach.roachpb.NotLeaseHolderError")
@@ -418,144 +450,150 @@ func init() {
 	proto.RegisterType((*ConditionFailedError)(nil), "cockroach.roachpb.ConditionFailedError")
 	proto.RegisterType((*LeaseRejectedError)(nil), "cockroach.roachpb.LeaseRejectedError")
 	proto.RegisterType((*SendError)(nil), "cockroach.roachpb.SendError")
+	proto.RegisterType((*AmbiguousResultError)(nil), "cockroach.roachpb.AmbiguousResultError")
 	proto.RegisterType((*RaftGroupDeletedError)(nil), "cockroach.roachpb.RaftGroupDeletedError")
 	proto.RegisterType((*ReplicaCorruptionError)(nil), "cockroach.roachpb.ReplicaCorruptionError")
 	proto.RegisterType((*ReplicaTooOldError)(nil), "cockroach.roachpb.ReplicaTooOldError")
+	proto.RegisterType((*StoreNotFoundError)(nil), "cockroach.roachpb.StoreNotFoundError")
 	proto.RegisterType((*ErrorDetail)(nil), "cockroach.roachpb.ErrorDetail")
 	proto.RegisterType((*ErrPosition)(nil), "cockroach.roachpb.ErrPosition")
 	proto.RegisterType((*Error)(nil), "cockroach.roachpb.Error")
 	proto.RegisterEnum("cockroach.roachpb.TransactionRestart", TransactionRestart_name, TransactionRestart_value)
 }
-func (m *NotLeaseHolderError) Marshal() (data []byte, err error) {
+func (m *NotLeaseHolderError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *NotLeaseHolderError) MarshalTo(data []byte) (int, error) {
+func (m *NotLeaseHolderError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.Replica.Size()))
-	n1, err := m.Replica.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.Replica.Size()))
+	n1, err := m.Replica.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n1
 	if m.LeaseHolder != nil {
-		data[i] = 0x12
+		dAtA[i] = 0x12
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.LeaseHolder.Size()))
-		n2, err := m.LeaseHolder.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.LeaseHolder.Size()))
+		n2, err := m.LeaseHolder.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n2
 	}
-	data[i] = 0x18
+	dAtA[i] = 0x18
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.RangeID))
+	i = encodeVarintErrors(dAtA, i, uint64(m.RangeID))
 	if m.Lease != nil {
-		data[i] = 0x22
+		dAtA[i] = 0x22
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.Lease.Size()))
-		n3, err := m.Lease.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.Lease.Size()))
+		n3, err := m.Lease.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n3
 	}
-	return i, nil
-}
-
-func (m *NodeUnavailableError) Marshal() (data []byte, err error) {
-	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
-	if err != nil {
-		return nil, err
-	}
-	return data[:n], nil
-}
-
-func (m *NodeUnavailableError) MarshalTo(data []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	return i, nil
-}
-
-func (m *RangeNotFoundError) Marshal() (data []byte, err error) {
-	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
-	if err != nil {
-		return nil, err
-	}
-	return data[:n], nil
-}
-
-func (m *RangeNotFoundError) MarshalTo(data []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	data[i] = 0x8
+	dAtA[i] = 0x2a
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.RangeID))
+	i = encodeVarintErrors(dAtA, i, uint64(len(m.CustomMsg)))
+	i += copy(dAtA[i:], m.CustomMsg)
 	return i, nil
 }
 
-func (m *RangeKeyMismatchError) Marshal() (data []byte, err error) {
+func (m *NodeUnavailableError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *RangeKeyMismatchError) MarshalTo(data []byte) (int, error) {
+func (m *NodeUnavailableError) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	return i, nil
+}
+
+func (m *RangeNotFoundError) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *RangeNotFoundError) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintErrors(dAtA, i, uint64(m.RangeID))
+	return i, nil
+}
+
+func (m *RangeKeyMismatchError) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *RangeKeyMismatchError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
 	if m.RequestStartKey != nil {
-		data[i] = 0xa
+		dAtA[i] = 0xa
 		i++
-		i = encodeVarintErrors(data, i, uint64(len(m.RequestStartKey)))
-		i += copy(data[i:], m.RequestStartKey)
+		i = encodeVarintErrors(dAtA, i, uint64(len(m.RequestStartKey)))
+		i += copy(dAtA[i:], m.RequestStartKey)
 	}
 	if m.RequestEndKey != nil {
-		data[i] = 0x12
+		dAtA[i] = 0x12
 		i++
-		i = encodeVarintErrors(data, i, uint64(len(m.RequestEndKey)))
-		i += copy(data[i:], m.RequestEndKey)
+		i = encodeVarintErrors(dAtA, i, uint64(len(m.RequestEndKey)))
+		i += copy(dAtA[i:], m.RequestEndKey)
 	}
 	if m.MismatchedRange != nil {
-		data[i] = 0x1a
+		dAtA[i] = 0x1a
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.MismatchedRange.Size()))
-		n4, err := m.MismatchedRange.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.MismatchedRange.Size()))
+		n4, err := m.MismatchedRange.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n4
 	}
 	if m.SuggestedRange != nil {
-		data[i] = 0x22
+		dAtA[i] = 0x22
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.SuggestedRange.Size()))
-		n5, err := m.SuggestedRange.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.SuggestedRange.Size()))
+		n5, err := m.SuggestedRange.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
@@ -564,25 +602,25 @@ func (m *RangeKeyMismatchError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *RangeFrozenError) Marshal() (data []byte, err error) {
+func (m *RangeFrozenError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *RangeFrozenError) MarshalTo(data []byte) (int, error) {
+func (m *RangeFrozenError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.Desc.Size()))
-	n6, err := m.Desc.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.Desc.Size()))
+	n6, err := m.Desc.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -590,33 +628,33 @@ func (m *RangeFrozenError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *ReadWithinUncertaintyIntervalError) Marshal() (data []byte, err error) {
+func (m *ReadWithinUncertaintyIntervalError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *ReadWithinUncertaintyIntervalError) MarshalTo(data []byte) (int, error) {
+func (m *ReadWithinUncertaintyIntervalError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.ReadTimestamp.Size()))
-	n7, err := m.ReadTimestamp.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.ReadTimestamp.Size()))
+	n7, err := m.ReadTimestamp.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n7
-	data[i] = 0x12
+	dAtA[i] = 0x12
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.ExistingTimestamp.Size()))
-	n8, err := m.ExistingTimestamp.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.ExistingTimestamp.Size()))
+	n8, err := m.ExistingTimestamp.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -624,17 +662,17 @@ func (m *ReadWithinUncertaintyIntervalError) MarshalTo(data []byte) (int, error)
 	return i, nil
 }
 
-func (m *TransactionAbortedError) Marshal() (data []byte, err error) {
+func (m *TransactionAbortedError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *TransactionAbortedError) MarshalTo(data []byte) (int, error) {
+func (m *TransactionAbortedError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -642,25 +680,25 @@ func (m *TransactionAbortedError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *TransactionPushError) Marshal() (data []byte, err error) {
+func (m *TransactionPushError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *TransactionPushError) MarshalTo(data []byte) (int, error) {
+func (m *TransactionPushError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.PusheeTxn.Size()))
-	n9, err := m.PusheeTxn.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.PusheeTxn.Size()))
+	n9, err := m.PusheeTxn.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -668,17 +706,17 @@ func (m *TransactionPushError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *TransactionRetryError) Marshal() (data []byte, err error) {
+func (m *TransactionRetryError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *TransactionRetryError) MarshalTo(data []byte) (int, error) {
+func (m *TransactionRetryError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -686,17 +724,17 @@ func (m *TransactionRetryError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *TransactionReplayError) Marshal() (data []byte, err error) {
+func (m *TransactionReplayError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *TransactionReplayError) MarshalTo(data []byte) (int, error) {
+func (m *TransactionReplayError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -704,93 +742,93 @@ func (m *TransactionReplayError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *TransactionStatusError) Marshal() (data []byte, err error) {
+func (m *TransactionStatusError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *TransactionStatusError) MarshalTo(data []byte) (int, error) {
+func (m *TransactionStatusError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintErrors(data, i, uint64(len(m.Msg)))
-	i += copy(data[i:], m.Msg)
+	i = encodeVarintErrors(dAtA, i, uint64(len(m.Msg)))
+	i += copy(dAtA[i:], m.Msg)
 	return i, nil
 }
 
-func (m *WriteIntentError) Marshal() (data []byte, err error) {
+func (m *WriteIntentError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *WriteIntentError) MarshalTo(data []byte) (int, error) {
+func (m *WriteIntentError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
 	if len(m.Intents) > 0 {
 		for _, msg := range m.Intents {
-			data[i] = 0xa
+			dAtA[i] = 0xa
 			i++
-			i = encodeVarintErrors(data, i, uint64(msg.Size()))
-			n, err := msg.MarshalTo(data[i:])
+			i = encodeVarintErrors(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
 			if err != nil {
 				return 0, err
 			}
 			i += n
 		}
 	}
-	data[i] = 0x10
+	dAtA[i] = 0x10
 	i++
 	if m.Resolved {
-		data[i] = 1
+		dAtA[i] = 1
 	} else {
-		data[i] = 0
+		dAtA[i] = 0
 	}
 	i++
 	return i, nil
 }
 
-func (m *WriteTooOldError) Marshal() (data []byte, err error) {
+func (m *WriteTooOldError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *WriteTooOldError) MarshalTo(data []byte) (int, error) {
+func (m *WriteTooOldError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.Timestamp.Size()))
-	n10, err := m.Timestamp.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.Timestamp.Size()))
+	n10, err := m.Timestamp.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n10
-	data[i] = 0x12
+	dAtA[i] = 0x12
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.ActualTimestamp.Size()))
-	n11, err := m.ActualTimestamp.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.ActualTimestamp.Size()))
+	n11, err := m.ActualTimestamp.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -798,17 +836,17 @@ func (m *WriteTooOldError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *OpRequiresTxnError) Marshal() (data []byte, err error) {
+func (m *OpRequiresTxnError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *OpRequiresTxnError) MarshalTo(data []byte) (int, error) {
+func (m *OpRequiresTxnError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -816,26 +854,26 @@ func (m *OpRequiresTxnError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *ConditionFailedError) Marshal() (data []byte, err error) {
+func (m *ConditionFailedError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *ConditionFailedError) MarshalTo(data []byte) (int, error) {
+func (m *ConditionFailedError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
 	if m.ActualValue != nil {
-		data[i] = 0xa
+		dAtA[i] = 0xa
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.ActualValue.Size()))
-		n12, err := m.ActualValue.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.ActualValue.Size()))
+		n12, err := m.ActualValue.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
@@ -844,37 +882,37 @@ func (m *ConditionFailedError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *LeaseRejectedError) Marshal() (data []byte, err error) {
+func (m *LeaseRejectedError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *LeaseRejectedError) MarshalTo(data []byte) (int, error) {
+func (m *LeaseRejectedError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintErrors(data, i, uint64(len(m.Message)))
-	i += copy(data[i:], m.Message)
-	data[i] = 0x12
+	i = encodeVarintErrors(dAtA, i, uint64(len(m.Message)))
+	i += copy(dAtA[i:], m.Message)
+	dAtA[i] = 0x12
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.Requested.Size()))
-	n13, err := m.Requested.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.Requested.Size()))
+	n13, err := m.Requested.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n13
-	data[i] = 0x1a
+	dAtA[i] = 0x1a
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.Existing.Size()))
-	n14, err := m.Existing.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.Existing.Size()))
+	n14, err := m.Existing.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -882,39 +920,61 @@ func (m *LeaseRejectedError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *SendError) Marshal() (data []byte, err error) {
+func (m *SendError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *SendError) MarshalTo(data []byte) (int, error) {
+func (m *SendError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintErrors(data, i, uint64(len(m.Message)))
-	i += copy(data[i:], m.Message)
+	i = encodeVarintErrors(dAtA, i, uint64(len(m.Message)))
+	i += copy(dAtA[i:], m.Message)
 	return i, nil
 }
 
-func (m *RaftGroupDeletedError) Marshal() (data []byte, err error) {
+func (m *AmbiguousResultError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *RaftGroupDeletedError) MarshalTo(data []byte) (int, error) {
+func (m *AmbiguousResultError) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0xa
+	i++
+	i = encodeVarintErrors(dAtA, i, uint64(len(m.Message)))
+	i += copy(dAtA[i:], m.Message)
+	return i, nil
+}
+
+func (m *RaftGroupDeletedError) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *RaftGroupDeletedError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -922,394 +982,442 @@ func (m *RaftGroupDeletedError) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *ReplicaCorruptionError) Marshal() (data []byte, err error) {
+func (m *ReplicaCorruptionError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *ReplicaCorruptionError) MarshalTo(data []byte) (int, error) {
+func (m *ReplicaCorruptionError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
-	data[i] = 0xa
+	dAtA[i] = 0xa
 	i++
-	i = encodeVarintErrors(data, i, uint64(len(m.ErrorMsg)))
-	i += copy(data[i:], m.ErrorMsg)
-	data[i] = 0x10
+	i = encodeVarintErrors(dAtA, i, uint64(len(m.ErrorMsg)))
+	i += copy(dAtA[i:], m.ErrorMsg)
+	dAtA[i] = 0x10
 	i++
 	if m.Processed {
-		data[i] = 1
+		dAtA[i] = 1
 	} else {
-		data[i] = 0
+		dAtA[i] = 0
 	}
 	i++
 	return i, nil
 }
 
-func (m *ReplicaTooOldError) Marshal() (data []byte, err error) {
+func (m *ReplicaTooOldError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *ReplicaTooOldError) MarshalTo(data []byte) (int, error) {
+func (m *ReplicaTooOldError) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintErrors(dAtA, i, uint64(m.ReplicaID))
 	return i, nil
 }
 
-func (m *ErrorDetail) Marshal() (data []byte, err error) {
+func (m *StoreNotFoundError) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
-	return data[:n], nil
+	return dAtA[:n], nil
 }
 
-func (m *ErrorDetail) MarshalTo(data []byte) (int, error) {
+func (m *StoreNotFoundError) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintErrors(dAtA, i, uint64(m.StoreID))
+	return i, nil
+}
+
+func (m *ErrorDetail) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ErrorDetail) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
 	_ = l
 	if m.NotLeaseHolder != nil {
-		data[i] = 0xa
+		dAtA[i] = 0xa
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.NotLeaseHolder.Size()))
-		n15, err := m.NotLeaseHolder.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.NotLeaseHolder.Size()))
+		n15, err := m.NotLeaseHolder.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n15
 	}
 	if m.RangeNotFound != nil {
-		data[i] = 0x12
+		dAtA[i] = 0x12
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.RangeNotFound.Size()))
-		n16, err := m.RangeNotFound.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.RangeNotFound.Size()))
+		n16, err := m.RangeNotFound.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n16
 	}
 	if m.RangeKeyMismatch != nil {
-		data[i] = 0x1a
+		dAtA[i] = 0x1a
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.RangeKeyMismatch.Size()))
-		n17, err := m.RangeKeyMismatch.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.RangeKeyMismatch.Size()))
+		n17, err := m.RangeKeyMismatch.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n17
 	}
 	if m.ReadWithinUncertaintyInterval != nil {
-		data[i] = 0x22
+		dAtA[i] = 0x22
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.ReadWithinUncertaintyInterval.Size()))
-		n18, err := m.ReadWithinUncertaintyInterval.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.ReadWithinUncertaintyInterval.Size()))
+		n18, err := m.ReadWithinUncertaintyInterval.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n18
 	}
 	if m.TransactionAborted != nil {
-		data[i] = 0x2a
+		dAtA[i] = 0x2a
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.TransactionAborted.Size()))
-		n19, err := m.TransactionAborted.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.TransactionAborted.Size()))
+		n19, err := m.TransactionAborted.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n19
 	}
 	if m.TransactionPush != nil {
-		data[i] = 0x32
+		dAtA[i] = 0x32
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.TransactionPush.Size()))
-		n20, err := m.TransactionPush.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.TransactionPush.Size()))
+		n20, err := m.TransactionPush.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n20
 	}
 	if m.TransactionRetry != nil {
-		data[i] = 0x3a
+		dAtA[i] = 0x3a
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.TransactionRetry.Size()))
-		n21, err := m.TransactionRetry.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.TransactionRetry.Size()))
+		n21, err := m.TransactionRetry.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n21
 	}
 	if m.TransactionStatus != nil {
-		data[i] = 0x42
+		dAtA[i] = 0x42
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.TransactionStatus.Size()))
-		n22, err := m.TransactionStatus.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.TransactionStatus.Size()))
+		n22, err := m.TransactionStatus.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n22
 	}
 	if m.WriteIntent != nil {
-		data[i] = 0x4a
+		dAtA[i] = 0x4a
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.WriteIntent.Size()))
-		n23, err := m.WriteIntent.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.WriteIntent.Size()))
+		n23, err := m.WriteIntent.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n23
 	}
 	if m.WriteTooOld != nil {
-		data[i] = 0x52
+		dAtA[i] = 0x52
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.WriteTooOld.Size()))
-		n24, err := m.WriteTooOld.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.WriteTooOld.Size()))
+		n24, err := m.WriteTooOld.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n24
 	}
 	if m.OpRequiresTxn != nil {
-		data[i] = 0x5a
+		dAtA[i] = 0x5a
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.OpRequiresTxn.Size()))
-		n25, err := m.OpRequiresTxn.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.OpRequiresTxn.Size()))
+		n25, err := m.OpRequiresTxn.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n25
 	}
 	if m.ConditionFailed != nil {
-		data[i] = 0x62
+		dAtA[i] = 0x62
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.ConditionFailed.Size()))
-		n26, err := m.ConditionFailed.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.ConditionFailed.Size()))
+		n26, err := m.ConditionFailed.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n26
 	}
 	if m.LeaseRejected != nil {
-		data[i] = 0x6a
+		dAtA[i] = 0x6a
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.LeaseRejected.Size()))
-		n27, err := m.LeaseRejected.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.LeaseRejected.Size()))
+		n27, err := m.LeaseRejected.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n27
 	}
 	if m.NodeUnavailable != nil {
-		data[i] = 0x72
+		dAtA[i] = 0x72
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.NodeUnavailable.Size()))
-		n28, err := m.NodeUnavailable.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.NodeUnavailable.Size()))
+		n28, err := m.NodeUnavailable.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n28
 	}
 	if m.Send != nil {
-		data[i] = 0x7a
+		dAtA[i] = 0x7a
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.Send.Size()))
-		n29, err := m.Send.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.Send.Size()))
+		n29, err := m.Send.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n29
 	}
 	if m.RaftGroupDeleted != nil {
-		data[i] = 0x82
+		dAtA[i] = 0x82
 		i++
-		data[i] = 0x1
+		dAtA[i] = 0x1
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.RaftGroupDeleted.Size()))
-		n30, err := m.RaftGroupDeleted.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.RaftGroupDeleted.Size()))
+		n30, err := m.RaftGroupDeleted.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n30
 	}
 	if m.ReplicaCorruption != nil {
-		data[i] = 0x8a
+		dAtA[i] = 0x8a
 		i++
-		data[i] = 0x1
+		dAtA[i] = 0x1
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.ReplicaCorruption.Size()))
-		n31, err := m.ReplicaCorruption.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.ReplicaCorruption.Size()))
+		n31, err := m.ReplicaCorruption.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n31
 	}
 	if m.ReplicaTooOld != nil {
-		data[i] = 0x92
+		dAtA[i] = 0x92
 		i++
-		data[i] = 0x1
+		dAtA[i] = 0x1
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.ReplicaTooOld.Size()))
-		n32, err := m.ReplicaTooOld.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.ReplicaTooOld.Size()))
+		n32, err := m.ReplicaTooOld.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n32
 	}
 	if m.TransactionReplay != nil {
-		data[i] = 0xb2
+		dAtA[i] = 0xb2
 		i++
-		data[i] = 0x1
+		dAtA[i] = 0x1
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.TransactionReplay.Size()))
-		n33, err := m.TransactionReplay.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.TransactionReplay.Size()))
+		n33, err := m.TransactionReplay.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n33
 	}
 	if m.RangeFrozen != nil {
-		data[i] = 0xca
+		dAtA[i] = 0xca
 		i++
-		data[i] = 0x1
+		dAtA[i] = 0x1
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.RangeFrozen.Size()))
-		n34, err := m.RangeFrozen.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.RangeFrozen.Size()))
+		n34, err := m.RangeFrozen.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n34
 	}
-	return i, nil
-}
-
-func (m *ErrPosition) Marshal() (data []byte, err error) {
-	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
-	if err != nil {
-		return nil, err
-	}
-	return data[:n], nil
-}
-
-func (m *ErrPosition) MarshalTo(data []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	data[i] = 0x8
-	i++
-	i = encodeVarintErrors(data, i, uint64(m.Index))
-	return i, nil
-}
-
-func (m *Error) Marshal() (data []byte, err error) {
-	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
-	if err != nil {
-		return nil, err
-	}
-	return data[:n], nil
-}
-
-func (m *Error) MarshalTo(data []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	data[i] = 0xa
-	i++
-	i = encodeVarintErrors(data, i, uint64(len(m.Message)))
-	i += copy(data[i:], m.Message)
-	data[i] = 0x18
-	i++
-	i = encodeVarintErrors(data, i, uint64(m.TransactionRestart))
-	if m.UnexposedTxn != nil {
-		data[i] = 0x22
+	if m.AmbiguousResult != nil {
+		dAtA[i] = 0xd2
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.UnexposedTxn.Size()))
-		n35, err := m.UnexposedTxn.MarshalTo(data[i:])
+		dAtA[i] = 0x1
+		i++
+		i = encodeVarintErrors(dAtA, i, uint64(m.AmbiguousResult.Size()))
+		n35, err := m.AmbiguousResult.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n35
 	}
-	data[i] = 0x28
-	i++
-	i = encodeVarintErrors(data, i, uint64(m.OriginNode))
-	if m.Detail != nil {
-		data[i] = 0x32
+	if m.StoreNotFound != nil {
+		dAtA[i] = 0xda
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.Detail.Size()))
-		n36, err := m.Detail.MarshalTo(data[i:])
+		dAtA[i] = 0x1
+		i++
+		i = encodeVarintErrors(dAtA, i, uint64(m.StoreNotFound.Size()))
+		n36, err := m.StoreNotFound.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n36
 	}
-	if m.Index != nil {
-		data[i] = 0x3a
+	return i, nil
+}
+
+func (m *ErrPosition) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ErrPosition) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintErrors(dAtA, i, uint64(m.Index))
+	return i, nil
+}
+
+func (m *Error) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *Error) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0xa
+	i++
+	i = encodeVarintErrors(dAtA, i, uint64(len(m.Message)))
+	i += copy(dAtA[i:], m.Message)
+	dAtA[i] = 0x18
+	i++
+	i = encodeVarintErrors(dAtA, i, uint64(m.TransactionRestart))
+	if m.UnexposedTxn != nil {
+		dAtA[i] = 0x22
 		i++
-		i = encodeVarintErrors(data, i, uint64(m.Index.Size()))
-		n37, err := m.Index.MarshalTo(data[i:])
+		i = encodeVarintErrors(dAtA, i, uint64(m.UnexposedTxn.Size()))
+		n37, err := m.UnexposedTxn.MarshalTo(dAtA[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n37
 	}
-	data[i] = 0x42
+	dAtA[i] = 0x28
 	i++
-	i = encodeVarintErrors(data, i, uint64(m.Now.Size()))
-	n38, err := m.Now.MarshalTo(data[i:])
+	i = encodeVarintErrors(dAtA, i, uint64(m.OriginNode))
+	if m.Detail != nil {
+		dAtA[i] = 0x32
+		i++
+		i = encodeVarintErrors(dAtA, i, uint64(m.Detail.Size()))
+		n38, err := m.Detail.MarshalTo(dAtA[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n38
+	}
+	if m.Index != nil {
+		dAtA[i] = 0x3a
+		i++
+		i = encodeVarintErrors(dAtA, i, uint64(m.Index.Size()))
+		n39, err := m.Index.MarshalTo(dAtA[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n39
+	}
+	dAtA[i] = 0x42
+	i++
+	i = encodeVarintErrors(dAtA, i, uint64(m.Now.Size()))
+	n40, err := m.Now.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n38
+	i += n40
 	return i, nil
 }
 
-func encodeFixed64Errors(data []byte, offset int, v uint64) int {
-	data[offset] = uint8(v)
-	data[offset+1] = uint8(v >> 8)
-	data[offset+2] = uint8(v >> 16)
-	data[offset+3] = uint8(v >> 24)
-	data[offset+4] = uint8(v >> 32)
-	data[offset+5] = uint8(v >> 40)
-	data[offset+6] = uint8(v >> 48)
-	data[offset+7] = uint8(v >> 56)
+func encodeFixed64Errors(dAtA []byte, offset int, v uint64) int {
+	dAtA[offset] = uint8(v)
+	dAtA[offset+1] = uint8(v >> 8)
+	dAtA[offset+2] = uint8(v >> 16)
+	dAtA[offset+3] = uint8(v >> 24)
+	dAtA[offset+4] = uint8(v >> 32)
+	dAtA[offset+5] = uint8(v >> 40)
+	dAtA[offset+6] = uint8(v >> 48)
+	dAtA[offset+7] = uint8(v >> 56)
 	return offset + 8
 }
-func encodeFixed32Errors(data []byte, offset int, v uint32) int {
-	data[offset] = uint8(v)
-	data[offset+1] = uint8(v >> 8)
-	data[offset+2] = uint8(v >> 16)
-	data[offset+3] = uint8(v >> 24)
+func encodeFixed32Errors(dAtA []byte, offset int, v uint32) int {
+	dAtA[offset] = uint8(v)
+	dAtA[offset+1] = uint8(v >> 8)
+	dAtA[offset+2] = uint8(v >> 16)
+	dAtA[offset+3] = uint8(v >> 24)
 	return offset + 4
 }
-func encodeVarintErrors(data []byte, offset int, v uint64) int {
+func encodeVarintErrors(dAtA []byte, offset int, v uint64) int {
 	for v >= 1<<7 {
-		data[offset] = uint8(v&0x7f | 0x80)
+		dAtA[offset] = uint8(v&0x7f | 0x80)
 		v >>= 7
 		offset++
 	}
-	data[offset] = uint8(v)
+	dAtA[offset] = uint8(v)
 	return offset + 1
 }
 func (m *NotLeaseHolderError) Size() (n int) {
@@ -1326,6 +1434,8 @@ func (m *NotLeaseHolderError) Size() (n int) {
 		l = m.Lease.Size()
 		n += 1 + l + sovErrors(uint64(l))
 	}
+	l = len(m.CustomMsg)
+	n += 1 + l + sovErrors(uint64(l))
 	return n
 }
 
@@ -1475,6 +1585,14 @@ func (m *SendError) Size() (n int) {
 	return n
 }
 
+func (m *AmbiguousResultError) Size() (n int) {
+	var l int
+	_ = l
+	l = len(m.Message)
+	n += 1 + l + sovErrors(uint64(l))
+	return n
+}
+
 func (m *RaftGroupDeletedError) Size() (n int) {
 	var l int
 	_ = l
@@ -1493,6 +1611,14 @@ func (m *ReplicaCorruptionError) Size() (n int) {
 func (m *ReplicaTooOldError) Size() (n int) {
 	var l int
 	_ = l
+	n += 1 + sovErrors(uint64(m.ReplicaID))
+	return n
+}
+
+func (m *StoreNotFoundError) Size() (n int) {
+	var l int
+	_ = l
+	n += 1 + sovErrors(uint64(m.StoreID))
 	return n
 }
 
@@ -1577,6 +1703,14 @@ func (m *ErrorDetail) Size() (n int) {
 	}
 	if m.RangeFrozen != nil {
 		l = m.RangeFrozen.Size()
+		n += 2 + l + sovErrors(uint64(l))
+	}
+	if m.AmbiguousResult != nil {
+		l = m.AmbiguousResult.Size()
+		n += 2 + l + sovErrors(uint64(l))
+	}
+	if m.StoreNotFound != nil {
+		l = m.StoreNotFound.Size()
 		n += 2 + l + sovErrors(uint64(l))
 	}
 	return n
@@ -1687,6 +1821,12 @@ func (this *ErrorDetail) GetValue() interface{} {
 	if this.RangeFrozen != nil {
 		return this.RangeFrozen
 	}
+	if this.AmbiguousResult != nil {
+		return this.AmbiguousResult
+	}
+	if this.StoreNotFound != nil {
+		return this.StoreNotFound
+	}
 	return nil
 }
 
@@ -1732,13 +1872,17 @@ func (this *ErrorDetail) SetValue(value interface{}) bool {
 		this.TransactionReplay = vt
 	case *RangeFrozenError:
 		this.RangeFrozen = vt
+	case *AmbiguousResultError:
+		this.AmbiguousResult = vt
+	case *StoreNotFoundError:
+		this.StoreNotFound = vt
 	default:
 		return false
 	}
 	return true
 }
-func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *NotLeaseHolderError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1750,7 +1894,7 @@ func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1778,7 +1922,7 @@ func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1792,7 +1936,7 @@ func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.Replica.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Replica.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -1808,7 +1952,7 @@ func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1825,7 +1969,7 @@ func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
 			if m.LeaseHolder == nil {
 				m.LeaseHolder = &ReplicaDescriptor{}
 			}
-			if err := m.LeaseHolder.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.LeaseHolder.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -1841,7 +1985,7 @@ func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				m.RangeID |= (RangeID(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1860,7 +2004,7 @@ func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -1877,13 +2021,42 @@ func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
 			if m.Lease == nil {
 				m.Lease = &Lease{}
 			}
-			if err := m.Lease.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Lease.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CustomMsg", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowErrors
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthErrors
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.CustomMsg = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1902,8 +2075,8 @@ func (m *NotLeaseHolderError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *NodeUnavailableError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *NodeUnavailableError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1915,7 +2088,7 @@ func (m *NodeUnavailableError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1933,7 +2106,7 @@ func (m *NodeUnavailableError) Unmarshal(data []byte) error {
 		switch fieldNum {
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -1952,8 +2125,8 @@ func (m *NodeUnavailableError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *RangeNotFoundError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *RangeNotFoundError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -1965,7 +2138,7 @@ func (m *RangeNotFoundError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -1993,7 +2166,7 @@ func (m *RangeNotFoundError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				m.RangeID |= (RangeID(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2002,7 +2175,7 @@ func (m *RangeNotFoundError) Unmarshal(data []byte) error {
 			}
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2021,8 +2194,8 @@ func (m *RangeNotFoundError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *RangeKeyMismatchError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2034,7 +2207,7 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2062,7 +2235,7 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				byteLen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2076,7 +2249,7 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.RequestStartKey = append(m.RequestStartKey[:0], data[iNdEx:postIndex]...)
+			m.RequestStartKey = append(m.RequestStartKey[:0], dAtA[iNdEx:postIndex]...)
 			if m.RequestStartKey == nil {
 				m.RequestStartKey = []byte{}
 			}
@@ -2093,7 +2266,7 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				byteLen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2107,7 +2280,7 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.RequestEndKey = append(m.RequestEndKey[:0], data[iNdEx:postIndex]...)
+			m.RequestEndKey = append(m.RequestEndKey[:0], dAtA[iNdEx:postIndex]...)
 			if m.RequestEndKey == nil {
 				m.RequestEndKey = []byte{}
 			}
@@ -2124,7 +2297,7 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2141,7 +2314,7 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 			if m.MismatchedRange == nil {
 				m.MismatchedRange = &RangeDescriptor{}
 			}
-			if err := m.MismatchedRange.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.MismatchedRange.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -2157,7 +2330,7 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2174,13 +2347,13 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 			if m.SuggestedRange == nil {
 				m.SuggestedRange = &RangeDescriptor{}
 			}
-			if err := m.SuggestedRange.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.SuggestedRange.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2199,8 +2372,8 @@ func (m *RangeKeyMismatchError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *RangeFrozenError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *RangeFrozenError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2212,7 +2385,7 @@ func (m *RangeFrozenError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2240,7 +2413,7 @@ func (m *RangeFrozenError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2254,13 +2427,13 @@ func (m *RangeFrozenError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.Desc.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Desc.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2279,8 +2452,8 @@ func (m *RangeFrozenError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *ReadWithinUncertaintyIntervalError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *ReadWithinUncertaintyIntervalError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2292,7 +2465,7 @@ func (m *ReadWithinUncertaintyIntervalError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2320,7 +2493,7 @@ func (m *ReadWithinUncertaintyIntervalError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2334,7 +2507,7 @@ func (m *ReadWithinUncertaintyIntervalError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.ReadTimestamp.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ReadTimestamp.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -2350,7 +2523,7 @@ func (m *ReadWithinUncertaintyIntervalError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2364,13 +2537,13 @@ func (m *ReadWithinUncertaintyIntervalError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.ExistingTimestamp.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ExistingTimestamp.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2389,8 +2562,8 @@ func (m *ReadWithinUncertaintyIntervalError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *TransactionAbortedError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *TransactionAbortedError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2402,7 +2575,7 @@ func (m *TransactionAbortedError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2420,7 +2593,7 @@ func (m *TransactionAbortedError) Unmarshal(data []byte) error {
 		switch fieldNum {
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2439,8 +2612,8 @@ func (m *TransactionAbortedError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *TransactionPushError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *TransactionPushError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2452,7 +2625,7 @@ func (m *TransactionPushError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2480,7 +2653,7 @@ func (m *TransactionPushError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2494,13 +2667,13 @@ func (m *TransactionPushError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.PusheeTxn.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.PusheeTxn.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2519,8 +2692,8 @@ func (m *TransactionPushError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *TransactionRetryError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *TransactionRetryError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2532,7 +2705,7 @@ func (m *TransactionRetryError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2550,7 +2723,7 @@ func (m *TransactionRetryError) Unmarshal(data []byte) error {
 		switch fieldNum {
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2569,8 +2742,8 @@ func (m *TransactionRetryError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *TransactionReplayError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *TransactionReplayError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2582,7 +2755,7 @@ func (m *TransactionReplayError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2600,7 +2773,7 @@ func (m *TransactionReplayError) Unmarshal(data []byte) error {
 		switch fieldNum {
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2619,8 +2792,8 @@ func (m *TransactionReplayError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *TransactionStatusError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *TransactionStatusError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2632,7 +2805,7 @@ func (m *TransactionStatusError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2660,7 +2833,7 @@ func (m *TransactionStatusError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2675,11 +2848,11 @@ func (m *TransactionStatusError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Msg = string(data[iNdEx:postIndex])
+			m.Msg = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2698,8 +2871,8 @@ func (m *TransactionStatusError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *WriteIntentError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *WriteIntentError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2711,7 +2884,7 @@ func (m *WriteIntentError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2739,7 +2912,7 @@ func (m *WriteIntentError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2754,7 +2927,7 @@ func (m *WriteIntentError) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.Intents = append(m.Intents, Intent{})
-			if err := m.Intents[len(m.Intents)-1].Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Intents[len(m.Intents)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -2770,7 +2943,7 @@ func (m *WriteIntentError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2780,7 +2953,7 @@ func (m *WriteIntentError) Unmarshal(data []byte) error {
 			m.Resolved = bool(v != 0)
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2799,8 +2972,8 @@ func (m *WriteIntentError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *WriteTooOldError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *WriteTooOldError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2812,7 +2985,7 @@ func (m *WriteTooOldError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2840,7 +3013,7 @@ func (m *WriteTooOldError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2854,7 +3027,7 @@ func (m *WriteTooOldError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.Timestamp.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Timestamp.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -2870,7 +3043,7 @@ func (m *WriteTooOldError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -2884,13 +3057,13 @@ func (m *WriteTooOldError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.ActualTimestamp.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ActualTimestamp.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2909,8 +3082,8 @@ func (m *WriteTooOldError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *OpRequiresTxnError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *OpRequiresTxnError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2922,7 +3095,7 @@ func (m *OpRequiresTxnError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -2940,7 +3113,7 @@ func (m *OpRequiresTxnError) Unmarshal(data []byte) error {
 		switch fieldNum {
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -2959,8 +3132,8 @@ func (m *OpRequiresTxnError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *ConditionFailedError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *ConditionFailedError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -2972,7 +3145,7 @@ func (m *ConditionFailedError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -3000,7 +3173,7 @@ func (m *ConditionFailedError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3017,13 +3190,13 @@ func (m *ConditionFailedError) Unmarshal(data []byte) error {
 			if m.ActualValue == nil {
 				m.ActualValue = &Value{}
 			}
-			if err := m.ActualValue.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ActualValue.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -3042,8 +3215,8 @@ func (m *ConditionFailedError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *LeaseRejectedError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *LeaseRejectedError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -3055,7 +3228,7 @@ func (m *LeaseRejectedError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -3083,7 +3256,7 @@ func (m *LeaseRejectedError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3098,7 +3271,7 @@ func (m *LeaseRejectedError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Message = string(data[iNdEx:postIndex])
+			m.Message = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 2:
 			if wireType != 2 {
@@ -3112,7 +3285,7 @@ func (m *LeaseRejectedError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3126,7 +3299,7 @@ func (m *LeaseRejectedError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.Requested.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Requested.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3142,7 +3315,7 @@ func (m *LeaseRejectedError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3156,13 +3329,13 @@ func (m *LeaseRejectedError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.Existing.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Existing.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -3181,8 +3354,8 @@ func (m *LeaseRejectedError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *SendError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *SendError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -3194,7 +3367,7 @@ func (m *SendError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -3222,7 +3395,7 @@ func (m *SendError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3237,11 +3410,11 @@ func (m *SendError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Message = string(data[iNdEx:postIndex])
+			m.Message = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -3260,8 +3433,8 @@ func (m *SendError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *RaftGroupDeletedError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *AmbiguousResultError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -3273,7 +3446,86 @@ func (m *RaftGroupDeletedError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: AmbiguousResultError: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: AmbiguousResultError: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Message", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowErrors
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthErrors
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Message = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipErrors(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthErrors
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *RaftGroupDeletedError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowErrors
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -3291,7 +3543,7 @@ func (m *RaftGroupDeletedError) Unmarshal(data []byte) error {
 		switch fieldNum {
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -3310,8 +3562,8 @@ func (m *RaftGroupDeletedError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *ReplicaCorruptionError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *ReplicaCorruptionError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -3323,7 +3575,7 @@ func (m *ReplicaCorruptionError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -3351,7 +3603,7 @@ func (m *ReplicaCorruptionError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3366,7 +3618,7 @@ func (m *ReplicaCorruptionError) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.ErrorMsg = string(data[iNdEx:postIndex])
+			m.ErrorMsg = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 2:
 			if wireType != 0 {
@@ -3380,7 +3632,7 @@ func (m *ReplicaCorruptionError) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3390,7 +3642,7 @@ func (m *ReplicaCorruptionError) Unmarshal(data []byte) error {
 			m.Processed = bool(v != 0)
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -3409,8 +3661,8 @@ func (m *ReplicaCorruptionError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *ReplicaTooOldError) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *ReplicaTooOldError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -3422,7 +3674,7 @@ func (m *ReplicaTooOldError) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -3438,9 +3690,28 @@ func (m *ReplicaTooOldError) Unmarshal(data []byte) error {
 			return fmt.Errorf("proto: ReplicaTooOldError: illegal tag %d (wire type %d)", fieldNum, wire)
 		}
 		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ReplicaID", wireType)
+			}
+			m.ReplicaID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowErrors
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.ReplicaID |= (ReplicaID(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -3459,8 +3730,8 @@ func (m *ReplicaTooOldError) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *ErrorDetail) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *StoreNotFoundError) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -3472,7 +3743,76 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: StoreNotFoundError: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: StoreNotFoundError: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field StoreID", wireType)
+			}
+			m.StoreID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowErrors
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.StoreID |= (StoreID(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipErrors(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthErrors
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ErrorDetail) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowErrors
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -3500,7 +3840,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3517,7 +3857,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.NotLeaseHolder == nil {
 				m.NotLeaseHolder = &NotLeaseHolderError{}
 			}
-			if err := m.NotLeaseHolder.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.NotLeaseHolder.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3533,7 +3873,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3550,7 +3890,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.RangeNotFound == nil {
 				m.RangeNotFound = &RangeNotFoundError{}
 			}
-			if err := m.RangeNotFound.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.RangeNotFound.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3566,7 +3906,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3583,7 +3923,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.RangeKeyMismatch == nil {
 				m.RangeKeyMismatch = &RangeKeyMismatchError{}
 			}
-			if err := m.RangeKeyMismatch.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.RangeKeyMismatch.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3599,7 +3939,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3616,7 +3956,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.ReadWithinUncertaintyInterval == nil {
 				m.ReadWithinUncertaintyInterval = &ReadWithinUncertaintyIntervalError{}
 			}
-			if err := m.ReadWithinUncertaintyInterval.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ReadWithinUncertaintyInterval.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3632,7 +3972,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3649,7 +3989,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.TransactionAborted == nil {
 				m.TransactionAborted = &TransactionAbortedError{}
 			}
-			if err := m.TransactionAborted.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.TransactionAborted.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3665,7 +4005,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3682,7 +4022,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.TransactionPush == nil {
 				m.TransactionPush = &TransactionPushError{}
 			}
-			if err := m.TransactionPush.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.TransactionPush.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3698,7 +4038,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3715,7 +4055,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.TransactionRetry == nil {
 				m.TransactionRetry = &TransactionRetryError{}
 			}
-			if err := m.TransactionRetry.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.TransactionRetry.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3731,7 +4071,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3748,7 +4088,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.TransactionStatus == nil {
 				m.TransactionStatus = &TransactionStatusError{}
 			}
-			if err := m.TransactionStatus.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.TransactionStatus.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3764,7 +4104,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3781,7 +4121,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.WriteIntent == nil {
 				m.WriteIntent = &WriteIntentError{}
 			}
-			if err := m.WriteIntent.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.WriteIntent.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3797,7 +4137,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3814,7 +4154,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.WriteTooOld == nil {
 				m.WriteTooOld = &WriteTooOldError{}
 			}
-			if err := m.WriteTooOld.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.WriteTooOld.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3830,7 +4170,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3847,7 +4187,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.OpRequiresTxn == nil {
 				m.OpRequiresTxn = &OpRequiresTxnError{}
 			}
-			if err := m.OpRequiresTxn.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.OpRequiresTxn.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3863,7 +4203,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3880,7 +4220,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.ConditionFailed == nil {
 				m.ConditionFailed = &ConditionFailedError{}
 			}
-			if err := m.ConditionFailed.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ConditionFailed.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3896,7 +4236,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3913,7 +4253,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.LeaseRejected == nil {
 				m.LeaseRejected = &LeaseRejectedError{}
 			}
-			if err := m.LeaseRejected.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.LeaseRejected.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3929,7 +4269,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3946,7 +4286,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.NodeUnavailable == nil {
 				m.NodeUnavailable = &NodeUnavailableError{}
 			}
-			if err := m.NodeUnavailable.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.NodeUnavailable.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3962,7 +4302,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -3979,7 +4319,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.Send == nil {
 				m.Send = &SendError{}
 			}
-			if err := m.Send.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Send.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -3995,7 +4335,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4012,7 +4352,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.RaftGroupDeleted == nil {
 				m.RaftGroupDeleted = &RaftGroupDeletedError{}
 			}
-			if err := m.RaftGroupDeleted.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.RaftGroupDeleted.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -4028,7 +4368,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4045,7 +4385,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.ReplicaCorruption == nil {
 				m.ReplicaCorruption = &ReplicaCorruptionError{}
 			}
-			if err := m.ReplicaCorruption.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ReplicaCorruption.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -4061,7 +4401,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4078,7 +4418,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.ReplicaTooOld == nil {
 				m.ReplicaTooOld = &ReplicaTooOldError{}
 			}
-			if err := m.ReplicaTooOld.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.ReplicaTooOld.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -4094,7 +4434,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4111,7 +4451,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.TransactionReplay == nil {
 				m.TransactionReplay = &TransactionReplayError{}
 			}
-			if err := m.TransactionReplay.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.TransactionReplay.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -4127,7 +4467,7 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4144,13 +4484,79 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 			if m.RangeFrozen == nil {
 				m.RangeFrozen = &RangeFrozenError{}
 			}
-			if err := m.RangeFrozen.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.RangeFrozen.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 26:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AmbiguousResult", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowErrors
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthErrors
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.AmbiguousResult == nil {
+				m.AmbiguousResult = &AmbiguousResultError{}
+			}
+			if err := m.AmbiguousResult.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 27:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field StoreNotFound", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowErrors
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthErrors
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.StoreNotFound == nil {
+				m.StoreNotFound = &StoreNotFoundError{}
+			}
+			if err := m.StoreNotFound.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -4169,8 +4575,8 @@ func (m *ErrorDetail) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *ErrPosition) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *ErrPosition) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -4182,7 +4588,7 @@ func (m *ErrPosition) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -4210,7 +4616,7 @@ func (m *ErrPosition) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				m.Index |= (int32(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4219,7 +4625,7 @@ func (m *ErrPosition) Unmarshal(data []byte) error {
 			}
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -4238,8 +4644,8 @@ func (m *ErrPosition) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *Error) Unmarshal(data []byte) error {
-	l := len(data)
+func (m *Error) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		preIndex := iNdEx
@@ -4251,7 +4657,7 @@ func (m *Error) Unmarshal(data []byte) error {
 			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -4279,7 +4685,7 @@ func (m *Error) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4294,7 +4700,7 @@ func (m *Error) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Message = string(data[iNdEx:postIndex])
+			m.Message = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 3:
 			if wireType != 0 {
@@ -4308,7 +4714,7 @@ func (m *Error) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				m.TransactionRestart |= (TransactionRestart(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4327,7 +4733,7 @@ func (m *Error) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4344,7 +4750,7 @@ func (m *Error) Unmarshal(data []byte) error {
 			if m.UnexposedTxn == nil {
 				m.UnexposedTxn = &Transaction{}
 			}
-			if err := m.UnexposedTxn.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.UnexposedTxn.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -4360,7 +4766,7 @@ func (m *Error) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				m.OriginNode |= (NodeID(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4379,7 +4785,7 @@ func (m *Error) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4396,7 +4802,7 @@ func (m *Error) Unmarshal(data []byte) error {
 			if m.Detail == nil {
 				m.Detail = &ErrorDetail{}
 			}
-			if err := m.Detail.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Detail.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -4412,7 +4818,7 @@ func (m *Error) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4429,7 +4835,7 @@ func (m *Error) Unmarshal(data []byte) error {
 			if m.Index == nil {
 				m.Index = &ErrPosition{}
 			}
-			if err := m.Index.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Index.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -4445,7 +4851,7 @@ func (m *Error) Unmarshal(data []byte) error {
 				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4459,13 +4865,13 @@ func (m *Error) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.Now.Unmarshal(data[iNdEx:postIndex]); err != nil {
+			if err := m.Now.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
-			skippy, err := skipErrors(data[iNdEx:])
+			skippy, err := skipErrors(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
@@ -4484,8 +4890,8 @@ func (m *Error) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func skipErrors(data []byte) (n int, err error) {
-	l := len(data)
+func skipErrors(dAtA []byte) (n int, err error) {
+	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
 		var wire uint64
@@ -4496,7 +4902,7 @@ func skipErrors(data []byte) (n int, err error) {
 			if iNdEx >= l {
 				return 0, io.ErrUnexpectedEOF
 			}
-			b := data[iNdEx]
+			b := dAtA[iNdEx]
 			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
@@ -4514,7 +4920,7 @@ func skipErrors(data []byte) (n int, err error) {
 					return 0, io.ErrUnexpectedEOF
 				}
 				iNdEx++
-				if data[iNdEx-1] < 0x80 {
+				if dAtA[iNdEx-1] < 0x80 {
 					break
 				}
 			}
@@ -4531,7 +4937,7 @@ func skipErrors(data []byte) (n int, err error) {
 				if iNdEx >= l {
 					return 0, io.ErrUnexpectedEOF
 				}
-				b := data[iNdEx]
+				b := dAtA[iNdEx]
 				iNdEx++
 				length |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
@@ -4554,7 +4960,7 @@ func skipErrors(data []byte) (n int, err error) {
 					if iNdEx >= l {
 						return 0, io.ErrUnexpectedEOF
 					}
-					b := data[iNdEx]
+					b := dAtA[iNdEx]
 					iNdEx++
 					innerWire |= (uint64(b) & 0x7F) << shift
 					if b < 0x80 {
@@ -4565,7 +4971,7 @@ func skipErrors(data []byte) (n int, err error) {
 				if innerWireType == 4 {
 					break
 				}
-				next, err := skipErrors(data[start:])
+				next, err := skipErrors(dAtA[start:])
 				if err != nil {
 					return 0, err
 				}
@@ -4592,102 +4998,111 @@ var (
 func init() { proto.RegisterFile("cockroach/pkg/roachpb/errors.proto", fileDescriptorErrors) }
 
 var fileDescriptorErrors = []byte{
-	// 1552 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x09, 0x6e, 0x88, 0x02, 0xff, 0x9c, 0x57, 0x4b, 0x73, 0x1b, 0x45,
-	0x10, 0xb6, 0x2c, 0x39, 0x92, 0x5a, 0x96, 0x25, 0x4f, 0x1c, 0x67, 0xe3, 0x22, 0xb2, 0xb3, 0x84,
-	0xe0, 0xe4, 0x60, 0x85, 0x40, 0xa8, 0xc2, 0xe4, 0xe2, 0x67, 0x70, 0x1c, 0x3f, 0x6a, 0xec, 0x24,
-	0x14, 0xa1, 0x6a, 0x6b, 0xb3, 0x3b, 0x96, 0x17, 0xaf, 0x77, 0x94, 0xd9, 0x59, 0x3f, 0x38, 0xf0,
-	0x07, 0xb8, 0x70, 0x24, 0xb7, 0x5c, 0xb8, 0x51, 0xfc, 0x0a, 0x0e, 0x3e, 0x72, 0xe4, 0xe4, 0x02,
-	0xf3, 0x2f, 0x72, 0xa2, 0xe6, 0x21, 0x69, 0x57, 0x5e, 0x29, 0xaa, 0xdc, 0x56, 0x3d, 0xdd, 0x5f,
-	0xf7, 0xf4, 0xe3, 0xeb, 0x11, 0x98, 0x0e, 0x75, 0x0e, 0x18, 0xb5, 0x9d, 0xfd, 0x7a, 0xf3, 0xa0,
-	0x51, 0x97, 0x5f, 0xcd, 0x57, 0x75, 0xc2, 0x18, 0x65, 0xe1, 0x5c, 0x93, 0x51, 0x4e, 0xd1, 0x78,
-	0x5b, 0x67, 0x4e, 0x9f, 0x4f, 0xdd, 0x4e, 0x37, 0x3b, 0x24, 0xdc, 0x76, 0x6d, 0x6e, 0x2b, 0xc3,
-	0xa9, 0x99, 0x74, 0xad, 0x98, 0xc6, 0x9d, 0xa4, 0x46, 0xc4, 0x3d, 0xbf, 0xbe, 0xef, 0x3b, 0x75,
-	0xee, 0x1d, 0x92, 0x90, 0xdb, 0x87, 0x4d, 0xad, 0x37, 0xd1, 0xa0, 0x0d, 0x2a, 0x3f, 0xeb, 0xe2,
-	0x4b, 0x49, 0xcd, 0x9f, 0x87, 0xe1, 0xea, 0x26, 0xe5, 0x4f, 0x89, 0x1d, 0x92, 0x6f, 0xa8, 0xef,
-	0x12, 0xb6, 0x22, 0xe2, 0x46, 0xcb, 0x90, 0x67, 0xa4, 0xe9, 0x7b, 0x8e, 0x6d, 0x64, 0x66, 0x32,
-	0xb3, 0xa5, 0x07, 0xb7, 0xe7, 0x2e, 0x5d, 0x61, 0x0e, 0x2b, 0x8d, 0x65, 0x12, 0x3a, 0xcc, 0x6b,
-	0x72, 0xca, 0x16, 0x73, 0x67, 0xe7, 0xd3, 0x43, 0xb8, 0x65, 0x8a, 0x1e, 0xc3, 0xa8, 0x2f, 0x90,
-	0xad, 0x7d, 0x09, 0x6d, 0x0c, 0x0f, 0x0e, 0x85, 0x4b, 0x7e, 0x27, 0x26, 0xf4, 0x10, 0x0a, 0xcc,
-	0x0e, 0x1a, 0xc4, 0xf2, 0x5c, 0x23, 0x3b, 0x93, 0x99, 0xcd, 0x2e, 0x4e, 0x09, 0x4f, 0x17, 0xe7,
-	0xd3, 0x79, 0x2c, 0xe4, 0x6b, 0xcb, 0xef, 0x3a, 0x9f, 0x38, 0x2f, 0x75, 0xd7, 0x5c, 0x34, 0x07,
-	0x23, 0x12, 0xc5, 0xc8, 0x49, 0xc7, 0x46, 0x8a, 0x63, 0x79, 0x73, 0xac, 0xd4, 0xcc, 0x49, 0x98,
-	0xd8, 0xa4, 0x2e, 0x79, 0x16, 0xd8, 0x47, 0xb6, 0xe7, 0xdb, 0xaf, 0x7c, 0x22, 0xb3, 0x61, 0xae,
-	0x03, 0x92, 0xd8, 0x9b, 0x94, 0xaf, 0xd2, 0x28, 0x70, 0x55, 0x8e, 0xe2, 0x41, 0x65, 0x06, 0x0e,
-	0xca, 0x7c, 0x33, 0x0c, 0xd7, 0xa4, 0x70, 0x9d, 0x9c, 0x6e, 0x78, 0xe1, 0xa1, 0xcd, 0x9d, 0x7d,
-	0x05, 0xf8, 0x39, 0x8c, 0x33, 0xf2, 0x3a, 0x22, 0x21, 0xb7, 0x42, 0x6e, 0x33, 0x6e, 0x1d, 0x90,
-	0x53, 0x89, 0x3c, 0xba, 0x98, 0x7f, 0x77, 0x3e, 0x9d, 0x5d, 0x27, 0xa7, 0xb8, 0xa2, 0x35, 0x76,
-	0x84, 0xc2, 0x3a, 0x39, 0x45, 0x75, 0x68, 0x89, 0x2c, 0x12, 0xb8, 0xd2, 0x64, 0x38, 0x69, 0x52,
-	0xd6, 0xe7, 0x2b, 0x81, 0x2b, 0x0c, 0x36, 0xa0, 0x7a, 0xa8, 0xdd, 0x12, 0xd7, 0x92, 0x51, 0xc9,
-	0x9c, 0x96, 0x1e, 0x98, 0x69, 0x85, 0x11, 0xe7, 0xb1, 0xb2, 0x54, 0x3a, 0xb6, 0xf2, 0x08, 0xad,
-	0x43, 0x25, 0x8c, 0x1a, 0x0d, 0x12, 0xf2, 0x36, 0x5a, 0x6e, 0x60, 0xb4, 0xb1, 0xb6, 0xa9, 0x3c,
-	0x31, 0xb7, 0xa1, 0x2a, 0x3f, 0x56, 0x19, 0xfd, 0x91, 0x04, 0x2a, 0x2b, 0x8f, 0x20, 0xe7, 0x92,
-	0xd0, 0xd1, 0x7d, 0x38, 0x00, 0xaa, 0xee, 0x42, 0x69, 0x65, 0xfe, 0x99, 0x01, 0x13, 0x13, 0xdb,
-	0x7d, 0xe1, 0xf1, 0x7d, 0x2f, 0x78, 0x16, 0x38, 0x84, 0x71, 0xdb, 0x0b, 0xf8, 0xe9, 0x5a, 0xc0,
-	0x09, 0x3b, 0xb2, 0x7d, 0xe5, 0xe4, 0x09, 0x8c, 0x31, 0x62, 0xbb, 0x56, 0x7b, 0x6a, 0xb4, 0xbb,
-	0x9b, 0x31, 0x77, 0x62, 0xb4, 0xe6, 0xf6, 0x7d, 0x67, 0x6e, 0xb7, 0xa5, 0xa4, 0x3d, 0x95, 0x85,
-	0x69, 0x5b, 0x88, 0x30, 0x20, 0x72, 0xe2, 0x85, 0xdc, 0x0b, 0x1a, 0x31, 0xbc, 0xe1, 0xc1, 0xf1,
-	0xc6, 0x5b, 0xe6, 0xed, 0x03, 0xf3, 0x06, 0x5c, 0xdf, 0x65, 0x76, 0x10, 0xda, 0x0e, 0xf7, 0x68,
-	0xb0, 0xf0, 0x8a, 0x32, 0x4e, 0x54, 0x1b, 0x9a, 0x2f, 0x61, 0x22, 0x76, 0xb4, 0x1d, 0x85, 0xba,
-	0x9b, 0x96, 0x00, 0x9a, 0x51, 0xb8, 0x4f, 0x88, 0xc5, 0x4f, 0x02, 0x7d, 0x9d, 0x5a, 0x4a, 0xf6,
-	0x62, 0xc6, 0xda, 0x7f, 0x51, 0xd9, 0xed, 0x9e, 0x04, 0xe6, 0x75, 0xb8, 0x16, 0x3b, 0xc7, 0x84,
-	0xb3, 0x53, 0xe5, 0xd5, 0x80, 0xc9, 0xc4, 0x41, 0xd3, 0xb7, 0xf5, 0xc9, 0xfd, 0xc4, 0xc9, 0x0e,
-	0xb7, 0x79, 0x14, 0xaa, 0x88, 0x26, 0x21, 0x7b, 0x18, 0x36, 0x64, 0x28, 0x45, 0xed, 0x4a, 0x08,
-	0x4c, 0x0a, 0xd5, 0x17, 0xcc, 0xe3, 0x44, 0x94, 0x24, 0xe0, 0x4a, 0xf7, 0x2b, 0xc8, 0x7b, 0xf2,
-	0x67, 0x68, 0x64, 0x66, 0xb2, 0xb3, 0xa5, 0x07, 0x37, 0x52, 0x42, 0x57, 0x06, 0x2d, 0xd6, 0xd1,
-	0xfa, 0x68, 0x06, 0x0a, 0x8c, 0x84, 0xd4, 0x3f, 0x22, 0xae, 0xcc, 0x7a, 0x41, 0x2b, 0xb4, 0xa5,
-	0xe6, 0x6f, 0x19, 0xed, 0x71, 0x97, 0xd2, 0x2d, 0x5f, 0x8f, 0xf3, 0x02, 0x14, 0x3f, 0xa8, 0xfa,
-	0x1d, 0x2b, 0xb4, 0x09, 0x55, 0xdb, 0xe1, 0x91, 0xed, 0x7f, 0x58, 0xdd, 0x2b, 0xca, 0xb8, 0x53,
-	0xf5, 0x09, 0x40, 0x5b, 0x4d, 0x4c, 0x5e, 0x47, 0x1e, 0x23, 0xe1, 0xee, 0x89, 0x1a, 0x08, 0x73,
-	0x07, 0x26, 0x96, 0x68, 0xe0, 0x7a, 0x22, 0xbd, 0xab, 0xb6, 0xe7, 0xeb, 0x46, 0x40, 0x5f, 0xc3,
-	0xa8, 0xf6, 0x7e, 0x64, 0xfb, 0x11, 0xd1, 0x77, 0x48, 0x23, 0xbd, 0xe7, 0xe2, 0x1c, 0x97, 0x94,
-	0xb6, 0xfc, 0x61, 0xfe, 0x91, 0x01, 0xa4, 0xb8, 0x90, 0xfc, 0x40, 0x9c, 0x56, 0x73, 0xa1, 0x1a,
-	0xe4, 0x0f, 0x49, 0x18, 0xda, 0x0d, 0x92, 0x28, 0x5b, 0x4b, 0x88, 0x1e, 0x41, 0x51, 0xb3, 0x8b,
-	0x4e, 0x76, 0x1f, 0x96, 0x6d, 0xe5, 0xab, 0x6d, 0x80, 0xe6, 0xa1, 0xd0, 0x6a, 0x75, 0x4d, 0x41,
-	0xef, 0x33, 0x6e, 0xeb, 0x9b, 0x9f, 0x41, 0x71, 0x87, 0x04, 0x83, 0x85, 0xf9, 0x24, 0x57, 0x18,
-	0xae, 0x66, 0x45, 0x33, 0x63, 0x7b, 0x8f, 0x3f, 0x66, 0x34, 0x6a, 0x2e, 0x13, 0x9f, 0xb4, 0x47,
-	0xc8, 0x82, 0x49, 0xbd, 0x80, 0x96, 0x28, 0x63, 0x51, 0x53, 0x64, 0x56, 0x01, 0xdf, 0x82, 0xa2,
-	0x5c, 0xe4, 0x56, 0x77, 0xe3, 0x16, 0xa4, 0x78, 0x23, 0x6c, 0x20, 0x13, 0x8a, 0x4d, 0x46, 0x1d,
-	0x12, 0x86, 0x5d, 0xfd, 0xd6, 0x11, 0x8b, 0x42, 0x6a, 0x07, 0xb1, 0x8e, 0x33, 0xdf, 0x94, 0xa1,
-	0x24, 0xbf, 0x96, 0x09, 0xb7, 0x3d, 0x1f, 0x6d, 0x43, 0x35, 0xa0, 0xdc, 0x4a, 0xac, 0x4c, 0x55,
-	0xc4, 0x3b, 0x29, 0x69, 0x49, 0x59, 0xdb, 0x78, 0x2c, 0x48, 0x08, 0xd1, 0x06, 0x54, 0xd4, 0x8a,
-	0x12, 0xb8, 0x7b, 0x62, 0x75, 0xe9, 0x22, 0x7d, 0xd2, 0x8b, 0x46, 0x13, 0x2b, 0x0e, 0x97, 0x59,
-	0x5c, 0x86, 0x9e, 0x03, 0x52, 0x70, 0x07, 0xe4, 0xd4, 0x6a, 0x2d, 0x02, 0x5d, 0xb9, 0xd9, 0x5e,
-	0x88, 0xdd, 0x6b, 0x0e, 0x57, 0x59, 0x97, 0x18, 0xfd, 0x04, 0x33, 0x92, 0x7d, 0x8f, 0x25, 0x49,
-	0x5b, 0x51, 0x87, 0xa5, 0x2d, 0x4f, 0xd3, 0xb4, 0x5e, 0x2a, 0x0f, 0x53, 0xdf, 0x0e, 0xef, 0xa3,
-	0x77, 0x7c, 0x93, 0xf5, 0xd3, 0x41, 0x2f, 0xe1, 0x2a, 0xef, 0x50, 0x96, 0x65, 0x2b, 0x7a, 0x35,
-	0x46, 0xa4, 0xcb, 0x7b, 0xfd, 0x39, 0x33, 0xce, 0xc5, 0x18, 0xf1, 0x4b, 0x07, 0x08, 0x43, 0x35,
-	0x0e, 0x2e, 0xb8, 0xd5, 0xb8, 0x22, 0x91, 0x3f, 0xed, 0x8f, 0xdc, 0xa6, 0x72, 0x5c, 0xe1, 0x49,
-	0x29, 0x7a, 0x06, 0xe3, 0x71, 0x4c, 0x26, 0x78, 0xd9, 0xc8, 0xf7, 0xac, 0x43, 0x2a, 0x85, 0xe3,
-	0x78, 0x58, 0x52, 0x8c, 0xbe, 0x85, 0xf8, 0x05, 0xc4, 0x23, 0x84, 0x47, 0xa1, 0x51, 0x90, 0xb8,
-	0x77, 0xfb, 0xe3, 0xc6, 0x78, 0x1e, 0xc7, 0x63, 0x53, 0x72, 0xb4, 0x0a, 0xa3, 0xc7, 0x82, 0x70,
-	0x2d, 0x45, 0xd2, 0x46, 0x51, 0x62, 0x7e, 0x9c, 0x82, 0xd9, 0xbd, 0x09, 0x70, 0xe9, 0xb8, 0x23,
-	0x41, 0x8f, 0xa1, 0xac, 0x70, 0x38, 0xa5, 0x16, 0xf5, 0x5d, 0x03, 0xfa, 0x03, 0xc5, 0xc6, 0x4d,
-	0x03, 0x29, 0x89, 0x98, 0x0c, 0xda, 0xb4, 0x98, 0xe6, 0x56, 0xb9, 0x22, 0x4b, 0x3d, 0x27, 0xe3,
-	0x32, 0x09, 0xe3, 0x32, 0x8d, 0xcb, 0x44, 0x91, 0x9d, 0x16, 0x27, 0x5b, 0x7b, 0x92, 0x94, 0x8d,
-	0xd1, 0x9e, 0x45, 0x4e, 0xa3, 0x6f, 0x5c, 0x71, 0x92, 0x52, 0xf4, 0x14, 0xc6, 0x14, 0x15, 0x30,
-	0x4d, 0xc9, 0x46, 0xb9, 0x67, 0x84, 0x97, 0xa9, 0x1b, 0x97, 0xfd, 0xb8, 0x4c, 0x44, 0x18, 0x50,
-	0x97, 0x58, 0x51, 0xe7, 0x71, 0x6b, 0x8c, 0xf5, 0x8c, 0x30, 0xed, 0x19, 0x8c, 0x2b, 0x41, 0x52,
-	0x8a, 0xee, 0x43, 0x2e, 0x24, 0x81, 0x6b, 0x54, 0x24, 0xce, 0x47, 0x29, 0x38, 0x6d, 0x8a, 0xc6,
-	0x52, 0x53, 0x31, 0xc8, 0x1e, 0xb7, 0x1a, 0x82, 0x83, 0x2d, 0x57, 0x91, 0xb0, 0x51, 0xed, 0xc3,
-	0x20, 0x29, 0x7c, 0x2d, 0x18, 0x24, 0x29, 0x16, 0x9d, 0xab, 0xff, 0x74, 0x58, 0x4e, 0x9b, 0xc2,
-	0x8d, 0xf1, 0x9e, 0x9d, 0x9b, 0x4e, 0xf7, 0x78, 0x9c, 0x75, 0xcb, 0x25, 0x85, 0x6a, 0xe4, 0x56,
-	0xcf, 0xa1, 0xde, 0x14, 0x7a, 0x89, 0xe4, 0xc5, 0xe3, 0x30, 0x26, 0xeb, 0x1e, 0x31, 0x26, 0x1f,
-	0x4e, 0xc6, 0xe4, 0x20, 0x23, 0x16, 0x7b, 0x64, 0x25, 0x46, 0x4c, 0xc9, 0xc5, 0x88, 0x29, 0x72,
-	0xde, 0x93, 0x8f, 0x67, 0xe3, 0x46, 0xcf, 0xc9, 0xe8, 0x7e, 0x62, 0xe3, 0x12, 0xeb, 0x48, 0xe6,
-	0x73, 0x67, 0x6f, 0xa7, 0x33, 0xe6, 0x5d, 0xb9, 0x9a, 0xb6, 0x69, 0x28, 0x3b, 0x12, 0x4d, 0xc1,
-	0x88, 0x17, 0xb8, 0xe4, 0x44, 0xee, 0xa3, 0x11, 0xbd, 0xe0, 0x94, 0xc8, 0xfc, 0x3d, 0x0b, 0x23,
-	0x83, 0xbd, 0x16, 0xbe, 0x4f, 0xf2, 0x2c, 0x23, 0xf2, 0x6f, 0x8e, 0x5c, 0x20, 0x63, 0xa9, 0xf9,
-	0x4c, 0xdc, 0x5e, 0x2a, 0x6b, 0x48, 0xc4, 0x2f, 0x9d, 0xa0, 0x25, 0x28, 0x47, 0x01, 0x39, 0x69,
-	0xd2, 0x90, 0xb8, 0x72, 0xa0, 0x73, 0x83, 0xbc, 0x79, 0xf1, 0x68, 0xdb, 0x48, 0x0c, 0x72, 0x1d,
-	0x4a, 0x94, 0x79, 0x0d, 0x2f, 0xb0, 0x44, 0xb3, 0xcb, 0x15, 0x30, 0xb2, 0x38, 0x26, 0x7c, 0xbe,
-	0x3b, 0x9f, 0xbe, 0x22, 0xc6, 0x62, 0x6d, 0x19, 0x83, 0x52, 0x11, 0xbf, 0xd0, 0x97, 0x70, 0xc5,
-	0x95, 0xeb, 0x5b, 0x93, 0x7a, 0x9a, 0xbb, 0xd8, 0x92, 0xc7, 0x5a, 0x1b, 0x7d, 0xd1, 0xca, 0x68,
-	0xbe, 0x9f, 0x59, 0xab, 0x00, 0x3a, 0xd7, 0xe8, 0x21, 0x64, 0x03, 0x7a, 0xac, 0x29, 0x79, 0xa0,
-	0x47, 0xa5, 0xd0, 0x9f, 0xcf, 0xfd, 0xfa, 0x76, 0x7a, 0x48, 0xbd, 0x82, 0xee, 0xcd, 0x03, 0xba,
-	0x9c, 0x56, 0x54, 0x80, 0xdc, 0xe6, 0xd6, 0xe6, 0x4a, 0x75, 0x08, 0x95, 0x20, 0xbf, 0xb8, 0xb0,
-	0xb4, 0xbe, 0xb5, 0xba, 0x5a, 0xcd, 0xa0, 0x32, 0x14, 0xd7, 0x36, 0x36, 0x56, 0x96, 0xd7, 0x16,
-	0x76, 0x57, 0xaa, 0xc3, 0x8b, 0xb7, 0xce, 0xfe, 0xad, 0x0d, 0x9d, 0x5d, 0xd4, 0x32, 0x7f, 0x5d,
-	0xd4, 0x32, 0x7f, 0x5f, 0xd4, 0x32, 0xff, 0x5c, 0xd4, 0x32, 0xbf, 0xfc, 0x57, 0x1b, 0xfa, 0x2e,
-	0xaf, 0x83, 0xfe, 0x3f, 0x00, 0x00, 0xff, 0xff, 0x32, 0xb5, 0x67, 0x1c, 0x0f, 0x11, 0x00, 0x00,
+	// 1681 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x09, 0x6e, 0x88, 0x02, 0xff, 0x9c, 0x57, 0xcd, 0x72, 0xe3, 0xc6,
+	0x11, 0x16, 0x44, 0x6a, 0x49, 0x36, 0xc5, 0x1f, 0x8d, 0x65, 0x19, 0xab, 0xc4, 0x94, 0x0c, 0x3b,
+	0x8e, 0xec, 0x83, 0xe8, 0x6c, 0xb2, 0xae, 0xca, 0xc6, 0x39, 0xe8, 0x77, 0x23, 0xcb, 0xd2, 0x6e,
+	0x8d, 0xb4, 0x76, 0x2a, 0x4e, 0x15, 0x0a, 0x0b, 0x8c, 0x28, 0x64, 0x41, 0x0c, 0x3d, 0x33, 0x58,
+	0x49, 0x39, 0xe4, 0x19, 0x72, 0x4c, 0x6e, 0xbe, 0xe4, 0x96, 0x4a, 0xe5, 0x01, 0x72, 0xcc, 0x41,
+	0xc7, 0x1c, 0x73, 0x52, 0x25, 0xca, 0x5b, 0xec, 0x29, 0x35, 0x3f, 0x20, 0x01, 0x12, 0xa4, 0x59,
+	0xbe, 0x01, 0xdf, 0x74, 0x7f, 0xd3, 0x98, 0xe9, 0xee, 0xaf, 0x01, 0x8e, 0x4f, 0xfd, 0x57, 0x8c,
+	0x7a, 0xfe, 0x65, 0x77, 0xf0, 0xaa, 0xd7, 0x55, 0x4f, 0x83, 0x97, 0x5d, 0xc2, 0x18, 0x65, 0x7c,
+	0x7b, 0xc0, 0xa8, 0xa0, 0x68, 0x65, 0x68, 0xb3, 0x6d, 0xd6, 0xd7, 0x3f, 0x28, 0x76, 0xeb, 0x13,
+	0xe1, 0x05, 0x9e, 0xf0, 0xb4, 0xe3, 0xfa, 0x66, 0xb1, 0x55, 0xc6, 0xe2, 0xc3, 0xbc, 0x45, 0x22,
+	0xc2, 0xa8, 0x7b, 0x19, 0xf9, 0x5d, 0x11, 0xf6, 0x09, 0x17, 0x5e, 0x7f, 0x60, 0xec, 0x56, 0x7b,
+	0xb4, 0x47, 0xd5, 0x63, 0x57, 0x3e, 0x69, 0xd4, 0xf9, 0xfb, 0x22, 0xbc, 0x75, 0x4a, 0xc5, 0x17,
+	0xc4, 0xe3, 0xe4, 0x57, 0x34, 0x0a, 0x08, 0x3b, 0x90, 0x71, 0xa3, 0x7d, 0xa8, 0x30, 0x32, 0x88,
+	0x42, 0xdf, 0xb3, 0xad, 0x4d, 0x6b, 0xab, 0xfe, 0xe8, 0x83, 0xed, 0x89, 0x4f, 0xd8, 0xc6, 0xda,
+	0x62, 0x9f, 0x70, 0x9f, 0x85, 0x03, 0x41, 0xd9, 0x6e, 0xf9, 0xf6, 0x6e, 0x63, 0x01, 0xa7, 0xae,
+	0xe8, 0x29, 0x2c, 0x47, 0x92, 0xd9, 0xbd, 0x54, 0xd4, 0xf6, 0xe2, 0xfc, 0x54, 0xb8, 0x1e, 0x8d,
+	0x62, 0x42, 0x8f, 0xa1, 0xca, 0xbc, 0xb8, 0x47, 0xdc, 0x30, 0xb0, 0x4b, 0x9b, 0xd6, 0x56, 0x69,
+	0x77, 0x5d, 0xee, 0x74, 0x7f, 0xb7, 0x51, 0xc1, 0x12, 0x3f, 0xda, 0x7f, 0x33, 0x7a, 0xc4, 0x15,
+	0x65, 0x7b, 0x14, 0xa0, 0x6d, 0x58, 0x52, 0x2c, 0x76, 0x59, 0x6d, 0x6c, 0x17, 0x6c, 0xac, 0xbe,
+	0x1c, 0x6b, 0x33, 0xf4, 0x3e, 0x80, 0x9f, 0x70, 0x41, 0xfb, 0x6e, 0x9f, 0xf7, 0xec, 0xa5, 0x4d,
+	0x6b, 0xab, 0x66, 0x3e, 0xa9, 0xa6, 0xf1, 0x13, 0xde, 0x73, 0xd6, 0x60, 0xf5, 0x94, 0x06, 0xe4,
+	0x45, 0xec, 0xbd, 0xf6, 0xc2, 0xc8, 0x7b, 0x19, 0x11, 0x75, 0x64, 0xce, 0x31, 0x20, 0x15, 0xc0,
+	0x29, 0x15, 0x87, 0x34, 0x89, 0x03, 0x7d, 0x90, 0xd9, 0xc8, 0xad, 0xb9, 0x23, 0x77, 0xfe, 0xbc,
+	0x08, 0x6f, 0x2b, 0xf0, 0x98, 0xdc, 0x9c, 0x84, 0xbc, 0xef, 0x09, 0xff, 0x52, 0x13, 0xfe, 0x14,
+	0x56, 0x18, 0xf9, 0x26, 0x21, 0x5c, 0xb8, 0x5c, 0x78, 0x4c, 0xb8, 0xaf, 0xc8, 0x8d, 0x62, 0x5e,
+	0xde, 0xad, 0xbc, 0xb9, 0xdb, 0x28, 0x1d, 0x93, 0x1b, 0xdc, 0x32, 0x16, 0x67, 0xd2, 0xe0, 0x98,
+	0xdc, 0xa0, 0x2e, 0xa4, 0x90, 0x4b, 0xe2, 0x40, 0xb9, 0x2c, 0xe6, 0x5d, 0x1a, 0x66, 0xfd, 0x20,
+	0x0e, 0xa4, 0xc3, 0x09, 0xb4, 0xfb, 0x66, 0x5b, 0x12, 0xb8, 0x2a, 0x2a, 0x75, 0xf0, 0xf5, 0x47,
+	0x4e, 0xd1, 0xed, 0xc9, 0xf5, 0xcc, 0xdd, 0xb5, 0x46, 0xbe, 0x6a, 0x09, 0x1d, 0x43, 0x8b, 0x27,
+	0xbd, 0x1e, 0xe1, 0x62, 0xc8, 0x56, 0x9e, 0x9b, 0xad, 0x39, 0x74, 0x55, 0x2b, 0xce, 0x73, 0x68,
+	0xab, 0x87, 0x43, 0x46, 0x7f, 0x4f, 0x62, 0x7d, 0x2a, 0x9f, 0x41, 0x39, 0x20, 0xdc, 0x37, 0xc9,
+	0x3a, 0x07, 0xab, 0xb9, 0x57, 0xe5, 0xe5, 0xfc, 0xd3, 0x02, 0x07, 0x13, 0x2f, 0xf8, 0x2a, 0x14,
+	0x97, 0x61, 0xfc, 0x22, 0xf6, 0x09, 0x13, 0x5e, 0x18, 0x8b, 0x9b, 0xa3, 0x58, 0x10, 0xf6, 0xda,
+	0x8b, 0xf4, 0x26, 0x9f, 0x43, 0x93, 0x11, 0x2f, 0x70, 0x87, 0xa5, 0x65, 0xb6, 0x7b, 0x37, 0xb3,
+	0x9d, 0xac, 0xbf, 0xed, 0xcb, 0xc8, 0xdf, 0x3e, 0x4f, 0x8d, 0xcc, 0x4e, 0x0d, 0xe9, 0x3a, 0x04,
+	0x11, 0x06, 0x44, 0xae, 0x43, 0x2e, 0xc2, 0xb8, 0x97, 0xe1, 0x5b, 0x9c, 0x9f, 0x6f, 0x25, 0x75,
+	0x1f, 0x2e, 0x38, 0x0f, 0xe1, 0x9d, 0x73, 0xe6, 0xc5, 0xdc, 0xf3, 0x45, 0x48, 0xe3, 0x9d, 0x97,
+	0x94, 0x09, 0xa2, 0xd3, 0xd0, 0xf9, 0x1a, 0x56, 0x33, 0x4b, 0xcf, 0x13, 0x6e, 0xb2, 0x69, 0x0f,
+	0x60, 0x90, 0xf0, 0x4b, 0x42, 0x5c, 0x71, 0x1d, 0x9b, 0xcf, 0xe9, 0x14, 0x9c, 0x5e, 0xc6, 0x39,
+	0xad, 0x08, 0xed, 0x77, 0x7e, 0x1d, 0x3b, 0xef, 0xc0, 0xdb, 0x99, 0x75, 0x4c, 0x04, 0xbb, 0xd1,
+	0xbb, 0xda, 0xb0, 0x96, 0x5b, 0x18, 0x44, 0x9e, 0x59, 0xf9, 0x24, 0xb7, 0x72, 0x26, 0x3c, 0x91,
+	0x70, 0x1d, 0xd1, 0x1a, 0x94, 0x64, 0xf1, 0x59, 0x99, 0xe2, 0x93, 0x80, 0x43, 0xa1, 0xfd, 0x15,
+	0x0b, 0x05, 0x91, 0x57, 0x12, 0x0b, 0x6d, 0xfb, 0x73, 0xa8, 0x84, 0xea, 0x95, 0xdb, 0xd6, 0x66,
+	0x69, 0xab, 0xfe, 0xe8, 0x61, 0x41, 0xe8, 0xda, 0x21, 0x6d, 0x4d, 0xc6, 0x1e, 0x6d, 0x42, 0x95,
+	0x11, 0x4e, 0xa3, 0xd7, 0x24, 0x50, 0xa7, 0x5e, 0x35, 0x06, 0x43, 0xd4, 0xf9, 0x8b, 0x65, 0x76,
+	0x3c, 0xa7, 0xf4, 0x59, 0x64, 0xca, 0x79, 0x07, 0x6a, 0xdf, 0xeb, 0xf6, 0x47, 0x5e, 0xe8, 0x14,
+	0xda, 0x9e, 0x2f, 0x12, 0x2f, 0xfa, 0x7e, 0xf7, 0xde, 0xd2, 0xce, 0xa3, 0x5b, 0x5f, 0x05, 0xf4,
+	0x6c, 0x80, 0xc9, 0x37, 0x49, 0xc8, 0x08, 0x3f, 0xbf, 0xd6, 0x05, 0xe1, 0x9c, 0xc1, 0xea, 0x1e,
+	0x8d, 0x83, 0x50, 0x1e, 0xef, 0xa1, 0x17, 0x46, 0x26, 0x11, 0xd0, 0x2f, 0x60, 0xd9, 0xec, 0xfe,
+	0xda, 0x8b, 0x12, 0x62, 0xbe, 0xa1, 0xa8, 0x33, 0x7e, 0x29, 0xd7, 0x71, 0x5d, 0x5b, 0xab, 0x17,
+	0xe7, 0x6f, 0x16, 0x20, 0xdd, 0x30, 0xc9, 0xef, 0x88, 0x9f, 0x26, 0x17, 0xea, 0x40, 0xa5, 0x4f,
+	0x38, 0xf7, 0x7a, 0x24, 0x77, 0x6d, 0x29, 0x88, 0x3e, 0x83, 0x9a, 0xe9, 0x2e, 0xe6, 0xb0, 0x67,
+	0xb4, 0xe2, 0xf4, 0xbc, 0x86, 0x0e, 0xe8, 0x09, 0x54, 0xd3, 0x54, 0x37, 0x2d, 0xe8, 0xbb, 0x9c,
+	0x87, 0xf6, 0xce, 0x4f, 0xa0, 0x76, 0x46, 0xe2, 0xf9, 0xc2, 0xfc, 0xbc, 0x5c, 0x5d, 0x6c, 0x97,
+	0x9c, 0x4f, 0x61, 0x75, 0xa7, 0xff, 0x32, 0xec, 0x25, 0x34, 0xe1, 0x98, 0xf0, 0x24, 0x12, 0x73,
+	0x79, 0xcb, 0x22, 0xc0, 0xde, 0x85, 0x78, 0xca, 0x68, 0x32, 0xd8, 0x27, 0x11, 0x19, 0x96, 0x9e,
+	0x0b, 0x6b, 0x46, 0xdd, 0xf6, 0x28, 0x63, 0xc9, 0x40, 0xde, 0x88, 0xa6, 0x7c, 0x0f, 0x6a, 0x6a,
+	0x4a, 0x70, 0xc7, 0x13, 0xbe, 0xaa, 0xe0, 0x13, 0xde, 0x43, 0x0e, 0xd4, 0x06, 0x8c, 0xfa, 0x84,
+	0xf3, 0xb1, 0x3c, 0x1d, 0xc1, 0xce, 0x19, 0x20, 0xb3, 0x41, 0x36, 0x53, 0x7f, 0x09, 0x60, 0x64,
+	0x38, 0x95, 0x9e, 0xa5, 0xdd, 0x8e, 0x91, 0x9e, 0x9a, 0xb1, 0x57, 0xe2, 0x33, 0x7a, 0x91, 0xa7,
+	0xae, 0x1f, 0x03, 0xa9, 0x66, 0x67, 0x82, 0xb2, 0x49, 0x35, 0xe3, 0x12, 0x2d, 0x50, 0x33, 0x65,
+	0xad, 0xd5, 0xcc, 0x3c, 0xe2, 0x8a, 0xb2, 0x3d, 0x0a, 0x9c, 0x7f, 0x34, 0xa1, 0xae, 0x08, 0xf6,
+	0x89, 0xf0, 0xc2, 0x08, 0x3d, 0x87, 0x76, 0x4c, 0x85, 0x9b, 0x9b, 0x0d, 0x74, 0x22, 0x7e, 0x58,
+	0x70, 0xb5, 0x05, 0xf3, 0x09, 0x6e, 0xc6, 0x39, 0x10, 0x9d, 0x40, 0x4b, 0xcb, 0xac, 0xe4, 0xbd,
+	0x90, 0x01, 0x9b, 0x44, 0xfb, 0xd1, 0x34, 0x29, 0xc8, 0x7d, 0x18, 0x6e, 0xb0, 0x2c, 0x86, 0xbe,
+	0x04, 0xa4, 0xe9, 0x5e, 0x91, 0x1b, 0x37, 0x15, 0x33, 0x93, 0x7d, 0x5b, 0xd3, 0x18, 0xc7, 0xa5,
+	0x1a, 0xb7, 0xd9, 0x18, 0x8c, 0xfe, 0x00, 0x9b, 0x4a, 0x41, 0xae, 0x94, 0xd0, 0xb8, 0xc9, 0x48,
+	0x69, 0xdc, 0xd0, 0x48, 0x8d, 0x11, 0xc6, 0xc7, 0x85, 0x43, 0xd2, 0x77, 0x49, 0x14, 0x7e, 0x97,
+	0xcd, 0xb2, 0x41, 0x5f, 0xc3, 0x5b, 0x62, 0xd4, 0x76, 0x5d, 0x4f, 0x4b, 0x84, 0x9a, 0x74, 0xea,
+	0x8f, 0x3e, 0x9e, 0xdd, 0xf7, 0xb3, 0x7a, 0x82, 0x91, 0x98, 0x58, 0x40, 0x18, 0xda, 0x59, 0x72,
+	0xa9, 0x0f, 0xf6, 0x03, 0xc5, 0xfc, 0xe3, 0xd9, 0xcc, 0x43, 0x39, 0xc2, 0x2d, 0x91, 0x47, 0xd1,
+	0x0b, 0x58, 0xc9, 0x72, 0x32, 0xa9, 0x2d, 0x76, 0x65, 0xea, 0x3d, 0x14, 0xca, 0x10, 0xce, 0x86,
+	0xa5, 0x60, 0xf4, 0x6b, 0xc8, 0x7e, 0x80, 0x1c, 0xa4, 0x44, 0xc2, 0xed, 0xaa, 0xe2, 0xfd, 0x68,
+	0x36, 0x6f, 0x46, 0xab, 0x70, 0x36, 0x36, 0x8d, 0xa3, 0x43, 0x58, 0xbe, 0x92, 0xa2, 0xe1, 0x6a,
+	0xa1, 0xb1, 0x6b, 0x8a, 0xf3, 0xfd, 0x02, 0xce, 0x71, 0x35, 0xc3, 0xf5, 0xab, 0x11, 0x82, 0x9e,
+	0x42, 0x43, 0xf3, 0x08, 0x4a, 0x5d, 0x1a, 0x05, 0x36, 0xcc, 0x26, 0xca, 0x94, 0xbe, 0x21, 0xd2,
+	0x88, 0xac, 0x0c, 0x3a, 0x70, 0x99, 0xd1, 0x07, 0x25, 0xf3, 0xf5, 0xa9, 0x95, 0x31, 0x29, 0x24,
+	0xb8, 0x41, 0xb3, 0x98, 0xbc, 0x64, 0x3f, 0xd5, 0x15, 0xf7, 0x42, 0x09, 0x8b, 0xbd, 0x3c, 0xf5,
+	0x92, 0x8b, 0x24, 0x08, 0xb7, 0xfc, 0x3c, 0x8a, 0xbe, 0x80, 0xa6, 0x6e, 0x05, 0xcc, 0xc8, 0x8a,
+	0xdd, 0x98, 0x1a, 0xe1, 0xa4, 0xfc, 0xe0, 0x46, 0x94, 0xc5, 0x64, 0x84, 0x31, 0x0d, 0x88, 0x9b,
+	0x8c, 0x06, 0x74, 0xbb, 0x39, 0x35, 0xc2, 0xa2, 0x51, 0x1e, 0xb7, 0xe2, 0x3c, 0x8a, 0x3e, 0x81,
+	0x32, 0x27, 0x71, 0x60, 0xb7, 0x14, 0xcf, 0x0f, 0x0b, 0x78, 0x86, 0x32, 0x83, 0x95, 0xa5, 0xee,
+	0x20, 0x17, 0xc2, 0xed, 0x49, 0x3d, 0x70, 0x03, 0x2d, 0x08, 0x76, 0x7b, 0x46, 0x07, 0x29, 0xd0,
+	0x0e, 0xd9, 0x41, 0xf2, 0xb0, 0xcc, 0xdc, 0xb4, 0xad, 0xfb, 0x43, 0x39, 0xb1, 0x57, 0xa6, 0x66,
+	0x6e, 0xb1, 0xf4, 0xe0, 0x15, 0x36, 0x8e, 0xab, 0x16, 0x6a, 0x98, 0xd3, 0x9c, 0x43, 0xd3, 0x5b,
+	0xe8, 0x84, 0xe0, 0xc8, 0x01, 0x37, 0x83, 0x8d, 0x97, 0x18, 0x53, 0xc3, 0x9f, 0xbd, 0x36, 0x4f,
+	0x89, 0x65, 0x06, 0xc5, 0x5c, 0x89, 0x69, 0x5c, 0x96, 0x98, 0x6e, 0xce, 0x17, 0xea, 0x07, 0xc0,
+	0x7e, 0x38, 0xb5, 0x32, 0xc6, 0x7f, 0x13, 0x70, 0x9d, 0x8d, 0x10, 0x99, 0x28, 0x5e, 0xaa, 0xf4,
+	0x2e, 0x53, 0x52, 0x6f, 0xaf, 0x4f, 0x4d, 0x94, 0xa2, 0xa1, 0x00, 0xb7, 0xbc, 0x3c, 0x2a, 0x0f,
+	0x51, 0x0b, 0xe4, 0x48, 0x87, 0x7e, 0x30, 0xf5, 0x10, 0x27, 0x05, 0x16, 0x37, 0x78, 0x16, 0x7b,
+	0x52, 0xbe, 0xfd, 0x76, 0xc3, 0x72, 0x3e, 0x52, 0xea, 0xf9, 0x9c, 0x72, 0x55, 0x34, 0x68, 0x1d,
+	0x96, 0xc2, 0x38, 0x20, 0xd7, 0x46, 0xd4, 0xf5, 0x3c, 0xa0, 0x21, 0xe7, 0xaf, 0x25, 0x58, 0x9a,
+	0x6f, 0x28, 0xfb, 0x6d, 0x5e, 0x0a, 0x18, 0x51, 0x7f, 0x93, 0x4a, 0xe3, 0x9a, 0x85, 0xd1, 0xe6,
+	0x2e, 0x48, 0x19, 0x1b, 0x4a, 0x24, 0x26, 0x56, 0xd0, 0x1e, 0x34, 0x92, 0x98, 0x5c, 0x0f, 0x28,
+	0x27, 0x81, 0xea, 0x39, 0xe5, 0x79, 0x7e, 0x2d, 0xf0, 0xf2, 0xd0, 0x49, 0xf6, 0x9a, 0x2e, 0xd4,
+	0x29, 0x0b, 0x7b, 0x61, 0xec, 0xca, 0x7a, 0x54, 0x2a, 0xb5, 0xb4, 0xdb, 0x94, 0x7b, 0xbe, 0xb9,
+	0xdb, 0x78, 0x20, 0x2b, 0xf7, 0x68, 0x1f, 0x83, 0x36, 0x91, 0x6f, 0xe8, 0x53, 0x78, 0x10, 0xa8,
+	0x09, 0xc3, 0xe8, 0x4e, 0xd1, 0x76, 0x99, 0x39, 0x04, 0x1b, 0x6b, 0xf4, 0xb3, 0xf4, 0x44, 0x2b,
+	0xb3, 0xdc, 0xd2, 0x0b, 0x30, 0x67, 0x8d, 0x1e, 0x43, 0x29, 0xa6, 0x57, 0x46, 0x35, 0xe6, 0x9a,
+	0xdd, 0xa5, 0xfd, 0x93, 0xf2, 0x9f, 0xbe, 0xdd, 0x58, 0xd0, 0xc3, 0xe6, 0xc7, 0x4f, 0x00, 0x4d,
+	0x1e, 0x2b, 0xaa, 0x42, 0xf9, 0xf4, 0xd9, 0xe9, 0x41, 0x7b, 0x01, 0xd5, 0xa1, 0xb2, 0xbb, 0xb3,
+	0x77, 0xfc, 0xec, 0xf0, 0xb0, 0x6d, 0xa1, 0x06, 0xd4, 0x8e, 0x4e, 0x4e, 0x0e, 0xf6, 0x8f, 0x76,
+	0xce, 0x0f, 0xda, 0x8b, 0xbb, 0xef, 0xdd, 0xfe, 0xb7, 0xb3, 0x70, 0x7b, 0xdf, 0xb1, 0xfe, 0x75,
+	0xdf, 0xb1, 0xfe, 0x7d, 0xdf, 0xb1, 0xfe, 0x73, 0xdf, 0xb1, 0xfe, 0xf8, 0xbf, 0xce, 0xc2, 0x6f,
+	0x2a, 0x26, 0xe8, 0xff, 0x07, 0x00, 0x00, 0xff, 0xff, 0xd8, 0xb6, 0x32, 0xd3, 0x9b, 0x12, 0x00,
+	0x00,
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
 // initialStats are the stats for a Replica which has been created through
@@ -41,10 +42,11 @@ func TestRangeStatsEmpty(t *testing.T) {
 	tc := testContext{
 		bootstrapMode: bootstrapRangeOnly,
 	}
-	tc.Start(t)
-	defer tc.Stop()
+	stopper := stop.NewStopper()
+	defer stopper.Stop()
+	tc.Start(t, stopper)
 
-	ms := tc.rng.GetMVCCStats()
+	ms := tc.repl.GetMVCCStats()
 	if exp := initialStats(); !reflect.DeepEqual(ms, exp) {
 		t.Errorf("expected stats %+v; got %+v", exp, ms)
 	}
@@ -53,8 +55,9 @@ func TestRangeStatsEmpty(t *testing.T) {
 func TestRangeStatsInit(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	tc := testContext{}
-	tc.Start(t)
-	defer tc.Stop()
+	stopper := stop.NewStopper()
+	defer stopper.Stop()
+	tc.Start(t, stopper)
 	ms := enginepb.MVCCStats{
 		LiveBytes:       1,
 		KeyBytes:        2,
@@ -71,7 +74,7 @@ func TestRangeStatsInit(t *testing.T) {
 	if err := engine.MVCCSetRangeStats(context.Background(), tc.engine, 1, &ms); err != nil {
 		t.Fatal(err)
 	}
-	loadMS, err := loadMVCCStats(context.Background(), tc.engine, tc.rng.RangeID)
+	loadMS, err := engine.MVCCGetRangeStats(context.Background(), tc.engine, tc.repl.RangeID)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -51,16 +51,20 @@ CREATE TABLE c (
   UNIQUE (bar)
 )
 
-query TTBITTB colnames
+query TTBITTBB colnames
 SHOW INDEXES FROM c
 ----
-Table Name           Unique Seq Column Direction  Storing
-c     primary        true   1   id     ASC        false
-c     c_foo_idx      false  1   foo    ASC        false
-c     c_foo_idx1     false  1   foo    ASC        false
-c     c_foo_bar_idx  false  1   foo    ASC        false
-c     c_foo_bar_idx  false  2   bar    DESC       false
-c     c_bar_key      true   1   bar    ASC        false
+Table  Name           Unique  Seq  Column  Direction  Storing  Implicit
+c      primary        true    1    id      ASC        false    false
+c      c_foo_idx      false   1    foo     ASC        false    false
+c      c_foo_idx      false   2    id      ASC        false    true
+c      c_foo_idx1     false   1    foo     ASC        false    false
+c      c_foo_idx1     false   2    id      ASC        false    true
+c      c_foo_bar_idx  false   1    foo     ASC        false    false
+c      c_foo_bar_idx  false   2    bar     DESC       false    false
+c      c_foo_bar_idx  false   3    id      ASC        false    true
+c      c_bar_key      true    1    bar     ASC        false    false
+c      c_bar_key      true    2    id      ASC        false    true
 
 # primary keys can never be null
 
@@ -157,14 +161,15 @@ nickname    STRING      true    NULL
 username    STRING(10)  true    NULL
 email       STRING(100) true    NULL
 
-query TTBITTB colnames
+query TTBITTBB colnames
 SHOW INDEXES FROM test.users
 ----
-Table Name    Unique Seq Column Direction Storing
-users primary true   1   id     ASC       false
-users foo     false  1   name   ASC       false
-users bar     true   1   id     ASC       false
-users bar     true   2   name   ASC       false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+users  primary  true    1    id      ASC        false    false
+users  foo      false   1    name    ASC        false    false
+users  foo      false   2    id      ASC        false    true
+users  bar      true    1    id      ASC        false    false
+users  bar      true    2    name    ASC        false    false
 
 statement error invalid NUMERIC precision 0
 CREATE TABLE test.precision (x DECIMAL(0, 2))
@@ -360,7 +365,7 @@ w      DECIMAL                   true   NULL
 x      DECIMAL(1)                true   NULL
 y      DECIMAL(2,1)              true   NULL
 z      DECIMAL                   true   NULL
-aa      DECIMAL(1)                true   NULL
+aa     DECIMAL(1)                true   NULL
 ab     DECIMAL(2,1)              true   NULL
 ac     DATE                      true   NULL
 ad     TIMESTAMP                 true   NULL
@@ -372,7 +377,6 @@ ai     BYTES                     true   NULL
 aj     BYTES                     true   NULL
 ak     BYTES                     true   NULL
 al     INTERVAL                  true   NULL
-rowid  INT                       false  unique_rowid()
 
 statement ok
 CREATE DATABASE IF NOT EXISTS smtng;
@@ -407,3 +411,8 @@ ALTER TABLE smtng.something ADD COLUMN IF NOT EXISTS MODEL_ID INT;
 
 statement ok
 ALTER TABLE smtng.something ADD COLUMN IF NOT EXISTS NAME STRING;
+
+query error pq: unimplemented: ARRAY column types are unsupported \(see issue https://github.com/cockroachdb/cockroach/issues/2115\)
+CREATE TABLE IF NOT EXISTS test.int_array_test (
+  arr INT[]
+)

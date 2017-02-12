@@ -122,6 +122,23 @@ func (dir IndexDescriptor_Direction) ToEncodingDirection() (encoding.Direction, 
 // descriptor could not be found with the given id.
 var ErrDescriptorNotFound = errors.New("descriptor not found")
 
+// GetDatabaseDescFromID retrieves the database descriptor for the database
+// ID passed in using an existing txn. Returns an error if the descriptor
+// doesn't exist or if it exists and is not a database.
+func GetDatabaseDescFromID(txn *client.Txn, id ID) (*DatabaseDescriptor, error) {
+	desc := &Descriptor{}
+	descKey := MakeDescMetadataKey(id)
+
+	if err := txn.GetProto(descKey, desc); err != nil {
+		return nil, err
+	}
+	db := desc.GetDatabase()
+	if db == nil {
+		return nil, ErrDescriptorNotFound
+	}
+	return db, nil
+}
+
 // GetTableDescFromID retrieves the table descriptor for the table
 // ID passed in using an existing txn. Returns an error if the
 // descriptor doesn't exist or if it exists and is not a table.
@@ -185,15 +202,14 @@ func (desc *IndexDescriptor) FillColumns(elems parser.IndexElemList) error {
 }
 
 // ContainsColumnID returns true if the index descriptor contains the specified
-// column ID either in its explicit column IDs or the implicit "extra" column
-// IDs.
+// column ID either in its explicit column IDs or the extra column IDs.
 func (desc *IndexDescriptor) ContainsColumnID(colID ColumnID) bool {
 	for _, id := range desc.ColumnIDs {
 		if id == colID {
 			return true
 		}
 	}
-	for _, id := range desc.ImplicitColumnIDs {
+	for _, id := range desc.ExtraColumnIDs {
 		if id == colID {
 			return true
 		}
@@ -201,9 +217,9 @@ func (desc *IndexDescriptor) ContainsColumnID(colID ColumnID) bool {
 	return false
 }
 
-// FullColumnIDs returns the index column IDs including any implicit column IDs
-// for non-unique indexes. It also returns the direction with which each column
-// was encoded.
+// FullColumnIDs returns the index column IDs including any extra (implicit or
+// stored) column IDs for non-unique indexes. It also returns the direction with
+// which each column was encoded.
 func (desc *IndexDescriptor) FullColumnIDs() ([]ColumnID, []encoding.Direction) {
 	dirs := make([]encoding.Direction, 0, len(desc.ColumnIDs))
 	for _, dir := range desc.ColumnDirections {
@@ -219,9 +235,9 @@ func (desc *IndexDescriptor) FullColumnIDs() ([]ColumnID, []encoding.Direction) 
 	// Non-unique indexes have some of the primary-key columns appended to
 	// their key.
 	columnIDs := append([]ColumnID(nil), desc.ColumnIDs...)
-	columnIDs = append(columnIDs, desc.ImplicitColumnIDs...)
-	for range desc.ImplicitColumnIDs {
-		// Implicit columns are encoded ascendingly.
+	columnIDs = append(columnIDs, desc.ExtraColumnIDs...)
+	for range desc.ExtraColumnIDs {
+		// Extra columns are encoded ascendingly.
 		dirs = append(dirs, encoding.Ascending)
 	}
 	return columnIDs, dirs
@@ -297,7 +313,9 @@ func (desc *TableDescriptor) allNonDropColumns() []ColumnDescriptor {
 // in the mutations.
 func (desc *TableDescriptor) AllNonDropIndexes() []IndexDescriptor {
 	indexes := make([]IndexDescriptor, 0, 1+len(desc.Indexes)+len(desc.Mutations))
-	indexes = append(indexes, desc.PrimaryIndex)
+	if desc.IsPhysicalTable() {
+		indexes = append(indexes, desc.PrimaryIndex)
+	}
 	indexes = append(indexes, desc.Indexes...)
 	for _, m := range desc.Mutations {
 		if idx := m.GetIndex(); idx != nil {
@@ -406,7 +424,7 @@ func (desc *TableDescriptor) AllocateIDs() error {
 			columnID = desc.NextColumnID
 			desc.NextColumnID++
 		}
-		columnNames[ReNormalizeName(c.Name)] = columnID
+		columnNames[parser.ReNormalizeName(c.Name)] = columnID
 		c.ID = columnID
 	}
 	for i := range desc.Columns {
@@ -505,23 +523,23 @@ func (desc *TableDescriptor) allocateIndexIDs(columnNames map[string]ColumnID) e
 				index.ColumnIDs = append(index.ColumnIDs, 0)
 			}
 			if index.ColumnIDs[j] == 0 {
-				index.ColumnIDs[j] = columnNames[ReNormalizeName(colName)]
+				index.ColumnIDs[j] = columnNames[parser.ReNormalizeName(colName)]
 			}
 		}
 		if index != &desc.PrimaryIndex {
-			// Need to clear ImplicitColumnIDs because it is used by
+			// Need to clear ExtraColumnIDs because it is used by
 			// ContainsColumnID.
-			index.ImplicitColumnIDs = nil
-			var implicitColumnIDs []ColumnID
+			index.ExtraColumnIDs = nil
+			var extraColumnIDs []ColumnID
 			for _, primaryColID := range desc.PrimaryIndex.ColumnIDs {
 				if !index.ContainsColumnID(primaryColID) {
-					implicitColumnIDs = append(implicitColumnIDs, primaryColID)
+					extraColumnIDs = append(extraColumnIDs, primaryColID)
 				}
 			}
-			index.ImplicitColumnIDs = implicitColumnIDs
+			index.ExtraColumnIDs = extraColumnIDs
 
 			for _, colName := range index.StoreColumnNames {
-				status, i, err := desc.FindColumnByNormalizedName(ReNormalizeName(colName))
+				status, i, err := desc.FindColumnByNormalizedName(parser.ReNormalizeName(colName))
 				if err != nil {
 					return err
 				}
@@ -537,7 +555,7 @@ func (desc *TableDescriptor) allocateIndexIDs(columnNames map[string]ColumnID) e
 				if index.ContainsColumnID(col.ID) {
 					return fmt.Errorf("index \"%s\" already contains column \"%s\"", index.Name, col.Name)
 				}
-				index.ImplicitColumnIDs = append(index.ImplicitColumnIDs, col.ID)
+				index.ExtraColumnIDs = append(index.ExtraColumnIDs, col.ID)
 			}
 		}
 	}
@@ -566,7 +584,7 @@ func (desc *TableDescriptor) allocateColumnFamilyIDs(columnNames map[string]Colu
 				family.ColumnIDs = append(family.ColumnIDs, 0)
 			}
 			if family.ColumnIDs[j] == 0 {
-				family.ColumnIDs[j] = columnNames[ReNormalizeName(colName)]
+				family.ColumnIDs[j] = columnNames[parser.ReNormalizeName(colName)]
 			}
 			columnsInFamilies[family.ColumnIDs[j]] = struct{}{}
 		}
@@ -658,6 +676,9 @@ func (desc *TableDescriptor) Validate(txn *client.Txn) error {
 	err := desc.ValidateTable()
 	if err != nil {
 		return err
+	}
+	if desc.Dropped() {
+		return nil
 	}
 	return desc.validateCrossReferences(txn)
 }
@@ -846,7 +867,7 @@ func (desc *TableDescriptor) ValidateTable() error {
 			return fmt.Errorf("invalid column ID %d", column.ID)
 		}
 
-		normName := ReNormalizeName(column.Name)
+		normName := parser.ReNormalizeName(column.Name)
 		if _, ok := columnNames[normName]; ok {
 			return fmt.Errorf("duplicate column name: \"%s\"", column.Name)
 		}
@@ -919,7 +940,7 @@ func (desc *TableDescriptor) validateColumnFamilies(
 			return nil, err
 		}
 
-		normName := ReNormalizeName(family.Name)
+		normName := parser.ReNormalizeName(family.Name)
 		if _, ok := familyNames[normName]; ok {
 			return nil, fmt.Errorf("duplicate family name: \"%s\"", family.Name)
 		}
@@ -946,7 +967,7 @@ func (desc *TableDescriptor) validateColumnFamilies(
 			if !ok {
 				return nil, fmt.Errorf("family \"%s\" contains unknown column \"%d\"", family.Name, colID)
 			}
-			if ReNormalizeName(name) != ReNormalizeName(family.ColumnNames[i]) {
+			if parser.ReNormalizeName(name) != parser.ReNormalizeName(family.ColumnNames[i]) {
 				return nil, fmt.Errorf("family \"%s\" column %d should have name %q, but found name %q",
 					family.Name, colID, name, family.ColumnNames[i])
 			}
@@ -986,7 +1007,7 @@ func (desc *TableDescriptor) validateTableIndexes(
 			return fmt.Errorf("invalid index ID %d", index.ID)
 		}
 
-		normName := ReNormalizeName(index.Name)
+		normName := parser.ReNormalizeName(index.Name)
 		if _, ok := indexNames[normName]; ok {
 			return fmt.Errorf("duplicate index name: \"%s\"", index.Name)
 		}
@@ -1017,7 +1038,7 @@ func (desc *TableDescriptor) validateTableIndexes(
 		}
 
 		for i, name := range index.ColumnNames {
-			colID, ok := columnNames[ReNormalizeName(name)]
+			colID, ok := columnNames[parser.ReNormalizeName(name)]
 			if !ok {
 				return fmt.Errorf("index \"%s\" contains unknown column \"%s\"", index.Name, name)
 			}
@@ -1056,7 +1077,7 @@ func upperBoundColumnValueEncodedSize(col ColumnDescriptor) (int, bool) {
 		typ = encoding.Float
 	case ColumnType_INTERVAL:
 		typ = encoding.Duration
-	case ColumnType_STRING, ColumnType_BYTES:
+	case ColumnType_STRING, ColumnType_BYTES, ColumnType_COLLATEDSTRING:
 		// STRINGs are counted as runes, so this isn't totally correct, but this
 		// seems better than always assuming the maximum rune width.
 		typ, size = encoding.Bytes, int(col.Type.Width)
@@ -1172,9 +1193,9 @@ func (desc *TableDescriptor) AddColumnToFamilyMaybeCreate(
 ) error {
 	idx := int(-1)
 	if len(family) > 0 {
-		normName := ReNormalizeName(family)
+		normName := parser.ReNormalizeName(family)
 		for i := range desc.Families {
-			if ReNormalizeName(desc.Families[i].Name) == normName {
+			if parser.ReNormalizeName(desc.Families[i].Name) == normName {
 				idx = i
 				break
 			}
@@ -1266,13 +1287,13 @@ func (desc *TableDescriptor) FindColumnByNormalizedName(
 	normName string,
 ) (DescriptorStatus, int, error) {
 	for i, c := range desc.Columns {
-		if ReNormalizeName(c.Name) == normName {
+		if parser.ReNormalizeName(c.Name) == normName {
 			return DescriptorActive, i, nil
 		}
 	}
 	for i, m := range desc.Mutations {
 		if c := m.GetColumn(); c != nil {
-			if ReNormalizeName(c.Name) == normName {
+			if parser.ReNormalizeName(c.Name) == normName {
 				return DescriptorIncomplete, i, nil
 			}
 		}
@@ -1282,7 +1303,7 @@ func (desc *TableDescriptor) FindColumnByNormalizedName(
 
 // FindColumnByName calls FindColumnByNormalizedName with a normalized argument.
 func (desc *TableDescriptor) FindColumnByName(name parser.Name) (DescriptorStatus, int, error) {
-	return desc.FindColumnByNormalizedName(NormalizeName(name))
+	return desc.FindColumnByNormalizedName(name.Normalize())
 }
 
 // FindActiveColumnByNormalizedName finds an active column with the specified normalized name.
@@ -1290,7 +1311,7 @@ func (desc *TableDescriptor) FindActiveColumnByNormalizedName(
 	normName string,
 ) (ColumnDescriptor, error) {
 	for _, c := range desc.Columns {
-		if ReNormalizeName(c.Name) == normName {
+		if parser.ReNormalizeName(c.Name) == normName {
 			return c, nil
 		}
 	}
@@ -1299,7 +1320,7 @@ func (desc *TableDescriptor) FindActiveColumnByNormalizedName(
 
 // FindActiveColumnByName calls FindActiveColumnByNormalizedName on a normalized argument.
 func (desc *TableDescriptor) FindActiveColumnByName(name parser.Name) (ColumnDescriptor, error) {
-	return desc.FindActiveColumnByNormalizedName(NormalizeName(name))
+	return desc.FindActiveColumnByNormalizedName(name.Normalize())
 }
 
 // FindColumnByID finds the column with specified ID.
@@ -1346,13 +1367,13 @@ func (desc *TableDescriptor) FindIndexByNormalizedName(
 	normName string,
 ) (DescriptorStatus, int, error) {
 	for i, idx := range desc.Indexes {
-		if ReNormalizeName(idx.Name) == normName {
+		if parser.ReNormalizeName(idx.Name) == normName {
 			return DescriptorActive, i, nil
 		}
 	}
 	for i, m := range desc.Mutations {
 		if idx := m.GetIndex(); idx != nil {
-			if ReNormalizeName(idx.Name) == normName {
+			if parser.ReNormalizeName(idx.Name) == normName {
 				return DescriptorIncomplete, i, nil
 			}
 		}
@@ -1362,7 +1383,7 @@ func (desc *TableDescriptor) FindIndexByNormalizedName(
 
 // FindIndexByName calls FindIndexByNormalizedName on a normalized argument.
 func (desc *TableDescriptor) FindIndexByName(name parser.Name) (DescriptorStatus, int, error) {
-	return desc.FindIndexByNormalizedName(NormalizeName(name))
+	return desc.FindIndexByNormalizedName(name.Normalize())
 }
 
 // FindIndexByID finds an index (active or inactive) with the specified ID.
@@ -1463,8 +1484,8 @@ func (desc *TableDescriptor) FinalizeMutation() (MutationID, error) {
 	return mutationID, nil
 }
 
-// Deleted returns true if the table is being deleted.
-func (desc *TableDescriptor) Deleted() bool {
+// Dropped returns true if the table is being dropped.
+func (desc *TableDescriptor) Dropped() bool {
 	return desc.State == TableDescriptor_DROP
 }
 
@@ -1480,12 +1501,12 @@ func (desc *TableDescriptor) Renamed() bool {
 
 // SetUpVersion sets the up_version marker on the table descriptor (see the proto
 func (desc *TableDescriptor) SetUpVersion() error {
-	if desc.Deleted() {
+	if desc.Dropped() {
 		// We don't allow the version to be incremented any more once a table
 		// has been deleted. This will block new mutations from being queued on the
 		// table; it'd be misleading to allow them to be queued, since the
 		// respective schema change will never run.
-		return fmt.Errorf("table %q has been deleted", desc.Name)
+		return fmt.Errorf("table %q is being dropped", desc.Name)
 	}
 	desc.UpVersion = true
 	return nil
@@ -1539,6 +1560,16 @@ func (c *ColumnType) SQLString() string {
 		}
 	case ColumnType_TIMESTAMPTZ:
 		return "TIMESTAMP WITH TIME ZONE"
+	case ColumnType_COLLATEDSTRING:
+		if c.Locale == nil {
+			panic("locale is required for COLLATEDSTRING")
+		}
+		if c.Width > 0 {
+			return fmt.Sprintf("%s(%d) COLLATE %s", ColumnType_STRING.String(), c.Width, *c.Locale)
+		}
+		return fmt.Sprintf("%s COLLATE %s", ColumnType_STRING.String(), *c.Locale)
+	case ColumnType_INT_ARRAY:
+		return "INT[]"
 	}
 	return c.Kind.String()
 }
@@ -1548,7 +1579,7 @@ func (c *ColumnType) SQLString() string {
 // type is not a character or bit string, or if the string's length is not bounded.
 func (c *ColumnType) MaxCharacterLength() (int32, bool) {
 	switch c.Kind {
-	case ColumnType_INT, ColumnType_STRING:
+	case ColumnType_INT, ColumnType_STRING, ColumnType_COLLATEDSTRING:
 		if c.Width > 0 {
 			return c.Width, true
 		}
@@ -1561,7 +1592,7 @@ func (c *ColumnType) MaxCharacterLength() (int32, bool) {
 // is not a character string, or if the string's length is not bounded.
 func (c *ColumnType) MaxOctetLength() (int32, bool) {
 	switch c.Kind {
-	case ColumnType_STRING:
+	case ColumnType_STRING, ColumnType_COLLATEDSTRING:
 		if c.Width > 0 {
 			return c.Width * utf8.UTFMax, true
 		}
@@ -1604,10 +1635,45 @@ func (c *ColumnType) NumericScale() (int32, bool) {
 	return 0, false
 }
 
-// ToDatumType converts the ColumnType_Kind to the correct type, or nil if there
-// is no correspondence.
-func (k ColumnType_Kind) ToDatumType() parser.Type {
-	switch k {
+// DatumTypeToColumnType converts a parser Type to a ColumnType.
+func DatumTypeToColumnType(ptyp parser.Type) ColumnType {
+	var ctyp ColumnType
+	switch ptyp {
+	case parser.TypeBool:
+		ctyp.Kind = ColumnType_BOOL
+	case parser.TypeInt:
+		ctyp.Kind = ColumnType_INT
+	case parser.TypeFloat:
+		ctyp.Kind = ColumnType_FLOAT
+	case parser.TypeDecimal:
+		ctyp.Kind = ColumnType_DECIMAL
+	case parser.TypeBytes:
+		ctyp.Kind = ColumnType_BYTES
+	case parser.TypeString:
+		ctyp.Kind = ColumnType_STRING
+	case parser.TypeDate:
+		ctyp.Kind = ColumnType_DATE
+	case parser.TypeTimestamp:
+		ctyp.Kind = ColumnType_TIMESTAMP
+	case parser.TypeTimestampTZ:
+		ctyp.Kind = ColumnType_TIMESTAMPTZ
+	case parser.TypeInterval:
+		ctyp.Kind = ColumnType_INTERVAL
+	default:
+		if t, ok := ptyp.(parser.TCollatedString); ok {
+			ctyp.Kind = ColumnType_COLLATEDSTRING
+			ctyp.Locale = &t.Locale
+		} else {
+			panic(fmt.Sprintf("unsupported result type: %s", ptyp))
+		}
+	}
+	return ctyp
+}
+
+// ToDatumType converts the ColumnType to the correct type, or nil if there is
+// no correspondence.
+func (c *ColumnType) ToDatumType() parser.Type {
+	switch c.Kind {
 	case ColumnType_BOOL:
 		return parser.TypeBool
 	case ColumnType_INT:
@@ -1628,14 +1694,15 @@ func (k ColumnType_Kind) ToDatumType() parser.Type {
 		return parser.TypeTimestampTZ
 	case ColumnType_INTERVAL:
 		return parser.TypeInterval
+	case ColumnType_COLLATEDSTRING:
+		if c.Locale == nil {
+			panic("locale is required for COLLATEDSTRING")
+		}
+		return parser.TCollatedString{Locale: *c.Locale}
+	case ColumnType_INT_ARRAY:
+		return parser.TypeIntArray
 	}
 	return nil
-}
-
-// ToDatumType converts the ColumnType to the correct type, or nil if there is
-// no correspondence.
-func (c *ColumnType) ToDatumType() parser.Type {
-	return c.Kind.ToDatumType()
 }
 
 // SetID implements the DescriptorProto interface.
@@ -1694,4 +1761,17 @@ func (desc *Descriptor) GetName() string {
 // IsSet returns whether or not the foreign key actually references a table.
 func (f ForeignKeyReference) IsSet() bool {
 	return f.Table != 0
+}
+
+// InvalidateFKConstraints sets all FK constraints to un-validated.
+func (desc *TableDescriptor) InvalidateFKConstraints() {
+	// We don't use GetConstraintInfo because we want to edit the passed desc.
+	if desc.PrimaryIndex.ForeignKey.IsSet() {
+		desc.PrimaryIndex.ForeignKey.Validity = ConstraintValidity_Unvalidated
+	}
+	for i := range desc.Indexes {
+		if desc.Indexes[i].ForeignKey.IsSet() {
+			desc.Indexes[i].ForeignKey.Validity = ConstraintValidity_Unvalidated
+		}
+	}
 }

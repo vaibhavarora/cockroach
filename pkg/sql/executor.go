@@ -19,9 +19,9 @@ package sql
 
 import (
 	"fmt"
-	"math"
-	"math/big"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,19 +32,20 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
+	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/sql/distsqlrun"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/decimal"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/pkg/errors"
 )
 
@@ -58,30 +59,56 @@ const sqlImplicitTxnName string = "sql txn implicit"
 
 // Fully-qualified names for metrics.
 var (
-	MetaLatency     = metric.Metadata{Name: "sql.latency"}
-	MetaTxnBegin    = metric.Metadata{Name: "sql.txn.begin.count"}
-	MetaTxnCommit   = metric.Metadata{Name: "sql.txn.commit.count"}
-	MetaTxnAbort    = metric.Metadata{Name: "sql.txn.abort.count"}
-	MetaTxnRollback = metric.Metadata{Name: "sql.txn.rollback.count"}
-	MetaSelect      = metric.Metadata{Name: "sql.select.count"}
-	MetaUpdate      = metric.Metadata{Name: "sql.update.count"}
-	MetaInsert      = metric.Metadata{Name: "sql.insert.count"}
-	MetaDelete      = metric.Metadata{Name: "sql.delete.count"}
-	MetaDdl         = metric.Metadata{Name: "sql.ddl.count"}
-	MetaMisc        = metric.Metadata{Name: "sql.misc.count"}
-	MetaQuery       = metric.Metadata{Name: "sql.query.count"}
+	MetaLatency       = metric.Metadata{Name: "sql.latency"}
+	MetaTxnBegin      = metric.Metadata{Name: "sql.txn.begin.count"}
+	MetaTxnCommit     = metric.Metadata{Name: "sql.txn.commit.count"}
+	MetaTxnAbort      = metric.Metadata{Name: "sql.txn.abort.count"}
+	MetaTxnRollback   = metric.Metadata{Name: "sql.txn.rollback.count"}
+	MetaSelect        = metric.Metadata{Name: "sql.select.count"}
+	MetaDistSQLSelect = metric.Metadata{Name: "sql.distsql.select.count"}
+	MetaUpdate        = metric.Metadata{Name: "sql.update.count"}
+	MetaInsert        = metric.Metadata{Name: "sql.insert.count"}
+	MetaDelete        = metric.Metadata{Name: "sql.delete.count"}
+	MetaDdl           = metric.Metadata{Name: "sql.ddl.count"}
+	MetaMisc          = metric.Metadata{Name: "sql.misc.count"}
+	MetaQuery         = metric.Metadata{Name: "sql.query.count"}
 )
 
-// TODO(radu): experimental code for testing distSQL flows.
+// distSQLExecMode controls if and when the Executor uses DistSQL.
 type distSQLExecMode int
 
 const (
-	distSQLDisabled distSQLExecMode = iota
-	//The plan does not instantiate any goroutines internally.
-	distSQLSync
-	distSQLAsync
+	// distSQLOff means that we never use distSQL.
+	distSQLOff distSQLExecMode = iota
+	// distSQLAuto means that we automatically decide on a case-by-case basis if
+	// we use distSQL.
+	distSQLAuto
+	// distSQLOn means that we use distSQL for queries that are supported.
+	distSQLOn
+	// distSQLAlways means that we only use distSQL; unsupported queries fail.
+	distSQLAlways
 )
-const testDistSQL distSQLExecMode = distSQLDisabled
+
+func distSQLExecModeFromString(val string) distSQLExecMode {
+	switch strings.ToUpper(val) {
+	case "OFF":
+		return distSQLOff
+	case "AUTO":
+		return distSQLAuto
+	case "ON":
+		return distSQLOn
+	case "ALWAYS":
+		return distSQLAlways
+	default:
+		panic(fmt.Sprintf("unknown DistSQL mode %s", val))
+	}
+}
+
+// defaultDistSQLMode controls the default DistSQL mode (see above). It can
+// still be overridden per-session using `SET DIST_SQL = ...`.
+var defaultDistSQLMode = distSQLExecModeFromString(
+	envutil.EnvOrDefaultString("COCKROACH_DISTSQL_MODE", "OFF"),
+)
 
 type traceResult struct {
 	tag   string
@@ -109,7 +136,12 @@ type StatementResults struct {
 
 // Close ensures that the resources claimed by the results are released.
 func (s *StatementResults) Close() {
-	for _, r := range s.ResultList {
+	s.ResultList.Close()
+}
+
+// Close ensures that the resources claimed by the results are released.
+func (rl ResultList) Close() {
+	for _, r := range rl {
 		r.Close()
 	}
 }
@@ -150,6 +182,9 @@ type ResultColumn struct {
 
 	// If set, this is an implicit column; used internally.
 	hidden bool
+
+	// If set, a value won't be produced for this column; used internally.
+	omitted bool
 }
 
 // ResultColumns is the type used throughout the sql module to
@@ -159,15 +194,17 @@ type ResultColumns []ResultColumn
 // An Executor executes SQL statements.
 // Executor is thread-safe.
 type Executor struct {
-	nodeID         roachpb.NodeID
 	cfg            ExecutorConfig
+	stopper        *stop.Stopper
 	reCache        *parser.RegexpCache
 	virtualSchemas virtualSchemaHolder
 
 	// Transient stats.
-	Latency       *metric.Histogram
-	SelectCount   *metric.Counter
-	TxnBeginCount *metric.Counter
+	Latency     *metric.Histogram
+	SelectCount *metric.Counter
+	// The subset of SELECTs that are processed through DistSQL.
+	DistSQLSelectCount *metric.Counter
+	TxnBeginCount      *metric.Counter
 
 	// txnCommitCount counts the number of times a COMMIT was attempted.
 	TxnCommitCount *metric.Counter
@@ -189,6 +226,8 @@ type Executor struct {
 	// execution of statements. So don't go on changing state after you've
 	// Wait()ed on it.
 	systemConfigCond *sync.Cond
+
+	distSQLPlanner *distSQLPlanner
 }
 
 // An ExecutorConfig encompasses the auxiliary objects and configuration
@@ -197,11 +236,14 @@ type Executor struct {
 // a Executor; the rest will have sane defaults set if omitted.
 type ExecutorConfig struct {
 	AmbientCtx   log.AmbientContext
+	NodeID       *base.NodeIDContainer
 	DB           *client.DB
 	Gossip       *gossip.Gossip
+	DistSender   *kv.DistSender
+	RPCContext   *rpc.Context
 	LeaseManager *LeaseManager
 	Clock        *hlc.Clock
-	DistSQLSrv   *distsql.ServerImpl
+	DistSQLSrv   *distsqlrun.ServerImpl
 
 	TestingKnobs              *ExecutorTestingKnobs
 	SchemaChangerTestingKnobs *SchemaChangerTestingKnobs
@@ -251,68 +293,63 @@ type ExecutorTestingKnobs struct {
 // NewExecutor creates an Executor and registers a callback on the
 // system config.
 func NewExecutor(cfg ExecutorConfig, stopper *stop.Stopper) *Executor {
-	exec := &Executor{
+	return &Executor{
 		cfg:     cfg,
+		stopper: stopper,
 		reCache: parser.NewRegexpCache(512),
 
-		Latency:          metric.NewLatency(MetaLatency, cfg.MetricsSampleInterval),
-		TxnBeginCount:    metric.NewCounter(MetaTxnBegin),
-		TxnCommitCount:   metric.NewCounter(MetaTxnCommit),
-		TxnAbortCount:    metric.NewCounter(MetaTxnAbort),
-		TxnRollbackCount: metric.NewCounter(MetaTxnRollback),
-		SelectCount:      metric.NewCounter(MetaSelect),
-		UpdateCount:      metric.NewCounter(MetaUpdate),
-		InsertCount:      metric.NewCounter(MetaInsert),
-		DeleteCount:      metric.NewCounter(MetaDelete),
-		DdlCount:         metric.NewCounter(MetaDdl),
-		MiscCount:        metric.NewCounter(MetaMisc),
-		QueryCount:       metric.NewCounter(MetaQuery),
+		Latency:            metric.NewLatency(MetaLatency, cfg.MetricsSampleInterval),
+		TxnBeginCount:      metric.NewCounter(MetaTxnBegin),
+		TxnCommitCount:     metric.NewCounter(MetaTxnCommit),
+		TxnAbortCount:      metric.NewCounter(MetaTxnAbort),
+		TxnRollbackCount:   metric.NewCounter(MetaTxnRollback),
+		SelectCount:        metric.NewCounter(MetaSelect),
+		DistSQLSelectCount: metric.NewCounter(MetaDistSQLSelect),
+		UpdateCount:        metric.NewCounter(MetaUpdate),
+		InsertCount:        metric.NewCounter(MetaInsert),
+		DeleteCount:        metric.NewCounter(MetaDelete),
+		DdlCount:           metric.NewCounter(MetaDdl),
+		MiscCount:          metric.NewCounter(MetaMisc),
+		QueryCount:         metric.NewCounter(MetaQuery),
 	}
+}
 
-	exec.systemConfigCond = sync.NewCond(exec.systemConfigMu.RLocker())
+// Start starts workers for the executor and initializes the distSQLPlanner.
+func (e *Executor) Start(
+	ctx context.Context, startupMemMetrics *MemoryMetrics, nodeDesc roachpb.NodeDescriptor,
+) {
+	ctx = e.AnnotateCtx(ctx)
+	log.Infof(ctx, "creating distSQLPlanner with address %s", nodeDesc.Address)
+	e.distSQLPlanner = newDistSQLPlanner(
+		nodeDesc, e.cfg.RPCContext, e.cfg.DistSQLSrv, e.cfg.DistSender, e.cfg.Gossip,
+	)
 
-	gossipUpdateC := cfg.Gossip.RegisterSystemConfigChannel()
-	stopper.RunWorker(func() {
+	e.systemConfigCond = sync.NewCond(e.systemConfigMu.RLocker())
+
+	gossipUpdateC := e.cfg.Gossip.RegisterSystemConfigChannel()
+	e.stopper.RunWorker(func() {
 		for {
 			select {
 			case <-gossipUpdateC:
-				sysCfg, _ := cfg.Gossip.GetSystemConfig()
-				exec.updateSystemConfig(sysCfg)
-			case <-stopper.ShouldStop():
+				sysCfg, _ := e.cfg.Gossip.GetSystemConfig()
+				e.updateSystemConfig(sysCfg)
+			case <-e.stopper.ShouldStop():
 				return
 			}
 		}
 	})
 
-	ctx := log.WithLogTag(context.Background(), "startup", nil)
-	startupSession := NewSession(ctx, SessionArgs{}, exec, nil)
-	if err := exec.virtualSchemas.init(&startupSession.planner); err != nil {
+	ctx = log.WithLogTag(ctx, "startup", nil)
+	startupSession := NewSession(ctx, SessionArgs{}, e, nil, startupMemMetrics)
+	if err := e.virtualSchemas.init(&startupSession.planner); err != nil {
 		log.Fatal(ctx, err)
 	}
-	startupSession.Finish()
-
-	return exec
-}
-
-// NewDummyExecutor creates an empty Executor that is used for certain tests.
-func NewDummyExecutor() *Executor {
-	return &Executor{
-		cfg: ExecutorConfig{
-			AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
-		},
-	}
+	startupSession.Finish(e)
 }
 
 // AnnotateCtx is a convenience wrapper; see AmbientContext.
 func (e *Executor) AnnotateCtx(ctx context.Context) context.Context {
 	return e.cfg.AmbientCtx.AnnotateCtx(ctx)
-}
-
-// SetNodeID sets the node ID for the SQL server. This method must be called
-// before actually using the Executor.
-func (e *Executor) SetNodeID(nodeID roachpb.NodeID) {
-	e.nodeID = nodeID
-	e.cfg.LeaseManager.nodeID = uint32(nodeID)
 }
 
 // updateSystemConfig is called whenever the system config gossip entry is updated.
@@ -385,7 +422,7 @@ func (e *Executor) Prepare(
 			session.planner.avoidCachedDescriptors = false
 		}()
 
-		setTxnTimestamps(txn, *protoTS)
+		SetTxnTimestamps(txn, *protoTS)
 	}
 
 	plan, err := session.planner.prepare(stmt)
@@ -510,7 +547,9 @@ func (e *Executor) execRequest(session *Session, sql string, copymsg copyMsg) St
 		// Each iteration consumes a transaction's worth of statements.
 
 		inTxn := txnState.State != NoTxn
-		var execOpt client.TxnExecOptions
+		execOpt := client.TxnExecOptions{
+			Clock: e.cfg.Clock,
+		}
 		// Figure out the statements out of which we're going to try to consume
 		// this iteration. If we need to create an implicit txn, only one statement
 		// can be consumed.
@@ -518,7 +557,6 @@ func (e *Executor) execRequest(session *Session, sql string, copymsg copyMsg) St
 		// If protoTS is set, the transaction proto sets its Orig and Max timestamps
 		// to it each retry.
 		var protoTS *hlc.Timestamp
-		execOpt.Clock = e.cfg.Clock
 		// We can AutoRetry the next batch of statements if we're in a clean state
 		// (i.e. the next statements we're going to see are the first statements in
 		// a transaction).
@@ -561,7 +599,10 @@ func (e *Executor) execRequest(session *Session, sql string, copymsg copyMsg) St
 		var results []Result
 		origState := txnState.State
 
+		// Track if we are retrying this query, so that we do not double count.
+		isAutomaticRetry := false
 		txnClosure := func(txn *client.Txn, opt *client.TxnExecOptions) error {
+			defer func() { isAutomaticRetry = true }()
 			if txnState.State == Open && txnState.txn != txn {
 				panic(fmt.Sprintf("closure wasn't called in the txn we set up for it."+
 					"\ntxnState.txn:%+v\ntxn:%+v\ntxnState:%+v", txnState.txn, txn, txnState))
@@ -569,18 +610,30 @@ func (e *Executor) execRequest(session *Session, sql string, copymsg copyMsg) St
 			txnState.txn = txn
 
 			if protoTS != nil {
-				setTxnTimestamps(txnState.txn, *protoTS)
+				SetTxnTimestamps(txnState.txn, *protoTS)
 			}
 
 			var err error
-			results, remainingStmts, err = runTxnAttempt(e, planMaker, origState, txnState, opt, stmtsToExec)
+			if results != nil {
+				// Some results were produced by a previous attempt. Discard them.
+				ResultList(results).Close()
+			}
+			results, remainingStmts, err = runTxnAttempt(e, planMaker, origState, txnState, opt, stmtsToExec, isAutomaticRetry)
 
 			// TODO(andrei): Until #7881 fixed.
 			if err == nil && txnState.State == Aborted {
-				log.Errorf(session.Ctx(),
-					"7881: txnState is Aborted without an error propagating. stmtsToExec: %s, "+
-						"results: %+v, remainingStmts: %s, txnState: %+v", stmtsToExec, results,
-					remainingStmts, txnState)
+				doWarn := true
+				if len(stmtsToExec) > 0 {
+					if _, ok := stmtsToExec[0].(*parser.ShowTransactionStatus); ok {
+						doWarn = false
+					}
+				}
+				if doWarn {
+					log.Errorf(session.Ctx(),
+						"7881: txnState is Aborted without an error propagating. stmtsToExec: %s, "+
+							"results: %+v, remainingStmts: %s, txnState: %+v", stmtsToExec, results,
+						remainingStmts, txnState)
+				}
 			}
 
 			return err
@@ -638,7 +691,7 @@ func (e *Executor) execRequest(session *Session, sql string, copymsg copyMsg) St
 
 		// If we're no longer in a transaction, finish the trace.
 		if txnState.State == NoTxn {
-			txnState.finishSQLTxn()
+			txnState.finishSQLTxn(session.context)
 		}
 
 		// If the txn is in any state but Open, exec the schema changes. They'll
@@ -701,6 +754,7 @@ func runTxnAttempt(
 	txnState *txnState,
 	opt *client.TxnExecOptions,
 	stmts parser.StatementList,
+	isAutomaticRetry bool,
 ) ([]Result, parser.StatementList, error) {
 
 	// Ignore the state that might have been set by a previous try
@@ -711,7 +765,7 @@ func runTxnAttempt(
 	planMaker.setTxn(txnState.txn)
 	results, remainingStmts, err := e.execStmtsInCurrentTxn(
 		stmts, planMaker, txnState,
-		opt.AutoCommit /* implicitTxn */, opt.AutoRetry /* txnBeginning */)
+		opt.AutoCommit /* implicitTxn */, opt.AutoRetry /* txnBeginning */, isAutomaticRetry)
 	if opt.AutoCommit {
 		if len(remainingStmts) > 0 {
 			panic("implicit txn failed to execute all stmts")
@@ -756,6 +810,7 @@ func (e *Executor) execStmtsInCurrentTxn(
 	txnState *txnState,
 	implicitTxn bool,
 	txnBeginning bool,
+	isAutomaticRetry bool,
 ) ([]Result, parser.StatementList, error) {
 	var results []Result
 	if txnState.State == NoTxn {
@@ -780,25 +835,32 @@ func (e *Executor) execStmtsInCurrentTxn(
 			// statements to not change from what the client sends.
 			stmtStrBefore = stmt.String()
 		}
+
 		var res Result
 		var err error
-		switch txnState.State {
-		case Open:
-			res, err = e.execStmtInOpenTxn(
-				stmt, planMaker, implicitTxn, txnBeginning && (i == 0), /* firstInTxn */
-				txnState)
-		case Aborted, RestartWait:
-			res, err = e.execStmtInAbortedTxn(stmt, txnState, planMaker)
-		case CommitWait:
-			res, err = e.execStmtInCommitWaitTxn(stmt, txnState)
-		default:
-			panic(fmt.Sprintf("unexpected txn state: %s", txnState.State))
-		}
-		if (e.cfg.TestingKnobs.CheckStmtStringChange && false) ||
-			(e.cfg.TestingKnobs.StatementFilter != nil) {
-			if after := stmt.String(); after != stmtStrBefore {
-				panic(fmt.Sprintf("statement changed after exec; before:\n    %s\nafter:\n    %s",
-					stmtStrBefore, after))
+		// Run SHOW TRANSACTION STATUS in a separate code path so it is
+		// always guaranteed to execute regardless of the current transaction state.
+		if _, ok := stmt.(*parser.ShowTransactionStatus); ok {
+			res, err = planMaker.runShowTransactionState(txnState, implicitTxn)
+		} else {
+			switch txnState.State {
+			case Open:
+				res, err = e.execStmtInOpenTxn(
+					stmt, planMaker, implicitTxn, txnBeginning && (i == 0), /* firstInTxn */
+					txnState, isAutomaticRetry)
+			case Aborted, RestartWait:
+				res, err = e.execStmtInAbortedTxn(stmt, txnState, planMaker)
+			case CommitWait:
+				res, err = e.execStmtInCommitWaitTxn(stmt, txnState)
+			default:
+				panic(fmt.Sprintf("unexpected txn state: %s", txnState.State))
+			}
+			if (e.cfg.TestingKnobs.CheckStmtStringChange && false) ||
+				(e.cfg.TestingKnobs.StatementFilter != nil) {
+				if after := stmt.String(); after != stmtStrBefore {
+					panic(fmt.Sprintf("statement changed after exec; before:\n    %s\nafter:\n    %s",
+						stmtStrBefore, after))
+				}
 			}
 		}
 		res.Err = convertToErrWithPGCode(res.Err)
@@ -870,7 +932,7 @@ func (e *Executor) execStmtInAbortedTxn(
 			return Result{}, nil
 		}
 		err := sqlbase.NewTransactionAbortedError(fmt.Sprintf(
-			"SAVEPOINT %s has not been used or a non-retriable error was encountered.",
+			"SAVEPOINT %s has not been used or a non-retriable error was encountered",
 			parser.RestartSavepointName))
 		return Result{Err: err}, err
 	default:
@@ -919,12 +981,19 @@ func (e *Executor) execStmtInCommitWaitTxn(
 // firstInTxn: set for the first statement in a transaction. Used
 //  so that nested BEGIN statements are caught.
 // stmtTimestamp: Used as the statement_timestamp().
+// isAutomaticRetry: A boolean that is set for retries so that we don't double
+// count in metrics.
 //
 // Returns:
 // - a Result
 // - an error, if any. In case of error, the result returned also reflects this error.
 func (e *Executor) execStmtInOpenTxn(
-	stmt parser.Statement, planMaker *planner, implicitTxn bool, firstInTxn bool, txnState *txnState,
+	stmt parser.Statement,
+	planMaker *planner,
+	implicitTxn bool,
+	firstInTxn bool,
+	txnState *txnState,
+	isAutomaticRetry bool,
 ) (Result, error) {
 	if txnState.State != Open {
 		panic("execStmtInOpenTxn called outside of an open txn")
@@ -939,8 +1008,10 @@ func (e *Executor) execStmtInOpenTxn(
 	session := planMaker.session
 	log.Eventf(session.context, "%s", stmt)
 
-	// TODO(cdo): Figure out how to not double count on retries.
-	e.updateStmtCounts(stmt)
+	// Do not double count automatically retried transactions.
+	if !isAutomaticRetry {
+		e.updateStmtCounts(stmt)
+	}
 	switch s := stmt.(type) {
 	case *parser.BeginTransaction:
 		if !firstInTxn {
@@ -1039,7 +1110,7 @@ func (e *Executor) execStmtInOpenTxn(
 	}
 
 	autoCommit := implicitTxn && !e.cfg.TestingKnobs.DisableAutoCommit
-	result, err := e.execStmt(stmt, planMaker, autoCommit)
+	result, err := e.execStmt(stmt, planMaker, autoCommit, isAutomaticRetry)
 	if err != nil {
 		if result.Rows != nil {
 			result.Rows.Close()
@@ -1143,88 +1214,137 @@ func commitSQLTransaction(
 	return result, err
 }
 
-// The current transaction might have been committed/rolled back when this returns.
-func (e *Executor) execStmt(
-	stmt parser.Statement, planMaker *planner, autoCommit bool,
-) (Result, error) {
-	var result Result
-	plan, err := planMaker.makePlan(stmt, autoCommit)
+// exectDistSQL converts a classic plan to a distributed SQL physical plan and
+// runs it.
+func (e *Executor) execDistSQL(planMaker *planner, tree planNode, result *Result) error {
+	// Note: if we just want the row count, result.Rows is nil here.
+	recv := distSQLReceiver{rows: result.Rows}
+	err := e.distSQLPlanner.PlanAndRun(planMaker.session.Ctx(), planMaker.txn, tree, &recv)
 	if err != nil {
-		return result, err
+		return err
 	}
-
-	defer plan.Close()
-
-	distSQLMode := testDistSQL
-	if planMaker.session.DistSQLMode != distSQLDisabled {
-		distSQLMode = planMaker.session.DistSQLMode
+	if recv.err != nil {
+		return recv.err
 	}
-	if distSQLMode != distSQLDisabled {
-		if err := hackPlanToUseDistSQL(plan, distSQLMode); err != nil {
-			return result, err
-		}
+	if result.Type == parser.RowsAffected {
+		result.RowsAffected = int(recv.numRows)
 	}
+	return nil
+}
 
-	if err := plan.Start(); err != nil {
-		return result, err
+// execClassic runs a plan using the classic (non-distributed) SQL
+// implementation.
+func (e *Executor) execClassic(planMaker *planner, plan planNode, result *Result) error {
+	if err := planMaker.startPlan(plan); err != nil {
+		return err
 	}
-
-	result.PGTag = stmt.StatementTag()
-	result.Type = stmt.StatementType()
 
 	switch result.Type {
 	case parser.RowsAffected:
 		count, err := countRowsAffected(plan)
 		if err != nil {
-			return result, err
+			return err
 		}
 		result.RowsAffected += count
 
 	case parser.Rows:
+		next, err := plan.Next()
+		for ; next; next, err = plan.Next() {
+			// The plan.Values DTuple needs to be copied on each iteration.
+			values := plan.Values()
+
+			for _, val := range values {
+				if err := checkResultType(val.ResolvedType()); err != nil {
+					return err
+				}
+			}
+			if _, err := result.Rows.AddRow(values); err != nil {
+				return err
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// shouldUseDistSQL determines whether we should use DistSQL for a plan, based
+// on the session settings.
+func (e *Executor) shouldUseDistSQL(session *Session, plan planNode) (bool, error) {
+	distSQLMode := defaultDistSQLMode
+	if session.DistSQLMode != distSQLOff {
+		distSQLMode = session.DistSQLMode
+	}
+
+	if distSQLMode == distSQLOff {
+		return false, nil
+	}
+	// Don't try to run empty nodes (e.g. SET commands) with distSQL.
+	if _, ok := plan.(*emptyNode); ok {
+		return false, nil
+	}
+
+	shouldDistribute, err := e.distSQLPlanner.CheckSupport(plan)
+	if err != nil {
+		// If the distSQLMode is ALWAYS, any unsupported statement is an error.
+		if distSQLMode == distSQLAlways {
+			return false, err
+		}
+		// Don't use distSQL for this request.
+		log.VEventf(session.Ctx(), 1, "query not supported for distSQL: %s", err)
+		return false, nil
+	}
+
+	if distSQLMode == distSQLAuto && !shouldDistribute {
+		log.VEventf(session.Ctx(), 1, "not distributing query")
+		return false, nil
+	}
+
+	// In ON or ALWAYS mode, all supported queries are distributed.
+	return true, nil
+}
+
+// The current transaction might have been committed/rolled back when this returns.
+// The caller closes result.Rows (even in error cases).
+func (e *Executor) execStmt(
+	stmt parser.Statement, planMaker *planner, autoCommit bool, isAutomaticRetry bool,
+) (Result, error) {
+	plan, err := planMaker.makePlan(stmt, autoCommit)
+	if err != nil {
+		return Result{}, err
+	}
+
+	defer plan.Close()
+
+	result := Result{
+		PGTag: stmt.StatementTag(),
+		Type:  stmt.StatementType(),
+	}
+	if result.Type == parser.Rows {
 		result.Columns = plan.Columns()
 		for _, c := range result.Columns {
 			if err := checkResultType(c.Typ); err != nil {
 				return result, err
 			}
 		}
-		result.Rows = planMaker.NewRowContainer(result.Columns, 0)
-
-		// valuesAlloc is used to allocate the backing storage for the
-		// result row slices in chunks.
-		var valuesAlloc []parser.Datum
-		const maxChunkSize = 64 // Arbitrary, could use tuning.
-		chunkSize := 4          // Arbitrary as well.
-
-		next, err := plan.Next()
-		for ; next; next, err = plan.Next() {
-			// The plan.Values DTuple needs to be copied on each iteration.
-			values := plan.Values()
-
-			n := len(values)
-			if len(valuesAlloc) < n {
-				valuesAlloc = make(parser.DTuple, len(result.Columns)*chunkSize)
-				if chunkSize < maxChunkSize {
-					chunkSize *= 2
-				}
-			}
-			row := valuesAlloc[:0:n]
-			valuesAlloc = valuesAlloc[n:]
-
-			for _, val := range values {
-				if err := checkResultType(val.ResolvedType()); err != nil {
-					return result, err
-				}
-				row = append(row, val)
-			}
-			if err := result.Rows.AddRow(row); err != nil {
-				return result, err
-			}
-		}
-		if err != nil {
-			return result, err
-		}
+		result.Rows = NewRowContainer(planMaker.session.makeBoundAccount(), result.Columns, 0)
 	}
-	return result, nil
+
+	useDistSQL, err := e.shouldUseDistSQL(planMaker.session, plan)
+	if err != nil {
+		return result, err
+	}
+	if useDistSQL && !isAutomaticRetry {
+		switch stmt.(type) {
+		case *parser.Select:
+			e.DistSQLSelectCount.Inc(1)
+		}
+		err = e.execDistSQL(planMaker, plan, &result)
+	} else {
+		err = e.execClassic(planMaker, plan, &result)
+	}
+	return result, err
 }
 
 // updateStmtCounts updates metrics for the number of times the different types of SQL
@@ -1319,6 +1439,7 @@ func golangFillQueryArguments(pinfo *parser.PlaceholderInfo, args []interface{})
 }
 
 func checkResultType(typ parser.Type) error {
+	// Compare all types that can rely on == equality.
 	switch typ {
 	case parser.TypeNull:
 	case parser.TypeBool:
@@ -1331,10 +1452,19 @@ func checkResultType(typ parser.Type) error {
 	case parser.TypeTimestamp:
 	case parser.TypeTimestampTZ:
 	case parser.TypeInterval:
-	case parser.TypePlaceholder:
-		return errors.Errorf("could not determine data type of %s", typ)
+	case parser.TypeStringArray:
+	case parser.TypeIntArray:
 	default:
-		return errors.Errorf("unsupported result type: %s", typ)
+		// Compare all types that cannot rely on == equality.
+		istype := typ.FamilyEqual
+		switch {
+		case istype(parser.TypeCollatedString):
+		case istype(parser.TypeTuple):
+		case istype(parser.TypePlaceholder):
+			return errors.Errorf("could not determine data type of %s", typ)
+		default:
+			return errors.Errorf("unsupported result type: %s", typ)
+		}
 	}
 	return nil
 }
@@ -1395,22 +1525,33 @@ func isAsOf(planMaker *planner, stmt parser.Statement, max hlc.Timestamp) (*hlc.
 	case *parser.DInt:
 		ts.WallTime = int64(*d)
 	case *parser.DDecimal:
-		logicalScale := 10 - int(d.Scale())
-		if logicalScale < 0 {
-			return nil, errors.Errorf("bad AS OF SYSTEM TIME argument: logical part has too many digits")
+		// Format the decimal into a string and split on `.` to extract the nanosecond
+		// walltime and logical tick parts.
+		s := d.String()
+		parts := strings.SplitN(s, ".", 2)
+		nanos, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return nil, errors.Wrap(err, "parse AS OF SYSTEM TIME argument")
 		}
-		nanos := new(big.Int)
-		logical := new(big.Int)
-		nanos.QuoRem(d.UnscaledBig(), decimal.PowerOfTenInt(int(d.Scale())), logical)
-		logical.Mul(logical, decimal.PowerOfTenInt(logicalScale))
-		if nanos.Cmp(big.NewInt(math.MaxInt64)) > 0 {
-			return nil, errors.Errorf("bad AS OF SYSTEM TIME argument: nanoseconds part too large: %s > %d", nanos, math.MaxInt64)
+		var logical int64
+		if len(parts) > 1 {
+			// logicalLength is the number of decimal digits expected in the
+			// logical part to the right of the decimal. See the implementation of
+			// cluster_logical_timestamp().
+			const logicalLength = 10
+			p := parts[1]
+			if lp := len(p); lp > logicalLength {
+				return nil, errors.Errorf("bad AS OF SYSTEM TIME argument: logical part has too many digits")
+			} else if lp < logicalLength {
+				p += strings.Repeat("0", logicalLength-lp)
+			}
+			logical, err = strconv.ParseInt(p, 10, 32)
+			if err != nil {
+				return nil, errors.Wrap(err, "parse AS OF SYSTEM TIME argument")
+			}
 		}
-		if logical.Cmp(big.NewInt(math.MaxInt32)) > 0 {
-			return nil, errors.Errorf("bad AS OF SYSTEM TIME argument: logical part too large: %s > %d", logical, math.MaxInt32)
-		}
-		ts.WallTime = nanos.Int64()
-		ts.Logical = int32(logical.Int64())
+		ts.WallTime = nanos
+		ts.Logical = int32(logical)
 	default:
 		return nil, fmt.Errorf("unexpected AS OF SYSTEM TIME argument: %s (%T)", d.ResolvedType(), d)
 	}
@@ -1420,7 +1561,7 @@ func isAsOf(planMaker *planner, stmt parser.Statement, max hlc.Timestamp) (*hlc.
 	return &ts, nil
 }
 
-// setTxnTimestamps sets the transaction's proto timestamps and deadline
+// SetTxnTimestamps sets the transaction's proto timestamps and deadline
 // to ts. This is for use with AS OF queries, and should be called in the
 // retry block (except in the case of prepare which doesn't use retry). The
 // deadline-checking code checks that the `Timestamp` field of the proto
@@ -1428,7 +1569,7 @@ func isAsOf(planMaker *planner, stmt parser.Statement, max hlc.Timestamp) (*hlc.
 // it won't ever exceed the deadline, and thus setting the deadline here is
 // not strictly needed. However, it doesn't do anything incorrect and it will
 // possibly find problems if things change in the future, so it is left in.
-func setTxnTimestamps(txn *client.Txn, ts hlc.Timestamp) {
+func SetTxnTimestamps(txn *client.Txn, ts hlc.Timestamp) {
 	txn.Proto.Timestamp = ts
 	txn.Proto.OrigTimestamp = ts
 	txn.Proto.MaxTimestamp = ts

@@ -63,15 +63,15 @@ func TestNormalizeNameInExpr(t *testing.T) {
 		{`foo.bar`, `foo.bar`, ``},
 		{`foo.*`, `foo.*`, ``},
 		{`test.foo.*`, `test.foo.*`, ``},
-		{`foo.bar[blah]`, `foo.bar[blah]`, ``},
-		{`foo[bar]`, `foo[bar]`, ``},
+		{`foo.bar[blah]`, `foo.bar`, ``},
+		{`foo[bar]`, `foo`, ``},
+		{`test.*[foo]`, `test.*`, ``},
 
 		{`"".foo`, ``, `empty table name`},
 		{`"".*`, ``, `empty table name`},
 		{`""`, ``, `empty column name`},
 		{`foo.*.bar`, ``, `invalid table name: "foo.*"`},
 		{`foo.*.bar[baz]`, ``, `invalid table name: "foo.*"`},
-		{`test.*[foo]`, ``, `invalid column name: "test.*"`},
 		{`test.foo.*.bar[foo]`, ``, `invalid table name: "test.foo.*"`},
 	}
 
@@ -80,9 +80,19 @@ func TestNormalizeNameInExpr(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.in, err)
 		}
-		vBase, ok := stmt.(*Select).Select.(*SelectClause).Exprs[0].Expr.(VarName)
-		if !ok {
-			t.Fatalf("%s does not parse to a VarName", tc.in)
+		var vBase VarName
+		startExpr := stmt.(*Select).Select.(*SelectClause).Exprs[0].Expr
+		for {
+			switch e := startExpr.(type) {
+			case VarName:
+				vBase = e
+			case *IndirectionExpr:
+				startExpr = e.Expr
+				continue
+			default:
+				t.Fatalf("%s does not parse to a VarName or IndirectionExpr", tc.in)
+			}
+			break
 		}
 		v, err := vBase.NormalizeVarName()
 		if tc.err != "" {
@@ -140,13 +150,14 @@ func TestExprString(t *testing.T) {
 		`(a OR (g BETWEEN (h+i) AND (j+k))) AND b`,
 		`(1 >= 2) IS OF (BOOL)`,
 		`(1 >= 2) = (2 IS OF (BOOL))`,
+		`count(1) FILTER (WHERE true)`,
 	}
 	for _, exprStr := range testExprs {
 		expr, err := ParseExprTraditional(exprStr)
 		if err != nil {
 			t.Fatalf("%s: %v", exprStr, err)
 		}
-		typedExpr, err := TypeCheck(expr, nil, NoTypePreference)
+		typedExpr, err := TypeCheck(expr, nil, TypeAny)
 		if err != nil {
 			t.Fatalf("%s: %v", expr, err)
 		}
@@ -156,7 +167,7 @@ func TestExprString(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", exprStr, err)
 		}
-		typedExpr2, err := TypeCheck(expr2, nil, NoTypePreference)
+		typedExpr2, err := TypeCheck(expr2, nil, TypeAny)
 		if err != nil {
 			t.Fatalf("%s: %v", expr2, err)
 		}

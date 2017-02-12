@@ -21,14 +21,13 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/context"
-
 	"github.com/google/btree"
 	"github.com/pkg/errors"
+	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -54,22 +53,23 @@ func newTestRangeSet(count int, t *testing.T) *testRangeSet {
 			EndKey:   roachpb.RKey(fmt.Sprintf("%03d", i+1)),
 		}
 		// Initialize the range stat so the scanner can use it.
-		rng := &Replica{
+		repl := &Replica{
 			RangeID: desc.RangeID,
 		}
-		rng.mu.TimedMutex = syncutil.MakeTimedMutex(defaultMuLogger)
-		rng.mu.state.Stats = enginepb.MVCCStats{
+		repl.mu.TimedMutex = syncutil.MakeTimedMutex(defaultMuLogger)
+		repl.cmdQMu.TimedMutex = syncutil.MakeTimedMutex(defaultMuLogger)
+		repl.mu.state.Stats = enginepb.MVCCStats{
 			KeyBytes:  1,
 			ValBytes:  2,
 			KeyCount:  1,
 			LiveCount: 1,
 		}
 
-		if err := rng.setDesc(desc); err != nil {
+		if err := repl.setDesc(desc); err != nil {
 			t.Fatal(err)
 		}
-		if exRngItem := rs.replicasByKey.ReplaceOrInsert(rng); exRngItem != nil {
-			t.Fatalf("failed to insert range %s", rng)
+		if exRngItem := rs.replicasByKey.ReplaceOrInsert(repl); exRngItem != nil {
+			t.Fatalf("failed to insert range %s", repl)
 		}
 	}
 	return rs
@@ -102,11 +102,11 @@ func (rs *testRangeSet) remove(index int, t *testing.T) *Replica {
 	endKey := roachpb.Key(fmt.Sprintf("%03d", index+1))
 	rs.Lock()
 	defer rs.Unlock()
-	rng := rs.replicasByKey.Delete((rangeBTreeKey)(endKey))
-	if rng == nil {
+	repl := rs.replicasByKey.Delete((rangeBTreeKey)(endKey))
+	if repl == nil {
 		t.Fatalf("failed to delete range of end key %s", endKey)
 	}
-	return rng.(*Replica)
+	return repl.(*Replica)
 }
 
 // Test implementation of a range queue which adds range to an
@@ -147,11 +147,11 @@ func (tq *testQueue) Start(clock *hlc.Clock, stopper *stop.Stopper) {
 	})
 }
 
-func (tq *testQueue) MaybeAdd(rng *Replica, now hlc.Timestamp) {
+func (tq *testQueue) MaybeAdd(repl *Replica, now hlc.Timestamp) {
 	tq.Lock()
 	defer tq.Unlock()
-	if index := tq.indexOf(rng.RangeID); index == -1 {
-		tq.ranges = append(tq.ranges, rng)
+	if index := tq.indexOf(repl.RangeID); index == -1 {
+		tq.ranges = append(tq.ranges, repl)
 	}
 }
 
@@ -194,15 +194,15 @@ func TestScannerAddToQueues(t *testing.T) {
 	// We don't want to actually consume entries from the queues during this test.
 	q1.setDisabled(true)
 	q2.setDisabled(true)
-	s := newReplicaScanner(context.TODO(), 1*time.Millisecond, 0, ranges)
+	s := newReplicaScanner(log.AmbientContext{}, 1*time.Millisecond, 0, ranges)
 	s.AddQueues(q1, q2)
-	mc := hlc.NewManualClock(0)
-	clock := hlc.NewClock(mc.UnixNano)
+	mc := hlc.NewManualClock(123)
+	clock := hlc.NewClock(mc.UnixNano, time.Nanosecond)
 	stopper := stop.NewStopper()
 
 	// Start scanner and verify that all ranges are added to both queues.
 	s.Start(clock, stopper)
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if q1.count() != count || q2.count() != count {
 			return errors.Errorf("q1 or q2 count != %d; got %d, %d", count, q1.count(), q2.count())
 		}
@@ -211,7 +211,7 @@ func TestScannerAddToQueues(t *testing.T) {
 
 	// Remove first range and verify it does not exist in either range.
 	rng := ranges.remove(0, t)
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		// This is intentionally inside the loop, otherwise this test races as
 		// our removal of the range may be processed before a stray re-queue.
 		// Removing on each attempt makes sure we clean this up as we retry.
@@ -243,13 +243,13 @@ func TestScannerTiming(t *testing.T) {
 		25 * time.Millisecond,
 	}
 	for i, duration := range durations {
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			ranges := newTestRangeSet(count, t)
 			q := &testQueue{}
-			s := newReplicaScanner(context.TODO(), duration, 0, ranges)
+			s := newReplicaScanner(log.AmbientContext{}, duration, 0, ranges)
 			s.AddQueues(q)
-			mc := hlc.NewManualClock(0)
-			clock := hlc.NewClock(mc.UnixNano)
+			mc := hlc.NewManualClock(123)
+			clock := hlc.NewClock(mc.UnixNano, time.Nanosecond)
 			stopper := stop.NewStopper()
 			s.Start(clock, stopper)
 			time.Sleep(runTime)
@@ -286,16 +286,16 @@ func TestScannerPaceInterval(t *testing.T) {
 	for _, duration := range durations {
 		startTime := timeutil.Now()
 		ranges := newTestRangeSet(count, t)
-		s := newReplicaScanner(context.TODO(), duration, 0, ranges)
+		s := newReplicaScanner(log.AmbientContext{}, duration, 0, ranges)
 		interval := s.paceInterval(startTime, startTime)
 		logErrorWhenNotCloseTo(duration/count, interval)
 		// The range set is empty
 		ranges = newTestRangeSet(0, t)
-		s = newReplicaScanner(context.TODO(), duration, 0, ranges)
+		s = newReplicaScanner(log.AmbientContext{}, duration, 0, ranges)
 		interval = s.paceInterval(startTime, startTime)
 		logErrorWhenNotCloseTo(duration, interval)
 		ranges = newTestRangeSet(count, t)
-		s = newReplicaScanner(context.TODO(), duration, 0, ranges)
+		s = newReplicaScanner(log.AmbientContext{}, duration, 0, ranges)
 		// Move the present to duration time into the future
 		interval = s.paceInterval(startTime, startTime.Add(duration))
 		logErrorWhenNotCloseTo(0, interval)
@@ -309,16 +309,16 @@ func TestScannerDisabled(t *testing.T) {
 	const count = 3
 	ranges := newTestRangeSet(count, t)
 	q := &testQueue{}
-	s := newReplicaScanner(context.TODO(), 1*time.Millisecond, 0, ranges)
+	s := newReplicaScanner(log.AmbientContext{}, 1*time.Millisecond, 0, ranges)
 	s.AddQueues(q)
-	mc := hlc.NewManualClock(0)
-	clock := hlc.NewClock(mc.UnixNano)
+	mc := hlc.NewManualClock(123)
+	clock := hlc.NewClock(mc.UnixNano, time.Nanosecond)
 	stopper := stop.NewStopper()
 	s.Start(clock, stopper)
 	defer stopper.Stop()
 
 	// Verify queue gets all ranges.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if q.count() != count {
 			return errors.Errorf("expected %d replicas; have %d", count, q.count())
 		}
@@ -332,7 +332,7 @@ func TestScannerDisabled(t *testing.T) {
 
 	// Now, disable the scanner.
 	s.SetDisabled(true)
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if s.waitEnabledCount() == lastWaitEnabledCount {
 			return errors.Errorf("expected scanner to stop when disabled")
 		}
@@ -347,7 +347,7 @@ func TestScannerDisabled(t *testing.T) {
 		return true
 	})
 
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if qc := q.count(); qc != 0 {
 			return errors.Errorf("expected queue to be empty after replicas removed from scanner; got %d", qc)
 		}
@@ -361,7 +361,7 @@ func TestScannerDisabled(t *testing.T) {
 func TestScannerDisabledWithZeroInterval(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ranges := newTestRangeSet(1, t)
-	s := newReplicaScanner(context.TODO(), 0*time.Millisecond, 0, ranges)
+	s := newReplicaScanner(log.AmbientContext{}, 0*time.Millisecond, 0, ranges)
 	if !s.GetDisabled() {
 		t.Errorf("expected scanner to be disabled")
 	}
@@ -372,10 +372,10 @@ func TestScannerEmptyRangeSet(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ranges := newTestRangeSet(0, t)
 	q := &testQueue{}
-	s := newReplicaScanner(context.TODO(), time.Hour, 0, ranges)
+	s := newReplicaScanner(log.AmbientContext{}, time.Hour, 0, ranges)
 	s.AddQueues(q)
-	mc := hlc.NewManualClock(0)
-	clock := hlc.NewClock(mc.UnixNano)
+	mc := hlc.NewManualClock(123)
+	clock := hlc.NewClock(mc.UnixNano, time.Nanosecond)
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
 	s.Start(clock, stopper)

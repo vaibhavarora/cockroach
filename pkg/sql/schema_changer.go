@@ -65,11 +65,9 @@ func (sc *SchemaChanger) truncateAndDropTable(
 	lease *sqlbase.TableDescriptor_SchemaChangeLease,
 	tableDesc *sqlbase.TableDescriptor,
 ) error {
-	l, err := sc.ExtendLease(*lease)
-	if err != nil {
+	if err := sc.ExtendLease(lease); err != nil {
 		return err
 	}
-	*lease = l
 	return truncateAndDropTable(ctx, tableDesc, &sc.db)
 }
 
@@ -86,7 +84,8 @@ func NewSchemaChangerForTesting(
 		mutationID: mutationID,
 		nodeID:     nodeID,
 		db:         db,
-		leaseMgr:   leaseMgr}
+		leaseMgr:   leaseMgr,
+	}
 }
 
 func (sc *SchemaChanger) createSchemaChangeLease() sqlbase.TableDescriptor_SchemaChangeLease {
@@ -161,19 +160,20 @@ func (sc *SchemaChanger) ReleaseLease(lease sqlbase.TableDescriptor_SchemaChange
 
 // ExtendLease for the current leaser. This needs to be called often while
 // doing a schema change to prevent more than one node attempting to apply a
-// schema change (which is still safe, but unwise).
+// schema change (which is still safe, but unwise). It updates existingLease
+// with the new lease.
 func (sc *SchemaChanger) ExtendLease(
-	existingLease sqlbase.TableDescriptor_SchemaChangeLease,
-) (sqlbase.TableDescriptor_SchemaChangeLease, error) {
+	existingLease *sqlbase.TableDescriptor_SchemaChangeLease,
+) error {
 	// Check if there is still time on this lease.
 	minDesiredExpiration := timeutil.Now().Add(MinSchemaChangeLeaseDuration)
 	if time.Unix(0, existingLease.ExpirationTime).After(minDesiredExpiration) {
-		return existingLease, nil
+		return nil
 	}
 	// Update lease.
 	var lease sqlbase.TableDescriptor_SchemaChangeLease
-	err := sc.db.Txn(context.TODO(), func(txn *client.Txn) error {
-		tableDesc, err := sc.findTableWithLease(txn, existingLease)
+	if err := sc.db.Txn(context.TODO(), func(txn *client.Txn) error {
+		tableDesc, err := sc.findTableWithLease(txn, *existingLease)
 		if err != nil {
 			return err
 		}
@@ -182,8 +182,11 @@ func (sc *SchemaChanger) ExtendLease(
 		tableDesc.Lease = &lease
 		txn.SetSystemConfigTrigger()
 		return txn.Put(sqlbase.MakeDescMetadataKey(tableDesc.ID), sqlbase.WrapDescriptor(tableDesc))
-	})
-	return lease, err
+	}); err != nil {
+		return err
+	}
+	*existingLease = lease
+	return nil
 }
 
 func isSchemaChangeRetryError(err error) bool {
@@ -195,8 +198,7 @@ func isSchemaChangeRetryError(err error) bool {
 	}
 }
 
-// Execute the entire schema change in steps. startBackfillNotification is
-// called before the backfill starts; it can be nil.
+// Execute the entire schema change in steps.
 func (sc SchemaChanger) exec() error {
 	// Acquire lease.
 	lease, err := sc.AcquireLease()
@@ -223,9 +225,8 @@ func (sc SchemaChanger) exec() error {
 	}
 	table := desc.GetTable()
 
-	if table.Deleted() {
-		lease, err = sc.ExtendLease(lease)
-		if err != nil {
+	if table.Dropped() {
+		if err := sc.ExtendLease(&lease); err != nil {
 			return err
 		}
 		// Wait for everybody to see the version with the deleted bit set. When
@@ -265,8 +266,7 @@ func (sc SchemaChanger) exec() error {
 	}
 
 	if table.Renamed() {
-		lease, err = sc.ExtendLease(lease)
-		if err != nil {
+		if err := sc.ExtendLease(&lease); err != nil {
 			return err
 		}
 		// Wait for everyone to see the version with the new name. When this
@@ -431,7 +431,7 @@ func (sc *SchemaChanger) waitToUpdateLeases(tableID sqlbase.ID) error {
 	if log.V(2) {
 		log.Infof(context.TODO(), "waiting for a single version of table %d...", tableID)
 	}
-	_, err := sc.leaseMgr.waitForOneVersion(tableID, retryOpts)
+	_, err := sc.leaseMgr.WaitForOneVersion(tableID, retryOpts)
 	if log.V(2) {
 		log.Infof(context.TODO(), "waiting for a single version of table %d... done", tableID)
 	}
@@ -487,12 +487,6 @@ func (sc *SchemaChanger) runStateMachineAndBackfill(
 		return err
 	}
 
-	if sc.testingKnobs.StartBackfillNotification != nil {
-		if err := sc.testingKnobs.StartBackfillNotification(); err != nil {
-			return err
-		}
-	}
-
 	// Run backfill.
 	if err := sc.runBackfill(lease); err != nil {
 		return err
@@ -520,6 +514,7 @@ func (sc *SchemaChanger) reverseMutations(causingError error) error {
 				// mutation ID we're looking for.
 				break
 			}
+			desc.Mutations[i].ResumeSpan = roachpb.Span{}
 			log.Warningf(context.TODO(), "reverse schema change mutation: %+v", mutation)
 			switch mutation.Direction {
 			case sqlbase.DescriptorMutation_ADD:
@@ -654,10 +649,19 @@ type SchemaChangerTestingKnobs struct {
 	// AsyncExecNotification.
 	SyncFilter SyncSchemaChangersFilter
 
-	// StartBackfillNotification is called before applying the backfill for a
-	// schema change operation. It returns error to stop the backfill and
-	// return an error to the caller of the SchemaChanger.exec().
-	StartBackfillNotification func() error
+	// RunBeforeBackfillChunk is called before executing each chunk of a
+	// backfill during a schema change operation. It is called with the
+	// current span and returns an error which eventually is returned to the
+	// caller of SchemaChanger.exec(). It is called at the start of the
+	// backfill function passed into the transaction executing the chunk.
+	RunBeforeBackfillChunk func(sp roachpb.Span) error
+
+	// RunAfterBackfillChunk is called after executing each chunk of a
+	// backfill during a schema change operation. It is called just before
+	// returning from the backfill function passed into the transaction
+	// executing the chunk. It is always called even when the backfill
+	// function returns an error, or if the table has already been dropped.
+	RunAfterBackfillChunk func()
 
 	// RenameOldNameNotInUseNotification is called during a rename schema
 	// change, after all leases on the version of the descriptor with the old
@@ -672,6 +676,13 @@ type SchemaChangerTestingKnobs struct {
 
 	// AsyncExecQuickly executes queued schema changes as soon as possible.
 	AsyncExecQuickly bool
+
+	// WriteCheckpointInterval is the interval after which a checkpoint is
+	// written.
+	WriteCheckpointInterval time.Duration
+
+	// BackfillChunkSize is to be used for all backfill chunked operations.
+	BackfillChunkSize int64
 }
 
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.
@@ -745,7 +756,7 @@ func (s *SchemaChangeManager) Start(stopper *stop.Stopper) {
 					log.Info(context.TODO(), "received a new config")
 				}
 				schemaChanger := SchemaChanger{
-					nodeID:       roachpb.NodeID(s.leaseMgr.nodeID),
+					nodeID:       s.leaseMgr.nodeID.Get(),
 					db:           s.db,
 					leaseMgr:     s.leaseMgr,
 					testingKnobs: s.testingKnobs,
@@ -782,7 +793,7 @@ func (s *SchemaChangeManager) Start(stopper *stop.Stopper) {
 						// A schema change execution might fail soon after
 						// unsetting UpVersion, and we still want to process
 						// outstanding mutations. Similar with a table marked for deletion.
-						if table.UpVersion || table.Deleted() || table.Adding() ||
+						if table.UpVersion || table.Dropped() || table.Adding() ||
 							table.Renamed() || len(table.Mutations) > 0 {
 							if log.V(2) {
 								log.Infof(context.TODO(), "%s: queue up pending schema change; table: %d, version: %d",

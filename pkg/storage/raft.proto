@@ -20,11 +20,34 @@ option go_package = "storage";
 
 import "cockroach/pkg/roachpb/errors.proto";
 import "cockroach/pkg/roachpb/metadata.proto";
+import "cockroach/pkg/storage/storagebase/state.proto";
 import "etcd/raft/raftpb/raft.proto";
 import "gogoproto/gogo.proto";
 
+// RaftHeartbeat is a request that contains the barebones information for a
+// raftpb.MsgHeartbeat raftpb.Message. RaftHeartbeats are coalesced and sent
+// in a RaftMessageRequest, and reconstructed by the receiver into individual
+// raftpb.Message protos.
+message RaftHeartbeat {
+  optional uint64 range_id = 1 [(gogoproto.nullable) = false,
+      (gogoproto.customname) = "RangeID",
+      (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.RangeID"];
+  optional uint32 from_replica_id = 2 [(gogoproto.nullable) = false,
+      (gogoproto.customname) = "FromReplicaID",
+      (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.ReplicaID"];
+  optional uint32 to_replica_id = 3 [(gogoproto.nullable) = false,
+      (gogoproto.customname) = "ToReplicaID",
+      (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.ReplicaID"];
+  optional uint64 term = 4 [(gogoproto.nullable) = false];
+  optional uint64 commit = 5 [(gogoproto.nullable) = false];
+  optional bool quiesce = 6 [(gogoproto.nullable) = false];
+}
+
 // RaftMessageRequest is the request used to send raft messages using our
-// protobuf-based RPC codec.
+// protobuf-based RPC codec. If a RaftMessageRequest has a non-empty number of
+// heartbeats or heartbeat_resps, the contents of the message field is treated
+// as a dummy message and discarded. A coalesced heartbeat request's replica
+// descriptor's range ID must be zero.
 message RaftMessageRequest {
   optional uint64 range_id = 1 [(gogoproto.nullable) = false,
       (gogoproto.customname) = "RangeID",
@@ -43,6 +66,11 @@ message RaftMessageRequest {
   // Raft which will generate a MsgHeartbeatResp that will unquiesce
   // the sender.
   optional bool quiesce = 5 [(gogoproto.nullable) = false];
+
+  // A coalesced heartbeat request is any RaftMessageRequest with a nonzero number of
+  // heartbeats or heartbeat_resps.
+  repeated RaftHeartbeat heartbeats = 6 [(gogoproto.nullable) = false];
+  repeated RaftHeartbeat heartbeat_resps = 7 [(gogoproto.nullable) = false];
 }
 
 message RaftMessageRequestBatch {
@@ -76,7 +104,14 @@ message RaftMessageResponse {
 // SnapshotRequest is the request used to send streaming snapshot requests.
 message SnapshotRequest {
   message Header {
-    optional roachpb.RangeDescriptor range_descriptor = 1 [(gogoproto.nullable) = false];
+    reserved 1;
+
+    // The replica state at the time the snapshot was generated. Note
+    // that ReplicaState.Desc differs from the above range_descriptor
+    // field which holds the updated descriptor after the new replica
+    // has been added while ReplicaState.Desc holds the descriptor
+    // before the new replica has been added.
+    optional storagebase.ReplicaState state = 5 [(gogoproto.nullable) = false];
 
     // The inner raft message is of type MsgSnap, and its snapshot data contains a UUID.
     optional RaftMessageRequest raft_message_request = 2 [(gogoproto.nullable) = false];
@@ -113,7 +148,7 @@ message SnapshotResponse {
   }
   optional Status status = 1 [(gogoproto.nullable) = false];
   optional string message = 2 [(gogoproto.nullable) = false];
-  optional roachpb.StoreCapacity store_capacity = 3;
+  reserved 3;
 }
 
 // ConfChangeContext is encoded in the raftpb.ConfChange.Context field.

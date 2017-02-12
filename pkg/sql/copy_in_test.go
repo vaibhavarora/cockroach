@@ -177,8 +177,8 @@ func TestCopyRandom(t *testing.T) {
 		row[0] = strconv.Itoa(i)
 		row[1] = time.Duration(rng.Int63()).String()
 		for j, t := range types {
-			d := sqlbase.RandDatum(rng, t, false)
-			ds := d.String()
+			d := sqlbase.RandDatum(rng, sqlbase.ColumnType{Kind: t}, false)
+			ds := parser.AsStringWithFlags(d, parser.FmtBareStrings)
 			switch t {
 			case sqlbase.ColumnType_DECIMAL:
 				// Trailing 0s aren't represented below, so truncate here.
@@ -226,7 +226,8 @@ func TestCopyRandom(t *testing.T) {
 			case []byte:
 				ds = string(d)
 			case time.Time:
-				ds = parser.MakeDTimestamp(d, time.Microsecond).String()
+				dt := parser.MakeDTimestamp(d, time.Microsecond)
+				ds = parser.AsStringWithFlags(dt, parser.FmtBareStrings)
 			}
 			if !reflect.DeepEqual(in[i], ds) {
 				t.Fatalf("row %v, col %v: got %#v (%T), expected %#v", row, i, ds, d, in[i])
@@ -291,7 +292,7 @@ func TestCopyError(t *testing.T) {
 func TestCopyOne(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	t.Skip("https://github.com/lib/pq/issues/494")
+	t.Skip("fails testrace")
 
 	params, _ := createTestServerParams()
 	s, db, _ := serverutils.StartServer(t, params)
@@ -324,8 +325,6 @@ func TestCopyOne(t *testing.T) {
 // cannot run.
 func TestCopyInProgress(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-
-	t.Skip("https://github.com/lib/pq/issues/494")
 
 	params, _ := createTestServerParams()
 	s, db, _ := serverutils.StartServer(t, params)

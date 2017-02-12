@@ -23,11 +23,21 @@ import (
 
 type fmtFlags struct {
 	showTypes        bool
-	showTableAliases bool
+	ShowTableAliases bool
+	symbolicVars     bool
 	// tableNameNormalizer will be called on all NormalizableTableNames if it is
 	// non-nil. Its results will be used if they are non-nil, or ignored if they
 	// are nil.
 	tableNameNormalizer func(*NormalizableTableName) *TableName
+	// indexedVarFormat is an optional interceptor for
+	// IndexedVarContainer.IndexedVarFormat calls; it can be used to
+	// customize the formatting of IndexedVars.
+	indexedVarFormat func(buf *bytes.Buffer, f FmtFlags, c IndexedVarContainer, idx int)
+	// starDatumFormat is an optional interceptor for StarDatum.Format calls,
+	// can be used to customize the formatting of StarDatums.
+	starDatumFormat func(buf *bytes.Buffer, f FmtFlags)
+	// If true, strings will be rendered without wrapping quotes if possible.
+	bareStrings bool
 }
 
 // FmtFlags enables conditional formatting in the pretty-printer.
@@ -36,20 +46,55 @@ type FmtFlags *fmtFlags
 // FmtSimple instructs the pretty-printer to produce
 // a straightforward representation, ideally using SQL
 // syntax that makes prettyprint+parse idempotent.
-var FmtSimple FmtFlags = &fmtFlags{showTypes: false}
-
-// FmtQualify instructs the pretty-printer to qualify names with the
-// table name.
-var FmtQualify FmtFlags = &fmtFlags{showTableAliases: true}
+var FmtSimple FmtFlags = &fmtFlags{}
 
 // FmtShowTypes instructs the pretty-printer to
 // annotate expressions with their resolved types.
 var FmtShowTypes FmtFlags = &fmtFlags{showTypes: true}
 
+// FmtSymbolicVars instructs the pretty-printer to
+// print indexedVars using symbolic notation, to
+// disambiguate columns.
+var FmtSymbolicVars FmtFlags = &fmtFlags{symbolicVars: true}
+
+// FmtBareStrings instructs the pretty-printer to print strings without
+// wrapping quotes, if possible.
+var FmtBareStrings FmtFlags = &fmtFlags{bareStrings: true}
+
 // FmtNormalizeTableNames returns FmtFlags that instructs the pretty-printer
 // to normalize all table names using the provided function.
-func FmtNormalizeTableNames(fn func(*NormalizableTableName) *TableName) FmtFlags {
-	return &fmtFlags{tableNameNormalizer: fn}
+func FmtNormalizeTableNames(base FmtFlags, fn func(*NormalizableTableName) *TableName) FmtFlags {
+	f := *base
+	f.tableNameNormalizer = fn
+	return &f
+}
+
+// FmtExpr returns FmtFlags that indicate how the pretty-printer
+// should format expressions.
+func FmtExpr(base FmtFlags, showTypes bool, symbolicVars bool, showTableAliases bool) FmtFlags {
+	f := *base
+	f.showTypes = showTypes
+	f.symbolicVars = symbolicVars
+	f.ShowTableAliases = showTableAliases
+	return &f
+}
+
+// FmtIndexedVarFormat returns FmtFlags that customizes the printing of
+// IndexedVars using the provided function.
+func FmtIndexedVarFormat(
+	base FmtFlags, fn func(buf *bytes.Buffer, f FmtFlags, c IndexedVarContainer, idx int),
+) FmtFlags {
+	f := *base
+	f.indexedVarFormat = fn
+	return &f
+}
+
+// FmtStarDatumFormat returns FmtFlags that customizes the printing of
+// StarDatums using the provided function.
+func FmtStarDatumFormat(base FmtFlags, fn func(buf *bytes.Buffer, f FmtFlags)) FmtFlags {
+	f := *base
+	f.starDatumFormat = fn
+	return &f
 }
 
 // NodeFormatter is implemented by nodes that can be pretty-printed.

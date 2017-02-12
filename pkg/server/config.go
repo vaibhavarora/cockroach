@@ -30,25 +30,33 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/elastic/gosigar"
+	"github.com/pkg/errors"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 )
 
 // Context defaults.
 const (
+	// On Azure, clock offsets between 250ms and 500ms are common. On
+	// AWS and GCE, clock offsets generally stay below 250ms.
+	// See comments on Config.MaxOffset for more on this setting.
+	defaultMaxOffset = 500 * time.Millisecond
+
 	defaultCGroupMemPath            = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
-	defaultMaxOffset                = 250 * time.Millisecond
 	defaultCacheSize                = 512 << 20 // 512 MB
+	defaultSQLMemoryPoolSize        = 512 << 20 // 512 MB
 	defaultScanInterval             = 10 * time.Minute
 	defaultConsistencyCheckInterval = 24 * time.Hour
-	defaultScanMaxIdleTime          = 5 * time.Second
+	defaultScanMaxIdleTime          = 200 * time.Millisecond
 	defaultMetricsSampleInterval    = 10 * time.Second
 	defaultTimeUntilStoreDead       = 5 * time.Minute
 	defaultStorePath                = "cockroach-data"
@@ -81,14 +89,22 @@ type Config struct {
 	// multiple comma-separated addresses, kept for backward-compatibility.
 	JoinList base.JoinListType
 
+	// RetryOptions controls the retry behavior of the server.
+	RetryOptions retry.Options
+
 	// CacheSize is the amount of memory in bytes to use for caching data.
 	// The value is split evenly between the stores if there are more than one.
 	CacheSize int64
 
-	// Parsed values.
+	// TimeSeriesServerConfig contains configuration specific to the time series
+	// server.
+	TimeSeriesServerConfig ts.ServerConfig
 
-	// Engines is the storage instances specified by Stores.
-	Engines []engine.Engine
+	// SQLMemoryPoolSize is the amount of memory in bytes that can be
+	// used by SQL clients to store row data in server RAM.
+	SQLMemoryPoolSize int64
+
+	// Parsed values.
 
 	// NodeAttributes is the parsed representation of Attrs.
 	NodeAttributes roachpb.Attributes
@@ -106,7 +122,12 @@ type Config struct {
 	// Environment Variable: COCKROACH_LINEARIZABLE
 	Linearizable bool
 
-	// Maximum clock offset for the cluster.
+	// Maximum allowed clock offset for the cluster. If observed clock
+	// offsets exceed this limit, inconsistency may result, and servers
+	// will panic to minimize the likelihood of inconsistent data.
+	// Increasing this value will increase time to recovery after
+	// failures, and increase the frequency and impact of
+	// ReadWithinUncertaintyIntervalError.
 	// Environment Variable: COCKROACH_MAX_OFFSET
 	MaxOffset time.Duration
 
@@ -162,6 +183,8 @@ type Config struct {
 	// to cluster metadata, such as DDL statements and range rebalancing
 	// actions.
 	EventLogEnabled bool
+
+	enginesCreated bool
 }
 
 // GetTotalMemory returns either the total system memory or if possible the
@@ -327,6 +350,7 @@ func MakeConfig() Config {
 		Config:                   new(base.Config),
 		MaxOffset:                defaultMaxOffset,
 		CacheSize:                defaultCacheSize,
+		SQLMemoryPoolSize:        defaultSQLMemoryPoolSize,
 		ScanInterval:             defaultScanInterval,
 		ScanMaxIdleTime:          defaultScanMaxIdleTime,
 		ConsistencyCheckInterval: defaultConsistencyCheckInterval,
@@ -341,8 +365,35 @@ func MakeConfig() Config {
 	return cfg
 }
 
-// InitStores initializes cfg.Engines based on cfg.Stores.
-func (cfg *Config) InitStores(stopper *stop.Stopper) error {
+// Engines is a container of engines, allowing convenient closing.
+type Engines []engine.Engine
+
+// Close closes all the Engines.
+// This method has a pointer receiver so that the following pattern works:
+//	func f() {
+//		engines := Engines(engineSlice)
+//		defer engines.Close()  // make sure the engines are Closed if this
+//		                       // function returns early.
+//		... do something with engines, pass ownership away...
+//		engines = nil  // neutralize the preceding defer
+//	}
+func (e *Engines) Close() {
+	for _, eng := range *e {
+		eng.Close()
+	}
+	*e = nil
+}
+
+// CreateEngines creates Engines based on the specs in ctx.Stores.
+func (cfg *Config) CreateEngines() (Engines, error) {
+	engines := Engines(nil)
+	defer engines.Close()
+
+	if cfg.enginesCreated {
+		return Engines{}, errors.Errorf("engines already created")
+	}
+	cfg.enginesCreated = true
+
 	cache := engine.NewRocksDBCache(cfg.CacheSize)
 	defer cache.Release()
 
@@ -354,56 +405,61 @@ func (cfg *Config) InitStores(stopper *stop.Stopper) error {
 	}
 	openFileLimitPerStore, err := setOpenFileLimit(physicalStores)
 	if err != nil {
-		return err
+		return Engines{}, err
 	}
 
+	skipSizeCheck := cfg.TestingKnobs.Store != nil &&
+		cfg.TestingKnobs.Store.(*storage.StoreTestingKnobs).SkipMinSizeCheck
 	for _, spec := range cfg.Stores.Specs {
 		var sizeInBytes = spec.SizeInBytes
 		if spec.InMemory {
 			if spec.SizePercent > 0 {
 				sysMem, err := GetTotalMemory()
 				if err != nil {
-					return fmt.Errorf("could not retrieve system memory")
+					return Engines{}, errors.Errorf("could not retrieve system memory")
 				}
 				sizeInBytes = int64(float64(sysMem) * spec.SizePercent / 100)
 			}
-			if sizeInBytes != 0 && sizeInBytes < base.MinimumStoreSize {
-				return fmt.Errorf("%f%% of memory is only %s bytes, which is below the minimum requirement of %s",
+			if sizeInBytes != 0 && !skipSizeCheck && sizeInBytes < base.MinimumStoreSize {
+				return Engines{}, errors.Errorf("%f%% of memory is only %s bytes, which is below the minimum requirement of %s",
 					spec.SizePercent, humanizeutil.IBytes(sizeInBytes), humanizeutil.IBytes(base.MinimumStoreSize))
 			}
-			cfg.Engines = append(cfg.Engines, engine.NewInMem(spec.Attributes, sizeInBytes, stopper))
+			engines = append(engines, engine.NewInMem(spec.Attributes, sizeInBytes))
 		} else {
 			if spec.SizePercent > 0 {
 				fileSystemUsage := gosigar.FileSystemUsage{}
 				if err := fileSystemUsage.Get(spec.Path); err != nil {
-					return err
+					return Engines{}, err
 				}
 				sizeInBytes = int64(float64(fileSystemUsage.Total) * spec.SizePercent / 100)
 			}
-			if sizeInBytes != 0 && sizeInBytes < base.MinimumStoreSize {
-				return fmt.Errorf("%f%% of %s's total free space is only %s bytes, which is below the minimum requirement of %s",
+			if sizeInBytes != 0 && !skipSizeCheck && sizeInBytes < base.MinimumStoreSize {
+				return Engines{}, errors.Errorf("%f%% of %s's total free space is only %s bytes, which is below the minimum requirement of %s",
 					spec.SizePercent, spec.Path, humanizeutil.IBytes(sizeInBytes), humanizeutil.IBytes(base.MinimumStoreSize))
 			}
-			cfg.Engines = append(
-				cfg.Engines,
-				engine.NewRocksDB(
-					spec.Attributes,
-					spec.Path,
-					cache,
-					sizeInBytes,
-					openFileLimitPerStore,
-					stopper,
-				),
+
+			eng, err := engine.NewRocksDB(
+				spec.Attributes,
+				spec.Path,
+				cache,
+				sizeInBytes,
+				openFileLimitPerStore,
 			)
+			if err != nil {
+				return Engines{}, err
+			}
+			engines = append(engines, eng)
 		}
 	}
 
-	if len(cfg.Engines) == 1 {
+	if len(engines) == 1 {
 		log.Infof(context.TODO(), "1 storage engine initialized")
 	} else {
-		log.Infof(context.TODO(), "%d storage engines initialized", len(cfg.Engines))
+		log.Infof(context.TODO(), "%d storage engines initialized", len(engines))
 	}
-	return nil
+	enginesCopy := engines
+	engines = nil
+	return enginesCopy, nil
 }
 
 // InitNode parses node attributes and initializes the gossip bootstrap

@@ -58,14 +58,14 @@ func TestAbortCacheEncodeDecode(t *testing.T) {
 	const rangeID = 123
 	testTxnID, err := uuid.FromString("0ce61c17-5eb4-4587-8c36-dcf4062ada4c")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	key := AbortCacheKey(rangeID, testTxnID)
 	txnID, err := DecodeAbortCacheKey(key, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !roachpb.TxnIDEqual(txnID, testTxnID) {
+	if txnID != testTxnID {
 		t.Fatalf("expected txnID %q, got %q", testTxnID, txnID)
 	}
 }
@@ -78,9 +78,9 @@ func TestKeyAddress(t *testing.T) {
 		{roachpb.Key{}, roachpb.RKeyMin},
 		{roachpb.Key("123"), roachpb.RKey("123")},
 		{RangeDescriptorKey(roachpb.RKey("foo")), roachpb.RKey("foo")},
-		{TransactionKey(roachpb.Key("baz"), uuid.NewV4()), roachpb.RKey("baz")},
-		{TransactionKey(roachpb.KeyMax, uuid.NewV4()), roachpb.RKeyMax},
-		{RangeDescriptorKey(roachpb.RKey(TransactionKey(roachpb.Key("doubleBaz"), uuid.NewV4()))), roachpb.RKey("doubleBaz")},
+		{TransactionKey(roachpb.Key("baz"), uuid.MakeV4()), roachpb.RKey("baz")},
+		{TransactionKey(roachpb.KeyMax, uuid.MakeV4()), roachpb.RKeyMax},
+		{RangeDescriptorKey(roachpb.RKey(TransactionKey(roachpb.Key("doubleBaz"), uuid.MakeV4()))), roachpb.RKey("doubleBaz")},
 		{nil, nil},
 	}
 	for i, test := range testCases {
@@ -99,7 +99,7 @@ func TestKeyAddressError(t *testing.T) {
 			StoreGossipKey(),
 		},
 		"local range ID key .* is not addressable": {
-			AbortCacheKey(0, uuid.NewV4()),
+			AbortCacheKey(0, uuid.MakeV4()),
 			RaftTombstoneKey(0),
 			RaftAppliedIndexKey(0),
 			RaftTruncatedStateKey(0),
@@ -258,7 +258,7 @@ func TestMetaScanBounds(t *testing.T) {
 	for i, test := range testCases {
 		resStart, resEnd, err := MetaScanBounds(test.key)
 
-		if !(test.expError == "" && err == nil || testutils.IsError(err, test.expError)) {
+		if !testutils.IsError(err, test.expError) {
 			t.Errorf("expected error: %s ; got %v", test.expError, err)
 		}
 
@@ -326,10 +326,8 @@ func TestMetaReverseScanBounds(t *testing.T) {
 	for i, test := range testCases {
 		resStart, resEnd, err := MetaReverseScanBounds(roachpb.RKey(test.key))
 
-		if err != nil && !testutils.IsError(err, test.expError) {
-			t.Errorf("expected error: %s ; got %v", test.expError, err)
-		} else if err == nil && test.expError != "" {
-			t.Errorf("expected error: %s", test.expError)
+		if !testutils.IsError(err, test.expError) {
+			t.Errorf("expected error %q ; got %v", test.expError, err)
 		}
 
 		if !resStart.Equal(test.expStart) || !resEnd.Equal(test.expEnd) {
@@ -518,7 +516,7 @@ func TestEnsureSafeSplitKey(t *testing.T) {
 	for i, d := range errorData {
 		_, err := EnsureSafeSplitKey(d.in)
 		if !testutils.IsError(err, d.err) {
-			t.Fatalf("%d: %s: expected %s, but got %v", i, d.in, d.err, err)
+			t.Fatalf("%d: %s: expected %q, but got %v", i, d.in, d.err, err)
 		}
 	}
 }

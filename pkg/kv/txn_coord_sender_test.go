@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/pkg/errors"
+	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -34,12 +36,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	uuid "github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // senderFn is a function that implements a Sender.
@@ -59,14 +60,14 @@ func teardownHeartbeats(tc *TxnCoordSender) {
 	if r := recover(); r != nil {
 		panic(r)
 	}
-	tc.Lock()
-	for _, tm := range tc.txns {
+	tc.txnMu.Lock()
+	for _, tm := range tc.txnMu.txns {
 		if tm.txnEnd != nil {
 			close(tm.txnEnd)
 			tm.txnEnd = nil
 		}
 	}
-	defer tc.Unlock()
+	defer tc.txnMu.Unlock()
 }
 
 // createTestDB creates a local test server and starts it. The caller
@@ -109,29 +110,31 @@ func TestTxnCoordSenderAddRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	txnID := *txn.Proto.ID
-	txnMeta, ok := sender.txns[txnID]
+	txnMeta, ok := sender.txnMu.txns[txnID]
 	if !ok {
 		t.Fatal("expected a transaction to be created on coordinator")
 	}
 	if !txn.Proto.Writing {
 		t.Fatal("txn is not marked as writing")
 	}
-	ts := atomic.LoadInt64(&txnMeta.lastUpdateNanos)
+	ts := txnMeta.getLastUpdate()
 
 	// Advance time and send another put request. Lock the coordinator
 	// to prevent a data race.
-	sender.Lock()
-	s.Manual.Set(1)
-	sender.Unlock()
+	sender.txnMu.Lock()
+	s.Manual.Increment(1)
+	sender.txnMu.Unlock()
 	if err := txn.Put(roachpb.Key("a"), []byte("value")); err != nil {
 		t.Fatal(err)
 	}
-	if len(sender.txns) != 1 {
-		t.Errorf("expected length of transactions map to be 1; got %d", len(sender.txns))
+	if len(sender.txnMu.txns) != 1 {
+		t.Errorf("expected length of transactions map to be 1; got %d", len(sender.txnMu.txns))
 	}
-	txnMeta = sender.txns[txnID]
-	if lu := atomic.LoadInt64(&txnMeta.lastUpdateNanos); ts >= lu || lu != s.Manual.UnixNano() {
-		t.Errorf("expected last update time to advance; got %d", lu)
+	txnMeta = sender.txnMu.txns[txnID]
+	if lu := txnMeta.getLastUpdate(); ts >= lu {
+		t.Errorf("expected last update time to advance past %d; got %d", ts, lu)
+	} else if un := s.Manual.UnixNano(); lu != un {
+		t.Errorf("expected last update time to equal %d; got %d", un, lu)
 	}
 }
 
@@ -178,7 +181,7 @@ func TestTxnInitialTimestamp(t *testing.T) {
 	txn := client.NewTxn(context.Background(), *s.DB)
 
 	// Request a specific timestamp.
-	refTimestamp := hlc.Timestamp{WallTime: 42, Logical: 69}
+	refTimestamp := s.Clock.Now().Add(42, 69)
 	txn.Proto.OrigTimestamp = refTimestamp
 
 	// Put request will create a new transaction.
@@ -257,7 +260,7 @@ func TestTxnCoordSenderKeyRanges(t *testing.T) {
 
 	// Verify that the transaction metadata contains only two entries
 	// in its "keys" range group. "a" and range "aa"-"c".
-	txnMeta, ok := sender.txns[txnID]
+	txnMeta, ok := sender.txnMu.txns[txnID]
 	if !ok {
 		t.Fatalf("expected a transaction to be created on coordinator")
 	}
@@ -285,8 +288,8 @@ func TestTxnCoordSenderMultipleTxns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(sender.txns) != 2 {
-		t.Errorf("expected length of transactions map to be 2; got %d", len(sender.txns))
+	if len(sender.txnMu.txns) != 2 {
+		t.Errorf("expected length of transactions map to be 2; got %d", len(sender.txnMu.txns))
 	}
 }
 
@@ -309,16 +312,16 @@ func TestTxnCoordSenderHeartbeat(t *testing.T) {
 	// Verify 3 heartbeats.
 	var heartbeatTS hlc.Timestamp
 	for i := 0; i < 3; i++ {
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			txn, pErr := getTxn(sender, &initialTxn.Proto)
 			if pErr != nil {
 				t.Fatal(pErr)
 			}
 			// Advance clock by 1ns.
 			// Locking the TxnCoordSender to prevent a data race.
-			sender.Lock()
+			sender.txnMu.Lock()
 			s.Manual.Increment(1)
-			sender.Unlock()
+			sender.txnMu.Unlock()
 			if txn.LastHeartbeat != nil && heartbeatTS.Less(*txn.LastHeartbeat) {
 				heartbeatTS = *txn.LastHeartbeat
 				return nil
@@ -340,10 +343,10 @@ func TestTxnCoordSenderHeartbeat(t *testing.T) {
 		}
 	}
 
-	util.SucceedsSoon(t, func() error {
-		sender.Lock()
-		defer sender.Unlock()
-		if txnMeta, ok := sender.txns[*initialTxn.Proto.ID]; !ok {
+	testutils.SucceedsSoon(t, func() error {
+		sender.txnMu.Lock()
+		defer sender.txnMu.Unlock()
+		if txnMeta, ok := sender.txnMu.txns[*initialTxn.Proto.ID]; !ok {
 			t.Fatal("transaction unregistered prematurely")
 		} else if txnMeta.txn.Status != roachpb.ABORTED {
 			return fmt.Errorf("transaction is not aborted")
@@ -373,10 +376,10 @@ func getTxn(coord *TxnCoordSender, txn *roachpb.Transaction) (*roachpb.Transacti
 }
 
 func verifyCleanup(key roachpb.Key, coord *TxnCoordSender, eng engine.Engine, t *testing.T) {
-	util.SucceedsSoon(t, func() error {
-		coord.Lock()
-		l := len(coord.txns)
-		coord.Unlock()
+	testutils.SucceedsSoon(t, func() error {
+		coord.txnMu.Lock()
+		l := len(coord.txnMu.txns)
+		coord.txnMu.Unlock()
 		if l != 0 {
 			return fmt.Errorf("expected empty transactions map; got %d", l)
 		}
@@ -462,7 +465,11 @@ func TestTxnCoordSenderEndTxn(t *testing.T) {
 				}
 			case 1:
 				// Past deadline.
-				assertTransactionAbortedError(t, err)
+				if statusError, ok := err.(*roachpb.TransactionStatusError); !ok {
+					t.Fatalf("expected TransactionStatusError but got %T: %s", err, err)
+				} else if expected := "transaction deadline exceeded"; statusError.Msg != expected {
+					t.Fatalf("expected %s, got %s", expected, statusError.Msg)
+				}
 			case 2:
 				// Equal deadline.
 				if err != nil {
@@ -497,12 +504,12 @@ func TestTxnCoordSenderAddIntentOnError(t *testing.T) {
 	if !ok {
 		t.Fatal(err)
 	}
-	sender.Lock()
+	sender.txnMu.Lock()
 	txnID := *txn.Proto.ID
-	intentSpans, _ := roachpb.MergeSpans(sender.txns[txnID].keys)
+	intentSpans, _ := roachpb.MergeSpans(sender.txnMu.txns[txnID].keys)
 	expSpans := []roachpb.Span{{Key: key, EndKey: []byte("")}}
 	equal := !reflect.DeepEqual(intentSpans, expSpans)
-	sender.Unlock()
+	sender.txnMu.Unlock()
 	if err := txn.Rollback(); err != nil {
 		t.Fatal(err)
 	}
@@ -623,17 +630,17 @@ func TestTxnCoordSenderGCTimeout(t *testing.T) {
 
 	// Now, advance clock past the default client timeout.
 	// Locking the TxnCoordSender to prevent a data race.
-	sender.Lock()
-	s.Manual.Set(defaultClientTimeout.Nanoseconds() + 1)
-	sender.Unlock()
+	sender.txnMu.Lock()
+	s.Manual.Increment(defaultClientTimeout.Nanoseconds() + 1)
+	sender.txnMu.Unlock()
 
 	txnID := *txn.Proto.ID
 
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		// Locking the TxnCoordSender to prevent a data race.
-		sender.Lock()
-		_, ok := sender.txns[txnID]
-		sender.Unlock()
+		sender.txnMu.Lock()
+		_, ok := sender.txnMu.txns[txnID]
+		sender.txnMu.Unlock()
 		if ok {
 			return errors.Errorf("expected garbage collection")
 		}
@@ -662,9 +669,9 @@ func TestTxnCoordSenderGCWithCancel(t *testing.T) {
 
 	// Now, advance clock past the default client timeout.
 	// Locking the TxnCoordSender to prevent a data race.
-	sender.Lock()
-	s.Manual.Set(defaultClientTimeout.Nanoseconds() + 1)
-	sender.Unlock()
+	sender.txnMu.Lock()
+	s.Manual.Increment(defaultClientTimeout.Nanoseconds() + 1)
+	sender.txnMu.Unlock()
 
 	txnID := *txn.Proto.ID
 
@@ -674,9 +681,9 @@ func TestTxnCoordSenderGCWithCancel(t *testing.T) {
 	// TODO(dan): Figure out how to run the heartbeat manually instead of this.
 	if err := util.RetryForDuration(1*time.Second, func() error {
 		// Locking the TxnCoordSender to prevent a data race.
-		sender.Lock()
-		_, ok := sender.txns[txnID]
-		sender.Unlock()
+		sender.txnMu.Lock()
+		_, ok := sender.txnMu.txns[txnID]
+		sender.txnMu.Unlock()
 		if !ok {
 			return nil
 		}
@@ -695,11 +702,11 @@ func TestTxnCoordSenderGCWithCancel(t *testing.T) {
 
 	// After the context is cancelled, the transaction should be cleaned up.
 	cancel()
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		// Locking the TxnCoordSender to prevent a data race.
-		sender.Lock()
-		_, ok := sender.txns[txnID]
-		sender.Unlock()
+		sender.txnMu.Lock()
+		_, ok := sender.txnMu.txns[txnID]
+		sender.txnMu.Unlock()
 		if ok {
 			return errors.Errorf("expected garbage collection")
 		}
@@ -790,10 +797,8 @@ func TestTxnCoordSenderTxnUpdatedOnError(t *testing.T) {
 		stopper := stop.NewStopper()
 
 		manual := hlc.NewManualClock(origTS.WallTime)
-		clock := hlc.NewClock(manual.UnixNano)
-		clock.SetMaxOffset(20)
+		clock := hlc.NewClock(manual.UnixNano, 20*time.Nanosecond)
 
-		ctx := tracing.WithTracer(context.Background(), tracing.NewTracer())
 		senderFunc := func(_ context.Context, ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
 			var reply *roachpb.BatchResponse
 			if test.pErr == nil {
@@ -801,7 +806,15 @@ func TestTxnCoordSenderTxnUpdatedOnError(t *testing.T) {
 			}
 			return reply, test.pErr
 		}
-		ts := NewTxnCoordSender(ctx, senderFn(senderFunc), clock, false, stopper, MakeTxnMetrics(metric.TestSampleInterval))
+		ambient := log.AmbientContext{Tracer: tracing.NewTracer()}
+		ts := NewTxnCoordSender(
+			ambient,
+			senderFn(senderFunc),
+			clock,
+			false,
+			stopper,
+			MakeTxnMetrics(metric.TestSampleInterval),
+		)
 		db := client.NewDB(ts)
 		txn := client.NewTxn(context.Background(), *db)
 		txn.InternalSetPriority(1)
@@ -851,11 +864,11 @@ func TestTxnCoordIdempotentCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sender.Lock()
+	sender.txnMu.Lock()
 	// Clean up twice successively.
 	sender.cleanupTxnLocked(context.Background(), txn.Proto)
 	sender.cleanupTxnLocked(context.Background(), txn.Proto)
-	sender.Unlock()
+	sender.txnMu.Unlock()
 
 	// For good measure, try to commit (which cleans up once more if it
 	// succeeds, which it may not if the previous cleanup has already
@@ -928,9 +941,8 @@ func TestTxnMultipleCoord(t *testing.T) {
 func TestTxnCoordSenderSingleRoundtripTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	manual := hlc.NewManualClock(0)
-	clock := hlc.NewClock(manual.UnixNano)
-	clock.SetMaxOffset(20)
+	manual := hlc.NewManualClock(123)
+	clock := hlc.NewClock(manual.UnixNano, 20*time.Nanosecond)
 
 	senderFunc := func(_ context.Context, ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
 		br := ba.CreateReply()
@@ -939,8 +951,10 @@ func TestTxnCoordSenderSingleRoundtripTxn(t *testing.T) {
 		br.Txn.Writing = true
 		return br, nil
 	}
-	ctx := tracing.WithTracer(context.Background(), tracing.NewTracer())
-	ts := NewTxnCoordSender(ctx, senderFn(senderFunc), clock, false, stopper, MakeTxnMetrics(metric.TestSampleInterval))
+	ambient := log.AmbientContext{Tracer: tracing.NewTracer()}
+	ts := NewTxnCoordSender(
+		ambient, senderFn(senderFunc), clock, false, stopper, MakeTxnMetrics(metric.TestSampleInterval),
+	)
 
 	// Stop the stopper manually, prior to trying the transaction. This has the
 	// effect of returning a NodeUnavailableError for any attempts at launching
@@ -966,19 +980,21 @@ func TestTxnCoordSenderErrorWithIntent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	manual := hlc.NewManualClock(0)
-	clock := hlc.NewClock(manual.UnixNano)
-	clock.SetMaxOffset(20)
+	manual := hlc.NewManualClock(123)
+	clock := hlc.NewClock(manual.UnixNano, 20*time.Nanosecond)
+
+	u := uuid.MakeV4()
 
 	testCases := []struct {
 		roachpb.Error
 		errMsg string
 	}{
 		{*roachpb.NewError(roachpb.NewTransactionRetryError()), "retry txn"},
-		{*roachpb.NewError(roachpb.NewTransactionPushError(roachpb.Transaction{
-			TxnMeta: enginepb.TxnMeta{
-				ID: uuid.NewV4(),
-			}})), "failed to push"},
+		{
+			*roachpb.NewError(roachpb.NewTransactionPushError(roachpb.Transaction{
+				TxnMeta: enginepb.TxnMeta{ID: &u}}),
+			), "failed to push",
+		},
 		{*roachpb.NewErrorf("testError"), "testError"},
 	}
 	for i, test := range testCases {
@@ -991,8 +1007,15 @@ func TestTxnCoordSenderErrorWithIntent(t *testing.T) {
 				pErr.SetTxn(&txn)
 				return nil, pErr
 			}
-			ctx := tracing.WithTracer(context.Background(), tracing.NewTracer())
-			ts := NewTxnCoordSender(ctx, senderFn(senderFunc), clock, false, stopper, MakeTxnMetrics(metric.TestSampleInterval))
+			ambient := log.AmbientContext{Tracer: tracing.NewTracer()}
+			ts := NewTxnCoordSender(
+				ambient,
+				senderFn(senderFunc),
+				clock,
+				false,
+				stopper,
+				MakeTxnMetrics(metric.TestSampleInterval),
+			)
 
 			var ba roachpb.BatchRequest
 			key := roachpb.Key("test")
@@ -1006,9 +1029,9 @@ func TestTxnCoordSenderErrorWithIntent(t *testing.T) {
 			}
 
 			defer teardownHeartbeats(ts)
-			ts.Lock()
-			defer ts.Unlock()
-			if len(ts.txns) != 1 {
+			ts.txnMu.Lock()
+			defer ts.txnMu.Unlock()
+			if len(ts.txnMu.txns) != 1 {
 				t.Errorf("%d: expected transaction to be tracked", i)
 			}
 		}()
@@ -1033,7 +1056,7 @@ func TestTxnCoordSenderReleaseTxnMeta(t *testing.T) {
 
 	txnID := *txn.Proto.ID
 
-	if _, ok := sender.txns[txnID]; ok {
+	if _, ok := sender.txnMu.txns[txnID]; ok {
 		t.Fatal("expected TxnCoordSender has released the txn")
 	}
 }
@@ -1043,8 +1066,8 @@ func TestTxnCoordSenderReleaseTxnMeta(t *testing.T) {
 func TestTxnCoordSenderNoDuplicateIntents(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	manual := hlc.NewManualClock(0)
-	clock := hlc.NewClock(manual.UnixNano)
+	manual := hlc.NewManualClock(123)
+	clock := hlc.NewClock(manual.UnixNano, time.Nanosecond)
 
 	var expectedIntents []roachpb.Span
 
@@ -1062,8 +1085,15 @@ func TestTxnCoordSenderNoDuplicateIntents(t *testing.T) {
 		br.Txn.Writing = true
 		return br, nil
 	}
-	ctx := tracing.WithTracer(context.Background(), tracing.NewTracer())
-	ts := NewTxnCoordSender(ctx, senderFn(senderFunc), clock, false, stopper, MakeTxnMetrics(metric.TestSampleInterval))
+	ambient := log.AmbientContext{Tracer: tracing.NewTracer()}
+	ts := NewTxnCoordSender(
+		ambient,
+		senderFn(senderFunc),
+		clock,
+		false,
+		stopper,
+		MakeTxnMetrics(metric.TestSampleInterval),
+	)
 
 	defer stopper.Stop()
 	defer teardownHeartbeats(ts)
@@ -1117,7 +1147,7 @@ func checkTxnMetrics(
 ) {
 	metrics := sender.metrics
 
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		testcases := []struct {
 			name string
 			a, e int64
@@ -1162,8 +1192,8 @@ func checkTxnMetrics(
 func setupMetricsTest(t *testing.T) (*hlc.ManualClock, *TxnCoordSender, func()) {
 	s, testSender := createTestDB(t)
 	txnMetrics := MakeTxnMetrics(metric.TestSampleInterval)
-	ctx := tracing.WithTracer(context.Background(), tracing.NewTracer())
-	sender := NewTxnCoordSender(ctx, testSender.wrapped, s.Clock, false, s.Stopper, txnMetrics)
+	ambient := log.AmbientContext{Tracer: tracing.NewTracer()}
+	sender := NewTxnCoordSender(ambient, testSender.wrapped, s.Clock, false, s.Stopper, txnMetrics)
 
 	return s.Manual, sender, func() {
 		teardownHeartbeats(sender)

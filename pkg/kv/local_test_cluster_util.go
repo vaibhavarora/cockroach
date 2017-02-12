@@ -27,9 +27,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	opentracing "github.com/opentracing/opentracing-go"
 )
 
@@ -41,11 +41,11 @@ type localTestClusterTransport struct {
 	latency time.Duration
 }
 
-func (l *localTestClusterTransport) SendNext(done chan<- BatchCall) {
+func (l *localTestClusterTransport) SendNext(ctx context.Context, done chan<- BatchCall) {
 	if l.latency > 0 {
 		time.Sleep(l.latency)
 	}
-	l.Transport.SendNext(done)
+	l.Transport.SendNext(ctx, done)
 }
 
 // InitSenderForLocalTestCluster initializes a TxnCoordSender that can be used
@@ -62,7 +62,7 @@ func InitSenderForLocalTestCluster(
 	retryOpts := base.DefaultRetryOptions()
 	retryOpts.Closer = stopper.ShouldQuiesce()
 	senderTransportFactory := SenderTransportFactory(tracer, stores)
-	distSender := NewDistSender(&DistSenderConfig{
+	distSender := NewDistSender(DistSenderConfig{
 		Clock:           clock,
 		RPCRetryOptions: &retryOpts,
 		nodeDescriptor:  nodeDesc,
@@ -80,7 +80,13 @@ func InitSenderForLocalTestCluster(
 		},
 	}, gossip)
 
-	ctx := tracing.WithTracer(context.Background(), tracer)
-	return NewTxnCoordSender(ctx, distSender, clock, false, /* !linearizable */
-		stopper, MakeTxnMetrics(metric.TestSampleInterval))
+	ambient := log.AmbientContext{Tracer: tracer}
+	return NewTxnCoordSender(
+		ambient,
+		distSender,
+		clock,
+		false, /* !linearizable */
+		stopper,
+		MakeTxnMetrics(metric.TestSampleInterval),
+	)
 }

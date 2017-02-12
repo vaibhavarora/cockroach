@@ -71,13 +71,25 @@ func TestTypeCheck(t *testing.T) {
 		`CASE 1 WHEN 1 THEN (1, 2) ELSE (1, 3) END`,
 		`1 BETWEEN 2 AND 3`,
 		`COUNT(3)`,
+		`ARRAY['a', 'b', 'c']`,
+		`ARRAY[1.5, 2.5, 3.5]`,
+		`ARRAY[NULL]`,
+		`1 = ANY ARRAY[1.5, 2.5, 3.5]`,
+		`true = SOME (ARRAY[true, false])`,
+		`1.3 = ALL ARRAY[1, 2, 3]`,
+		`1.3 = ALL ((ARRAY[]))`,
+		`NULL = ALL ARRAY[1.5, 2.5, 3.5]`,
+		`NULL = ALL ARRAY[NULL, NULL]`,
+		`1 = ALL NULL`,
+		`'a' = ALL CURRENT_SCHEMAS(true)`,
+		`NULL = ALL CURRENT_SCHEMAS(true)`,
 	}
 	for _, d := range testData {
 		expr, err := ParseExprTraditional(d)
 		if err != nil {
 			t.Fatalf("%s: %v", d, err)
 		}
-		if _, err := TypeCheck(expr, nil, NoTypePreference); err != nil {
+		if _, err := TypeCheck(expr, nil, TypeAny); err != nil {
 			t.Errorf("%s: unexpected error %s", d, err)
 		}
 	}
@@ -101,10 +113,11 @@ func TestTypeCheckError(t *testing.T) {
 		{`'a' OR true`, `incompatible OR argument type: string`},
 		{`(1, 2) OR true`, `incompatible OR argument type: tuple`},
 		{`NOT 1`, `incompatible NOT argument type: int`},
-		{`lower()`, `unknown signature for lower: lower()`},
-		{`lower(1, 2)`, `unknown signature for lower: lower(int, int)`},
-		{`lower(1)`, `unknown signature for lower: lower(int)`},
-		{`lower('FOO') OVER ()`, `OVER specified, but lower is not a window function nor an aggregate function`},
+		{`lower()`, `unknown signature: lower()`},
+		{`lower(1, 2)`, `unknown signature: lower(int, int)`},
+		{`lower(1)`, `unknown signature: lower(int)`},
+		{`lower('FOO') OVER ()`, `OVER specified, but lower() is neither a window function nor an aggregate function`},
+		{`count(1) FILTER (WHERE true) OVER ()`, `FILTER within a window function call is not yet supported`},
 		{`CASE 'one' WHEN 1 THEN 1 WHEN 'two' THEN 2 END`, `incompatible condition type`},
 		{`CASE 1 WHEN 1 THEN 'one' WHEN 2 THEN 2 END`, `incompatible value type`},
 		{`CASE 1 WHEN 1 THEN 'one' ELSE 2 END`, `incompatible value type`},
@@ -112,19 +125,26 @@ func TestTypeCheckError(t *testing.T) {
 		{`(1, 2) = (1, 'a')`, `tuples (1, 2), (1, 'a') are not the same type: expected 2 to be of type string, found type int`},
 		{`1 IN ('a', 'b')`, `unsupported comparison operator: 1 IN ('a', 'b'): expected 1 to be of type string, found type int`},
 		{`1 IN (1, 'a')`, `unsupported comparison operator: 1 IN (1, 'a'): expected 1 to be of type string, found type int`},
+		{`1 = ANY 2`, `unsupported comparison operator: 1 = ANY 2: op ANY array requires array on right side`},
+		{`1 = ANY ARRAY[2, '3']`, `unsupported comparison operator: 1 ANY = ARRAY[2, '3']: expected 1 to be of type string, found type int`},
+		{`1 = ALL CURRENT_SCHEMAS(true)`, `unsupported comparison operator: <int> = ALL <string[]>`},
 		{`1.0 BETWEEN 2 AND '5'`, `expected 1.0 to be of type string, found type decimal`},
 		{`IF(1, 2, 3)`, `incompatible IF condition type: int`},
 		{`IF(true, 2, '5')`, `incompatible IF expressions: expected 2 to be of type string, found type int`},
 		{`IFNULL(1, '5')`, `incompatible IFNULL expressions: expected 1 to be of type string, found type int`},
 		{`NULLIF(1, '5')`, `incompatible NULLIF expressions: expected 1 to be of type string, found type int`},
 		{`COALESCE(1, 2, 3, 4, '5')`, `incompatible COALESCE expressions: expected 1 to be of type string, found type int`},
+		{`ARRAY[]`, `cannot determine type of empty array`},
+		{`ANNOTATE_TYPE('a', int)`, `incompatible type annotation for 'a' as int, found type: string`},
+		{`ANNOTATE_TYPE(ANNOTATE_TYPE(1, int), decimal)`, `incompatible type annotation for ANNOTATE_TYPE(1, INT) as decimal, found type: int`},
+		{`3:::int[]`, `incompatible type annotation for 3 as int[], found type: int`},
 	}
 	for _, d := range testData {
 		expr, err := ParseExprTraditional(d.expr)
 		if err != nil {
 			t.Fatalf("%s: %v", d.expr, err)
 		}
-		if _, err := TypeCheck(expr, nil, NoTypePreference); !testutils.IsError(err, regexp.QuoteMeta(d.expected)) {
+		if _, err := TypeCheck(expr, nil, TypeAny); !testutils.IsError(err, regexp.QuoteMeta(d.expected)) {
 			t.Errorf("%s: expected %s, but found %v", d.expr, d.expected, err)
 		}
 	}
@@ -227,11 +247,15 @@ func attemptTypeCheckSameTypedExprs(t *testing.T, idx int, test sameTypedExprsTe
 	forEachPerm(test.exprs, 0, func(exprs []copyableExpr) {
 		ctx := MakeSemaContext()
 		ctx.Placeholders.SetTypes(clonePlaceholderTypes(test.ptypes))
-		_, typ, err := typeCheckSameTypedExprs(&ctx, test.desired, buildExprs(exprs)...)
+		desired := TypeAny
+		if test.desired != nil {
+			desired = test.desired
+		}
+		_, typ, err := typeCheckSameTypedExprs(&ctx, desired, buildExprs(exprs)...)
 		if err != nil {
 			t.Errorf("%d: unexpected error returned from typeCheckSameTypedExprs: %v", idx, err)
 		} else {
-			if !typ.Equal(test.expectedType) {
+			if !typ.Equivalent(test.expectedType) {
 				t.Errorf("%d: expected type %s when type checking %s, found %s",
 					idx, test.expectedType, buildExprs(exprs), typ)
 			}
@@ -364,8 +388,12 @@ func TestTypeCheckSameTypedExprsError(t *testing.T) {
 	for i, d := range testData {
 		ctx := MakeSemaContext()
 		ctx.Placeholders.SetTypes(d.ptypes)
+		desired := TypeAny
+		if d.desired != nil {
+			desired = d.desired
+		}
 		forEachPerm(d.exprs, 0, func(exprs []copyableExpr) {
-			if _, _, err := typeCheckSameTypedExprs(&ctx, d.desired, buildExprs(exprs)...); !testutils.IsError(err, d.expectedErr) {
+			if _, _, err := typeCheckSameTypedExprs(&ctx, desired, buildExprs(exprs)...); !testutils.IsError(err, d.expectedErr) {
 				t.Errorf("%d: expected %s, but found %v", i, d.expectedErr, err)
 			}
 		})

@@ -27,12 +27,16 @@ INSERT INTO t VALUES
   (8, 3, 2, '32'),
   (9, 3, 3, '33')
 
-query ITT
-EXPLAIN SELECT * FROM t WHERE b = 2 AND c % 2 = 0
+query ITTT
+EXPLAIN(EXPRS) SELECT * FROM t WHERE b = 2 AND c % 2 = 0
 ----
-0 index-join
-1 scan       t@bc /2-/3
-1 scan       t@primary
+0  index-join
+1  scan
+1                 table     t@bc
+1                 spans     /2-/3
+1                 filter    (c % 2) = 0
+1  scan
+1                 table     t@primary
 
 # We do NOT look up the table row for '21' and '23'.
 query ITTT
@@ -46,12 +50,16 @@ EXPLAIN (DEBUG) SELECT * FROM t WHERE b = 2 AND c % 2 = 0
 0 /t/primary/5/s '22' ROW
 2 /t/bc/2/3/6    NULL FILTERED
 
-query ITT
-EXPLAIN SELECT * FROM t WHERE b = 2 AND c != b
+query ITTT
+EXPLAIN(EXPRS) SELECT * FROM t WHERE b = 2 AND c != b
 ----
-0 index-join
-1 scan       t@bc /2-/3
-1 scan       t@primary
+0  index-join
+1  scan
+1                 table     t@bc
+1                 spans     /2-/3
+1                 filter    c != b
+1  scan
+1                 table     t@primary
 
 # We do NOT look up the table row for '22'.
 query ITTT
@@ -107,3 +115,26 @@ EXPLAIN (DEBUG) SELECT * FROM t WHERE b > 1 AND ((c = b+1 AND s != '23') OR (a >
 2 /t/primary/9/b 3    PARTIAL
 2 /t/primary/9/c 3    PARTIAL
 2 /t/primary/9/s '33' ROW
+
+# Check that splitting of the expression filter does not mistakenly
+# bring non-indexed columns (s) under the index scanNode. (#12582)
+# To test this we need an expression containing non-indexed
+# columns that disappears during range simplification.
+query ITTTTT
+EXPLAIN(VERBOSE) SELECT a FROM t WHERE b = 2 OR ((b BETWEEN 2 AND 1) AND ((s != 'a') OR (s = 'a')))
+----
+0  render                           (a)
+0              render 0  test.t.a
+1  index-join                       (a, b[omitted], c[omitted], s[omitted])  +b,+c,+a,unique
+2  scan                             (a, b[omitted], c[omitted], s[omitted])  +b,+c,+a,unique
+2              table     t@bc
+2              spans     /2-/3
+2  scan                             (a, b[omitted], c[omitted], s[omitted])  +a,unique
+2              table     t@primary
+
+query I
+SELECT a FROM t WHERE b = 2 OR ((b BETWEEN 2 AND 1) AND ((s != 'a') OR (s = 'a')))
+----
+4
+5
+6

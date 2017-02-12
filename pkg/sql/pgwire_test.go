@@ -29,6 +29,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -40,11 +42,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/lib/pq"
-	"github.com/pkg/errors"
 )
 
 func trivialQuery(pgURL url.URL) error {
@@ -94,16 +93,20 @@ func TestPGWire(t *testing.T) {
 
 		pgBaseURL := url.URL{
 			Scheme: "postgres",
+			User:   url.User(security.RootUser),
 			Host:   net.JoinHostPort(host, port),
 		}
+
 		if err := trivialQuery(pgBaseURL); err != nil {
 			if insecure {
 				if err != pq.ErrSSLNotSupported {
 					t.Error(err)
 				}
 			} else {
-				if !testutils.IsError(err, "no client certificates in request") {
-					t.Error(err)
+				// No certificates provided in secure mode defaults to password
+				// authentication. This is disallowed for security.RootUser.
+				if !testutils.IsError(err, fmt.Sprintf("pq: user %s must use certificate authentication instead of password authentication", security.RootUser)) {
+					t.Errorf("unexpected error: %v", err)
 				}
 			}
 		}
@@ -132,8 +135,8 @@ func TestPGWire(t *testing.T) {
 					t.Error(err)
 				}
 			} else {
-				if !testutils.IsError(err, "no client certificates in request") {
-					t.Error(err)
+				if !testutils.IsError(err, fmt.Sprintf("pq: user %s must use certificate authentication instead of password authentication", security.RootUser)) {
+					t.Errorf("unexpected error: %v", err)
 				}
 			}
 		}
@@ -153,8 +156,10 @@ func TestPGWire(t *testing.T) {
 					}
 				} else {
 					if optUser == server.TestUser {
-						if err != nil {
-							t.Error(err)
+						// The user TestUser has not been created so authentication
+						// will fail with a valid certificate.
+						if !testutils.IsError(err, fmt.Sprintf("pq: user %s does not exist", server.TestUser)) {
+							t.Errorf("unexpected error: %v", err)
 						}
 					} else {
 						if !testutils.IsError(err, `requested user is \w+, but certificate is for \w+`) {
@@ -214,7 +219,7 @@ func TestPGWireDBName(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
 
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), security.RootUser, "TestPGWireDBName")
+	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), "TestPGWireDBName", url.User(security.RootUser))
 	pgURL.Path = "foo"
 	defer cleanupFn()
 	{
@@ -249,7 +254,7 @@ func TestPGPrepareFail(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
 
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), security.RootUser, "TestPGPrepareFail")
+	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), "TestPGPrepareFail", url.User(security.RootUser))
 	defer cleanupFn()
 
 	db, err := gosql.Open("postgres", pgURL.String())
@@ -272,6 +277,7 @@ func TestPGPrepareFail(t *testing.T) {
 		"SELECT 3 + CASE (4) WHEN 4 THEN $1 END":    "pq: could not determine data type of placeholder $1",
 		"SELECT ($1 + $1) + CURRENT_DATE()":         "pq: could not determine data type of placeholder $1",
 		"SELECT $1 + $2, $2::FLOAT":                 "pq: could not determine data type of placeholder $1",
+		"SELECT $1[2]":                              "pq: could not determine data type of placeholder $1",
 		"SELECT ($1 + 2) + ($1 + 2.5::FLOAT)":       "pq: unsupported binary operator: <int> + <float>",
 	}
 
@@ -296,6 +302,11 @@ type preparedQueryTest struct {
 	results [][]interface{}
 	others  int
 	error   string
+	// preparedError determines the error to expect upon stmt.Query()
+	// (executing a prepared statement), as opposed to db.Query()
+	// (direct query without prepare). If left empty, error above is
+	// used for both.
+	preparedError string
 }
 
 func (p preparedQueryTest) SetArgs(v ...interface{}) preparedQueryTest {
@@ -315,6 +326,11 @@ func (p preparedQueryTest) Others(o int) preparedQueryTest {
 
 func (p preparedQueryTest) Error(err string) preparedQueryTest {
 	p.error = err
+	return p
+}
+
+func (p preparedQueryTest) PreparedError(err string) preparedQueryTest {
+	p.preparedError = err
 	return p
 }
 
@@ -355,6 +371,13 @@ func TestPGPreparedQuery(t *testing.T) {
 			baseTest.SetArgs(3.1).Error(`pq: error in argument for $1: strconv.ParseBool: parsing "3.1": invalid syntax`),
 			baseTest.SetArgs("").Error(`pq: error in argument for $1: strconv.ParseBool: parsing "": invalid syntax`),
 		},
+		"SELECT CASE 40+2 WHEN 42 THEN 51 ELSE $1::INT END": {
+			baseTest.Error(
+				"pq: no value provided for placeholder: $1",
+			).PreparedError(
+				"sql: statement expects 1 inputs; got 0",
+			),
+		},
 		"SELECT $1::int > $2::float": {
 			baseTest.SetArgs(2, 1).Results(true),
 			baseTest.SetArgs("2", 1).Results(true),
@@ -392,6 +415,10 @@ func TestPGPreparedQuery(t *testing.T) {
 			baseTest.SetArgs(2, 3).Results(2),
 			baseTest.SetArgs(true, 0).Error(`pq: error in argument for $1: strconv.ParseInt: parsing "true": invalid syntax`),
 		},
+		// TODO(nvanbenschoten) Blocked on #10713.
+		// "SELECT $1[2] LIKE 'b'": {
+		// 	baseTest.SetArgs(pq.Array([]string{"a", "b", "c"})).Results(true),
+		// },
 		"SHOW DATABASE": {
 			baseTest.Results(""),
 		},
@@ -404,13 +431,17 @@ func TestPGPreparedQuery(t *testing.T) {
 				Results("hashedPassword", "BYTES", true, gosql.NullBool{}),
 		},
 		"SHOW DATABASES": {
-			baseTest.Results("information_schema").Results("pg_catalog").Results("d").Results("system"),
+			baseTest.Results("d").Results("information_schema").Results("pg_catalog").Results("system"),
 		},
 		"SHOW GRANTS ON system.users": {
-			baseTest.Results("users", security.RootUser, "DELETE,GRANT,INSERT,SELECT,UPDATE"),
+			baseTest.Results("users", security.RootUser, "DELETE").
+				Results("users", security.RootUser, "GRANT").
+				Results("users", security.RootUser, "INSERT").
+				Results("users", security.RootUser, "SELECT").
+				Results("users", security.RootUser, "UPDATE"),
 		},
 		"SHOW INDEXES FROM system.users": {
-			baseTest.Results("users", "primary", true, 1, "username", "ASC", false),
+			baseTest.Results("users", "primary", true, 1, "username", "ASC", false, false),
 		},
 		"SHOW TABLES FROM system": {
 			baseTest.Results("descriptor").Others(7),
@@ -421,8 +452,12 @@ func TestPGPreparedQuery(t *testing.T) {
 		"SHOW TIME ZONE": {
 			baseTest.Results("UTC"),
 		},
+		"SHOW USERS": {
+			baseTest,
+		},
 		"HELP LEAST": {
-			baseTest.Results("least", "<T>... -> <T>", "Comparison", ""),
+			baseTest.Results("least", "(anyelement...) -> anyelement", "Comparison",
+				"Returns the element with the lowest value."),
 		},
 		"SELECT (SELECT 1+$1)": {
 			baseTest.SetArgs(1).Results(2),
@@ -500,6 +535,11 @@ func TestPGPreparedQuery(t *testing.T) {
 		},
 		"SELECT a FROM d.T WHERE a = $1 AND (SELECT a >= $2 FROM d.T WHERE a = $1)": {
 			baseTest.SetArgs(10, 5).Results(10),
+			baseTest.Error(
+				"pq: no value provided for placeholders: $1, $2",
+			).PreparedError(
+				"sql: statement expects 2 inputs; got 0",
+			),
 		},
 		"SELECT * FROM (VALUES (1), (2), (3), (4)) AS foo (a) LIMIT $1 OFFSET $2": {
 			baseTest.SetArgs(1, 0).Results(1),
@@ -510,7 +550,7 @@ func TestPGPreparedQuery(t *testing.T) {
 			baseTest.SetArgs(12).Results(15),
 			baseTest.SetArgs(-12).Results(-9),
 		},
-		"SELECT DATE '2001-01-02' + ($1 + $1)": {
+		"SELECT DATE '2001-01-02' + ($1 + $1:::int)": {
 			baseTest.SetArgs(12).Results("2001-01-26T00:00:00Z"),
 		},
 		"SELECT TO_HEX(~(~$1))": {
@@ -552,7 +592,7 @@ func TestPGPreparedQuery(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
 
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), security.RootUser, "TestPGPreparedQuery")
+	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), "TestPGPreparedQuery", url.User(security.RootUser))
 	defer cleanupFn()
 
 	db, err := gosql.Open("postgres", pgURL.String())
@@ -561,7 +601,7 @@ func TestPGPreparedQuery(t *testing.T) {
 	}
 	defer db.Close()
 
-	runTests := func(query string, tests []preparedQueryTest, queryFunc func(...interface{}) (*gosql.Rows, error)) {
+	runTests := func(query string, prepared bool, tests []preparedQueryTest, queryFunc func(...interface{}) (*gosql.Rows, error)) {
 		for _, test := range tests {
 			if testing.Verbose() || log.V(1) {
 				log.Infof(context.Background(), "query: %s", query)
@@ -570,8 +610,14 @@ func TestPGPreparedQuery(t *testing.T) {
 			if err != nil {
 				if test.error == "" {
 					t.Errorf("%s: %v: unexpected error: %s", query, test.qargs, err)
-				} else if err.Error() != test.error {
-					t.Errorf("%s: %v: expected error: %s, got %s", query, test.qargs, test.error, err)
+				} else {
+					expectedErr := test.error
+					if prepared && test.preparedError != "" {
+						expectedErr = test.preparedError
+					}
+					if err.Error() != expectedErr {
+						t.Errorf("%s: %v: expected error: %s, got %s", query, test.qargs, expectedErr, err)
+					}
 				}
 				continue
 			}
@@ -647,7 +693,7 @@ CREATE TABLE d.str (s STRING, b BYTES);`
 	}
 
 	for query, tests := range queryTests {
-		runTests(query, tests, func(args ...interface{}) (*gosql.Rows, error) {
+		runTests(query, false, tests, func(args ...interface{}) (*gosql.Rows, error) {
 			return db.Query(query, args...)
 		})
 	}
@@ -659,7 +705,7 @@ CREATE TABLE d.str (s STRING, b BYTES);`
 			func() {
 				defer stmt.Close()
 
-				runTests(query, tests, stmt.Query)
+				runTests(query, true, tests, stmt.Query)
 			}()
 		}
 	}
@@ -836,7 +882,7 @@ func TestPGPreparedExec(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
 
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), security.RootUser, "TestPGPreparedExec")
+	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), "TestPGPreparedExec", url.User(security.RootUser))
 	defer cleanupFn()
 
 	db, err := gosql.Open("postgres", pgURL.String())
@@ -857,14 +903,9 @@ func TestPGPreparedExec(t *testing.T) {
 					t.Errorf("%s: %v: expected error: %s, got %s", query, test.qargs, test.error, err)
 				}
 			} else {
-				if rowsAffected, err := result.RowsAffected(); err != nil {
-					if test.rowsAffectedErr == "" {
-						t.Errorf("%s: %v: unexpected error: %s", query, test.qargs, err)
-					} else if !testutils.IsError(err, test.rowsAffectedErr) {
-						t.Errorf("%s: %v: expected %s, got %s", query, test.qargs, test.rowsAffectedErr, err)
-					}
-				} else if test.rowsAffectedErr != "" {
-					t.Errorf("%s: %v: expected error: %s", query, test.qargs, test.rowsAffectedErr)
+				rowsAffected, err := result.RowsAffected()
+				if !testutils.IsError(err, test.rowsAffectedErr) {
+					t.Errorf("%s: %v: expected %q, got %v", query, test.qargs, test.rowsAffectedErr, err)
 				} else if rowsAffected != test.rowsAffected {
 					t.Errorf("%s: %v: expected %v, got %v", query, test.qargs, test.rowsAffected, rowsAffected)
 				}
@@ -901,7 +942,7 @@ func TestPGPrepareNameQual(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
 
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), security.RootUser, "TestPGPrepareNameQual")
+	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), "TestPGPrepareNameQual", url.User(security.RootUser))
 	defer cleanupFn()
 
 	db, err := gosql.Open("postgres", pgURL.String())
@@ -951,8 +992,8 @@ func TestCmdCompleteVsEmptyStatements(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
 
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), security.RootUser,
-		"TestCmdCompleteVsEmptyStatements")
+	pgURL, cleanupFn := sqlutils.PGUrl(
+		t, s.ServingAddr(), "TestCmdCompleteVsEmptyStatements", url.User(security.RootUser))
 	defer cleanupFn()
 
 	db, err := gosql.Open("postgres", pgURL.String())
@@ -995,7 +1036,7 @@ func TestPGCommandTags(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
 
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), security.RootUser, "TestPGCommandTags")
+	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), "TestPGCommandTags", url.User(security.RootUser))
 	defer cleanupFn()
 
 	db, err := gosql.Open("postgres", pgURL.String())
@@ -1117,11 +1158,12 @@ func TestSQLNetworkMetrics(t *testing.T) {
 	defer s.Stopper().Stop()
 
 	// Setup pgwire client.
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), security.RootUser,
-		"TestSQLNetworkMetrics")
+	pgURL, cleanupFn := sqlutils.PGUrl(
+		t, s.ServingAddr(), "TestSQLNetworkMetrics", url.User(security.RootUser))
 	defer cleanupFn()
 
 	const minbytes = 20
+	const maxbytes = 350
 
 	// Make sure we're starting at 0.
 	if _, _, err := checkSQLNetworkMetrics(s, 0, 0, 0, 0); err != nil {
@@ -1132,7 +1174,7 @@ func TestSQLNetworkMetrics(t *testing.T) {
 	if err := trivialQuery(pgURL); err != nil {
 		t.Fatal(err)
 	}
-	bytesIn, bytesOut, err := checkSQLNetworkMetrics(s, minbytes, minbytes, 300, 300)
+	bytesIn, bytesOut, err := checkSQLNetworkMetrics(s, minbytes, minbytes, maxbytes, maxbytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1141,14 +1183,14 @@ func TestSQLNetworkMetrics(t *testing.T) {
 	}
 
 	// A second query should give us more I/O.
-	_, _, err = checkSQLNetworkMetrics(s, bytesIn+minbytes, bytesOut+minbytes, 300, 300)
+	_, _, err = checkSQLNetworkMetrics(s, bytesIn+minbytes, bytesOut+minbytes, maxbytes, maxbytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Verify connection counter.
 	expectConns := func(n int) {
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			if conns := s.MustGetSQLNetworkCounter(pgwire.MetaConns.Name); conns != int64(n) {
 				return errors.Errorf("connections %d != expected %d", conns, n)
 			}
@@ -1184,7 +1226,7 @@ func TestPrepareSyntax(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop()
 
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), security.RootUser, "TestPrepareSyntax")
+	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), "TestPrepareSyntax", url.User(security.RootUser))
 	defer cleanupFn()
 
 	db, err := gosql.Open("postgres", pgURL.String())
@@ -1244,6 +1286,7 @@ func TestPGWireOverUnixSocket(t *testing.T) {
 	}
 	pgURL := url.URL{
 		Scheme:   "postgres",
+		User:     url.User(security.RootUser),
 		Host:     ":123456",
 		RawQuery: options.Encode(),
 	}
@@ -1251,4 +1294,91 @@ func TestPGWireOverUnixSocket(t *testing.T) {
 	if err := trivialQuery(pgURL); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestPGWireAuth(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop()
+	{
+		unicodeUser := "♫"
+
+		t.Run("RootUserAuth", func(t *testing.T) {
+			// Authenticate as root with certificate and expect success.
+			rootPgURL, cleanupFn := sqlutils.PGUrl(
+				t, s.ServingAddr(), "TestPGWireAuth", url.User(security.RootUser))
+			defer cleanupFn()
+			if err := trivialQuery(rootPgURL); err != nil {
+				t.Fatal(err)
+			}
+
+			// Create server.TestUser with a unicode password and a user with a
+			// unicode username for later tests.
+			// Only root is allowed to create users.
+			db, err := gosql.Open("postgres", rootPgURL.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			if _, err := db.Exec(fmt.Sprintf("CREATE USER %s;", server.TestUser)); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := db.Exec(fmt.Sprintf("CREATE USER %s WITH PASSWORD '蟑♫螂';", unicodeUser)); err != nil {
+				t.Fatal(err)
+			}
+		})
+		t.Run("UnicodeUserAuth", func(t *testing.T) {
+			// Try to perform authentication with unicodeUser and no password.
+			// This case is equivalent to supplying a wrong password.
+			host, port, err := net.SplitHostPort(s.ServingAddr())
+			if err != nil {
+				t.Fatal(err)
+			}
+			unicodeUserPgURL := url.URL{
+				Scheme:   "postgres",
+				User:     url.User(unicodeUser),
+				Host:     net.JoinHostPort(host, port),
+				RawQuery: "sslmode=require",
+			}
+			if err := trivialQuery(unicodeUserPgURL); !testutils.IsError(err, "pq: invalid password") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Supply correct password.
+			unicodeUserPgURL.User = url.UserPassword(unicodeUser, "蟑♫螂")
+			if err := trivialQuery(unicodeUserPgURL); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	t.Run("TestUserAuth", func(t *testing.T) {
+		testUserPgURL, cleanupFn := sqlutils.PGUrl(
+			t, s.ServingAddr(), "TestPGWireAuth", url.User(server.TestUser))
+		defer cleanupFn()
+		// No password supplied but valid certificate should result in
+		// successful authentication.
+		if err := trivialQuery(testUserPgURL); err != nil {
+			t.Fatal(err)
+		}
+
+		// Test case insensitivity for certificate and password authentication.
+		testUserPgURL.User = url.User("TesTUser")
+		if err := trivialQuery(testUserPgURL); err != nil {
+			t.Fatal(err)
+		}
+
+		// Remove certificates to default to password authentication.
+		testUserPgURL.RawQuery = "sslmode=require"
+
+		// Even though the correct password is supplied (empty string), this
+		// should fail because we do not support password authentication for
+		// users with empty passwords.
+		if err := trivialQuery(testUserPgURL); !testutils.IsError(err, "pq: invalid password") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }

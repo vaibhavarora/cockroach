@@ -24,9 +24,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/opentracing/basictracer-go"
-	"github.com/opentracing/opentracing-go"
+	basictracer "github.com/opentracing/basictracer-go"
+	opentracing "github.com/opentracing/opentracing-go"
+	otlog "github.com/opentracing/opentracing-go/log"
 )
 
 // explainTraceNode is a planNode that wraps another node and converts DebugValues() results to a
@@ -50,6 +50,12 @@ var traceColumns = append(ResultColumns{
 	{Name: "Event", Typ: parser.TypeString},
 }, debugColumns...)
 
+// Internally, the explainTraceNode also returns a timestamp column which is
+// used during sorting.
+var traceColumnsWithTS = append(traceColumns, ResultColumn{
+	Name: "Timestamp", Typ: parser.TypeTimestamp,
+})
+
 var traceOrdering = sqlbase.ColumnOrdering{
 	{ColIdx: len(traceColumns), Direction: encoding.Ascending}, /* Start time */
 	{ColIdx: 2, Direction: encoding.Ascending},                 /* Span pos */
@@ -70,41 +76,19 @@ func (p *planner) makeTraceNode(plan planNode, txn *client.Txn) planNode {
 			// messages do not go to the planner's context which will be
 			// responsible to collect the trace.
 
-			// TODO(andrei): I think ideally we would also use the planner's
-			// Span, but create a sub-span for the Sorting with a special
-			// tag that is ignored by the EXPLAIN TRACE logic. This way,
-			// this sorting would still appear in our debug tracing, it just
-			// wouldn't be reported. Of course, currently statements under
-			// EXPLAIN TRACE are not present in our normal debug tracing at
-			// all since we override the tracer, but I'm hoping to stop
-			// doing that. And even then I'm not completely sure how this
-			// would work exactly, since the sort node "wraps" the inner
-			// select node, but we can probably do something using
-			// opentracing's "follows-from" spans as opposed to
-			// "parent-child" spans when expressing this relationship
-			// between the sort and the select.
-			ctx:      opentracing.ContextWithSpan(tracing.WithTracer(p.ctx(), nil), nil),
 			p:        p,
 			ordering: traceOrdering,
-			columns:  traceColumns,
+			// These are the columns that the sortNode (and thus the selectTopNode)
+			// presents as the output.
+			columns: traceColumns,
 		},
 	}
 }
 
-func (*explainTraceNode) Columns() ResultColumns { return traceColumns }
+func (*explainTraceNode) Columns() ResultColumns { return traceColumnsWithTS }
 func (*explainTraceNode) Ordering() orderingInfo { return orderingInfo{} }
-
-func (n *explainTraceNode) expandPlan() error {
-	if err := n.plan.expandPlan(); err != nil {
-		return err
-	}
-
-	n.plan.MarkDebug(explainDebug)
-	return nil
-}
-
-func (n *explainTraceNode) Start() error { return n.plan.Start() }
-func (n *explainTraceNode) Close()       { n.plan.Close() }
+func (n *explainTraceNode) Start() error         { return n.plan.Start() }
+func (n *explainTraceNode) Close()               { n.plan.Close() }
 
 func (n *explainTraceNode) Next() (bool, error) {
 	first := n.rows == nil
@@ -117,10 +101,10 @@ func (n *explainTraceNode) Next() (bool, error) {
 			n.exhausted = true
 			sp := opentracing.SpanFromContext(n.txn.Context)
 			if err != nil {
-				sp.LogEvent(err.Error())
+				sp.LogFields(otlog.String("event", err.Error()))
 				return false, err
 			}
-			sp.LogEvent("tracing completed")
+			sp.LogFields(otlog.String("event", "tracing completed"))
 			sp.Finish()
 			sp = nil
 			n.txn.Context = opentracing.ContextWithSpan(n.txn.Context, nil)
@@ -193,12 +177,6 @@ func (n *explainTraceNode) Next() (bool, error) {
 	n.rows = n.rows[1:]
 	return true, nil
 }
-
-func (n *explainTraceNode) ExplainPlan(v bool) (name, description string, children []planNode) {
-	return "explain", "trace", []planNode{n.plan}
-}
-
-func (n *explainTraceNode) ExplainTypes(fn func(string, string)) {}
 
 func (n *explainTraceNode) Values() parser.DTuple {
 	return n.rows[0]

@@ -90,6 +90,16 @@ control is not returned to the shell until the server is ready to
 accept requests.`,
 	}
 
+	SQLMem = FlagInfo{
+		Name: "max-sql-memory",
+		Description: `
+Total size in bytes available for use to store temporary data for SQL
+clients, including prepared queries and intermediate data rows during
+query execution. Size suffixes are supported (e.g. 1GB and 1GiB). If
+left unspecified, defaults to 25% of the physical memory, or 512MB if
+the memory size cannot be determined.`,
+	}
+
 	Cache = FlagInfo{
 		Name: "cache",
 		Description: `
@@ -122,6 +132,13 @@ If left unspecified, defaults to 25% of the physical memory, or
 	Deps = FlagInfo{
 		Name:        "deps",
 		Description: `Include dependency versions`,
+	}
+
+	DumpMode = FlagInfo{
+		Name: "dump-mode",
+		Description: `
+What to dump. "schema" dumps the schema only. "data" dumps the data only.
+"both" (default) dumps the schema then the data.`,
 	}
 
 	Execute = FlagInfo{
@@ -229,11 +246,8 @@ server to listen on an external address in insecure mode.`,
 	}
 
 	Password = FlagInfo{
-		Name:   "password",
-		EnvVar: "COCKROACH_PASSWORD",
-		Description: `
-The created user's password. If provided, disables prompting. Pass '-' to
-provide the password on standard input.`,
+		Name:        "password",
+		Description: `Prompt for the new user's password.`,
 	}
 
 	CACert = FlagInfo{
@@ -256,6 +270,7 @@ provide the password on standard input.`,
 
 	Key = FlagInfo{
 		Name:        "key",
+		EnvVar:      "COCKROACH_KEY",
 		Description: `Path to the key protecting --cert. Needed in secure mode.`,
 	}
 

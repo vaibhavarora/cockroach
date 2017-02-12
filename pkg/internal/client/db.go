@@ -31,9 +31,8 @@ import (
 	"github.com/gogo/protobuf/proto"
 )
 
-// KeyValue represents a single key/value pair and corresponding
-// timestamp. This is similar to roachpb.KeyValue except that the value may be
-// nil.
+// KeyValue represents a single key/value pair. This is similar to
+// roachpb.KeyValue except that the value may be nil.
 type KeyValue struct {
 	Key   roachpb.Key
 	Value *roachpb.Value // Timestamp will always be zero
@@ -79,7 +78,7 @@ func (kv *KeyValue) PrettyValue() string {
 		}
 		return fmt.Sprintf("%s", v)
 	}
-	return fmt.Sprintf("%q", kv.Value.RawBytes)
+	return fmt.Sprintf("%x", kv.Value.RawBytes)
 }
 
 // ValueBytes returns the value as a byte slice. This method will panic if the
@@ -202,7 +201,7 @@ func NewDBWithContext(sender Sender, ctx DBContext) *DB {
 }
 
 // Get retrieves the value for a key, returning the retrieved key/value or an
-// error.
+// error. It is not considered an error for the key not to exist.
 //
 //   r, err := db.Get("a")
 //   // string(r.Key) == "a"
@@ -215,7 +214,7 @@ func (db *DB) Get(ctx context.Context, key interface{}) (KeyValue, error) {
 }
 
 // GetProto retrieves the value for a key and decodes the result as a proto
-// message.
+// message. If the key doesn't exist, the proto will simply be reset.
 //
 // key can be either a byte slice or a string.
 func (db *DB) GetProto(ctx context.Context, key interface{}, msg proto.Message) error {
@@ -253,6 +252,8 @@ func (db *DB) PutInline(ctx context.Context, key, value interface{}) error {
 // to expValue. To conditionally set a value only if there is no existing entry
 // pass nil for expValue. Note that this must be an interface{}(nil), not a
 // typed nil value (e.g. []byte(nil)).
+//
+// Returns an error if the existing value is not equal to expValue.
 //
 // key can be either a byte slice or a string. value can be any key type, a
 // proto.Message or any Go primitive type (bool, int, etc).

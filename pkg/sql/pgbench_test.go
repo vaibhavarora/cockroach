@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/url"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -84,6 +85,9 @@ func runPgbenchQueryParallel(b *testing.B, db *gosql.DB) {
 }
 
 func execPgbench(b *testing.B, pgUrl url.URL) {
+	if _, err := exec.LookPath("pgbench"); err != nil {
+		b.Skip("pgbench is not available on PATH")
+	}
 	c, err := pgbench.SetupExec(pgUrl, "bench", 20000, b.N)
 	if err != nil {
 		b.Fatal(err)
@@ -106,7 +110,8 @@ func BenchmarkPgbenchExec_Cockroach(b *testing.B) {
 	s, _, _ := serverutils.StartServer(b, base.TestServerArgs{Insecure: true})
 	defer s.Stopper().Stop()
 
-	pgUrl, cleanupFn := sqlutils.PGUrl(b, s.ServingAddr(), security.RootUser, "benchmarkCockroach")
+	pgUrl, cleanupFn := sqlutils.PGUrl(
+		b, s.ServingAddr(), "benchmarkCockroach", url.User(security.RootUser))
 	pgUrl.RawQuery = "sslmode=disable"
 	defer cleanupFn()
 

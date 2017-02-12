@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
@@ -71,7 +72,12 @@ func NewNetwork(stopper *stop.Stopper, nodeCount int, createResolvers bool) *Net
 		Nodes:   []*Node{},
 		Stopper: stopper,
 	}
-	n.rpcContext = rpc.NewContext(log.AmbientContext{}, &base.Config{Insecure: true}, nil, n.Stopper)
+	n.rpcContext = rpc.NewContext(
+		log.AmbientContext{},
+		&base.Config{Insecure: true},
+		hlc.NewClock(hlc.UnixNano, time.Nanosecond),
+		n.Stopper,
+	)
 	var err error
 	n.tlsConfig, err = n.rpcContext.GetServerTLSConfig()
 	if err != nil {
@@ -98,14 +104,12 @@ func NewNetwork(stopper *stop.Stopper, nodeCount int, createResolvers bool) *Net
 // CreateNode creates a simulation node and starts an RPC server for it.
 func (n *Network) CreateNode() (*Node, error) {
 	server := rpc.NewServer(n.rpcContext)
-	ln, err := net.Listen(util.TestAddr.Network(), util.TestAddr.String())
+	ln, err := net.Listen(util.IsolatedTestAddr.Network(), util.IsolatedTestAddr.String())
 	if err != nil {
 		return nil, err
 	}
 	node := &Node{Server: server, Listener: ln, Registry: metric.NewRegistry()}
-	node.Gossip = gossip.New(
-		log.AmbientContext{}, n.rpcContext, server, nil, n.Stopper, node.Registry,
-	)
+	node.Gossip = gossip.NewTest(0, n.rpcContext, server, nil, n.Stopper, node.Registry)
 	n.Stopper.RunWorker(func() {
 		<-n.Stopper.ShouldQuiesce()
 		netutil.FatalIfUnexpected(ln.Close())
@@ -123,9 +127,9 @@ func (n *Network) StartNode(node *Node) error {
 	node.Gossip.Start(node.Addr())
 	node.Gossip.EnableSimulationCycler(true)
 	n.nodeIDAllocator++
-	node.Gossip.SetNodeID(n.nodeIDAllocator)
+	node.Gossip.NodeID.Set(context.TODO(), n.nodeIDAllocator)
 	if err := node.Gossip.SetNodeDescriptor(&roachpb.NodeDescriptor{
-		NodeID:  node.Gossip.GetNodeID(),
+		NodeID:  node.Gossip.NodeID.Get(),
 		Address: util.MakeUnresolvedAddr(node.Addr().Network(), node.Addr().String()),
 	}); err != nil {
 		return err
@@ -144,7 +148,7 @@ func (n *Network) StartNode(node *Node) error {
 // provided node ID, or nil if there is no such node.
 func (n *Network) GetNodeFromID(nodeID roachpb.NodeID) (*Node, bool) {
 	for _, node := range n.Nodes {
-		if node.Gossip.GetNodeID() == nodeID {
+		if node.Gossip.NodeID.Get() == nodeID {
 			return node, true
 		}
 	}
@@ -240,7 +244,7 @@ func (n *Network) RunUntilFullyConnected() int {
 func (n *Network) isNetworkConnected() bool {
 	for _, leftNode := range n.Nodes {
 		for _, rightNode := range n.Nodes {
-			if _, err := leftNode.Gossip.GetInfo(gossip.MakeNodeIDKey(rightNode.Gossip.GetNodeID())); err != nil {
+			if _, err := leftNode.Gossip.GetInfo(gossip.MakeNodeIDKey(rightNode.Gossip.NodeID.Get())); err != nil {
 				return false
 			}
 		}

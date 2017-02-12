@@ -21,13 +21,12 @@ import (
 	"bytes"
 	gosql "database/sql"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
-	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -37,10 +36,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
-	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/caller"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -48,7 +46,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -64,20 +61,6 @@ const (
 		FAMILY (id, balance, payload)
 	)`
 )
-
-func testingTempDir(t testing.TB, depth int) (string, func()) {
-	_, _, name := caller.Lookup(depth + 1)
-	dir, err := ioutil.TempDir("", name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cleanup := func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Error(err)
-		}
-	}
-	return dir, cleanup
-}
 
 func TestIntersectHalfOpen(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -163,7 +146,7 @@ func rebalanceLeases(t testing.TB, tc *testcluster.TestCluster) {
 	}
 	for _, r := range rangeDescs {
 		target := tc.Target(int(r.RangeID) % tc.NumServers())
-		if err := tc.TransferRangeLease(&r, target); err != nil {
+		if err := tc.TransferRangeLease(r, target); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -181,7 +164,7 @@ func backupRestoreTestSetup(
 ) {
 	ctx = context.Background()
 
-	dir, dirCleanupFn := testingTempDir(t, 1)
+	dir, dirCleanupFn := testutils.TempDir(t, 1)
 
 	// Use ReplicationManual so we can force full replication, which is needed
 	// to later move the leases around.
@@ -200,7 +183,7 @@ func backupRestoreTestSetup(
 		sqlDB.Exec(split)
 	}
 
-	targets := make([]testcluster.ReplicationTarget, backupRestoreClusterSize-1)
+	targets := make([]base.ReplicationTarget, backupRestoreClusterSize-1)
 	for i := 1; i < backupRestoreClusterSize; i++ {
 		targets[i-1] = tc.Target(i)
 	}
@@ -287,7 +270,7 @@ func startBankTransfers(t testing.TB, stopper *stop.Stopper, sqlDB *gosql.DB, nu
 		const update = `UPDATE bench.bank
 				SET balance = CASE id WHEN $1 THEN balance-$3 WHEN $2 THEN balance+$3 END
 				WHERE id IN ($1, $2)`
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			select {
 			case <-stopper.ShouldQuiesce():
 				return nil // All done.
@@ -333,7 +316,7 @@ func TestBackupRestoreBank(t *testing.T) {
 		}
 
 		var newSquaresSum int64
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			sqlDB.QueryRow(`SELECT SUM(balance*balance) FROM bench.bank`).Scan(&newSquaresSum)
 			if squaresSum == newSquaresSum {
 				return errors.Errorf("squared deviation didn't change, still %d", newSquaresSum)
@@ -346,7 +329,7 @@ func TestBackupRestoreBank(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		util.SucceedsSoon(t, func() error {
+		testutils.SucceedsSoon(t, func() error {
 			sqlDB.QueryRow(`SELECT SUM(balance*balance) FROM bench.bank`).Scan(&newSquaresSum)
 			if squaresSum == newSquaresSum {
 				return errors.Errorf("squared deviation didn't change, still %d", newSquaresSum)
@@ -418,7 +401,7 @@ func BenchmarkClusterRestore(b *testing.B) {
 func BenchmarkSstRekey(b *testing.B) {
 	// TODO(dan): DRY this with BenchmarkRocksDBSstFileReader.
 
-	dir, cleanupFn := testingTempDir(b, 1)
+	dir, cleanupFn := testutils.TempDir(b, 1)
 	defer cleanupFn()
 
 	sstPath := filepath.Join(dir, "sst")

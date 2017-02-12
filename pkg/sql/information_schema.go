@@ -19,21 +19,29 @@ package sql
 import (
 	"sort"
 
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/pkg/errors"
 )
 
+const (
+	informationSchemaName = "information_schema"
+	pgCatalogName         = "pg_catalog"
+)
+
 var informationSchema = virtualSchema{
-	name: "information_schema",
+	name: informationSchemaName,
 	tables: []virtualSchemaTable{
 		informationSchemaColumnsTable,
 		informationSchemaKeyColumnUsageTable,
 		informationSchemaSchemataTable,
 		informationSchemaSchemataTablePrivileges,
+		informationSchemaStatisticsTable,
 		informationSchemaTableConstraintTable,
 		informationSchemaTablePrivileges,
 		informationSchemaTablesTable,
+		informationSchemaViewsTable,
 	},
 }
 
@@ -81,19 +89,19 @@ func dIntFnOrNull(fn func() (int32, bool)) parser.Datum {
 var informationSchemaColumnsTable = virtualSchemaTable{
 	schema: `
 CREATE TABLE information_schema.columns (
-  TABLE_CATALOG STRING NOT NULL DEFAULT '',
-  TABLE_SCHEMA STRING NOT NULL DEFAULT '',
-  TABLE_NAME STRING NOT NULL DEFAULT '',
-  COLUMN_NAME STRING NOT NULL DEFAULT '',
-  ORDINAL_POSITION INT NOT NULL DEFAULT 0,
-  COLUMN_DEFAULT STRING,
-  IS_NULLABLE STRING NOT NULL DEFAULT '',
-  DATA_TYPE STRING NOT NULL DEFAULT '',
-  CHARACTER_MAXIMUM_LENGTH INT,
-  CHARACTER_OCTET_LENGTH INT,
-  NUMERIC_PRECISION INT,
-  NUMERIC_SCALE INT,
-  DATETIME_PRECISION INT
+	TABLE_CATALOG STRING NOT NULL DEFAULT '',
+	TABLE_SCHEMA STRING NOT NULL DEFAULT '',
+	TABLE_NAME STRING NOT NULL DEFAULT '',
+	COLUMN_NAME STRING NOT NULL DEFAULT '',
+	ORDINAL_POSITION INT NOT NULL DEFAULT 0,
+	COLUMN_DEFAULT STRING,
+	IS_NULLABLE STRING NOT NULL DEFAULT '',
+	DATA_TYPE STRING NOT NULL DEFAULT '',
+	CHARACTER_MAXIMUM_LENGTH INT,
+	CHARACTER_OCTET_LENGTH INT,
+	NUMERIC_PRECISION INT,
+	NUMERIC_SCALE INT,
+	DATETIME_PRECISION INT
 );
 `,
 	populate: func(p *planner, addRow func(...parser.Datum) error) error {
@@ -104,19 +112,19 @@ CREATE TABLE information_schema.columns (
 				return forEachColumnInTable(table, func(column *sqlbase.ColumnDescriptor) error {
 					visible++
 					return addRow(
-						defString,                                    // table_catalog
-						parser.NewDString(db.Name),                   // table_schema
-						parser.NewDString(table.Name),                // table_name
-						parser.NewDString(column.Name),               // column_name
-						parser.NewDInt(parser.DInt(visible)),         // ordinal_position, 1-indexed
-						dStringPtrOrNull(column.DefaultExpr),         // column_default
-						yesOrNoDatum(column.Nullable),                // is_nullable
-						parser.NewDString(column.Type.Kind.String()), // data_type
-						characterMaximumLength(column.Type),          // character_maximum_length
-						characterOctetLength(column.Type),            // character_octet_length
-						numericPrecision(column.Type),                // numeric_precision
-						numericScale(column.Type),                    // numeric_scale
-						datetimePrecision(column.Type),               // datetime_precision
+						defString,                                  // table_catalog
+						parser.NewDString(db.Name),                 // table_schema
+						parser.NewDString(table.Name),              // table_name
+						parser.NewDString(column.Name),             // column_name
+						parser.NewDInt(parser.DInt(visible)),       // ordinal_position, 1-indexed
+						dStringPtrOrNull(column.DefaultExpr),       // column_default
+						yesOrNoDatum(column.Nullable),              // is_nullable
+						parser.NewDString(column.Type.SQLString()), // data_type
+						characterMaximumLength(column.Type),        // character_maximum_length
+						characterOctetLength(column.Type),          // character_octet_length
+						numericPrecision(column.Type),              // numeric_precision
+						numericScale(column.Type),                  // numeric_scale
+						datetimePrecision(column.Type),             // datetime_precision
 					)
 				})
 			},
@@ -148,56 +156,48 @@ func datetimePrecision(colType sqlbase.ColumnType) parser.Datum {
 var informationSchemaKeyColumnUsageTable = virtualSchemaTable{
 	schema: `
 CREATE TABLE information_schema.key_column_usage (
-  CONSTRAINT_CATALOG STRING DEFAULT '',
-  CONSTRAINT_SCHEMA STRING DEFAULT '',
-  CONSTRAINT_NAME STRING DEFAULT '',
-  TABLE_CATALOG STRING NOT NULL DEFAULT '',
-  TABLE_SCHEMA STRING NOT NULL DEFAULT '',
-  TABLE_NAME STRING NOT NULL DEFAULT '',
-  COLUMN_NAME STRING NOT NULL DEFAULT '',
-  ORDINAL_POSITION INT NOT NULL DEFAULT 0,
-  POSITION_IN_UNIQUE_CONSTRAINT INT
+	CONSTRAINT_CATALOG STRING DEFAULT '',
+	CONSTRAINT_SCHEMA STRING DEFAULT '',
+	CONSTRAINT_NAME STRING DEFAULT '',
+	TABLE_CATALOG STRING NOT NULL DEFAULT '',
+	TABLE_SCHEMA STRING NOT NULL DEFAULT '',
+	TABLE_NAME STRING NOT NULL DEFAULT '',
+	COLUMN_NAME STRING NOT NULL DEFAULT '',
+	ORDINAL_POSITION INT NOT NULL DEFAULT 0,
+	POSITION_IN_UNIQUE_CONSTRAINT INT
 );`,
 	populate: func(p *planner, addRow func(...parser.Datum) error) error {
-		return forEachTableDesc(p,
-			func(db *sqlbase.DatabaseDescriptor, table *sqlbase.TableDescriptor) error {
-				type keyColumn struct {
-					name        string
-					columnNames []string
-					primaryKey  bool
-					foreignKey  bool
-					unique      bool
+		return forEachTableDescWithTableLookup(p,
+			func(
+				db *sqlbase.DatabaseDescriptor,
+				table *sqlbase.TableDescriptor,
+				tableLookup tableLookupFn,
+			) error {
+				info, err := table.GetConstraintInfoWithLookup(tableLookup.tableOrErr)
+				if err != nil {
+					return err
 				}
-				var columns []keyColumn
-				if table.IsPhysicalTable() {
-					columns = append(columns, keyColumn{
-						name:        table.PrimaryIndex.Name,
-						columnNames: table.PrimaryIndex.ColumnNames,
-						primaryKey:  true,
-					})
-				}
-				for _, index := range table.Indexes {
-					col := keyColumn{
-						name:        index.Name,
-						columnNames: index.ColumnNames,
-						unique:      index.Unique,
-						foreignKey:  index.ForeignKey.IsSet(),
+
+				for name, c := range info {
+					// Only Primary Key, Foreign Key, and Unique constraints are included.
+					switch c.Kind {
+					case sqlbase.ConstraintTypePK:
+					case sqlbase.ConstraintTypeFK:
+					case sqlbase.ConstraintTypeUnique:
+					default:
+						continue
 					}
-					if col.unique || col.foreignKey {
-						columns = append(columns, col)
-					}
-				}
-				for _, c := range columns {
-					for pos, column := range c.columnNames {
+
+					for pos, column := range c.Columns {
 						ordinalPos := parser.NewDInt(parser.DInt(pos + 1))
 						uniquePos := parser.DNull
-						if c.foreignKey {
+						if c.Kind == sqlbase.ConstraintTypeFK {
 							uniquePos = ordinalPos
 						}
 						if err := addRow(
 							defString,                     // constraint_catalog
 							parser.NewDString(db.Name),    // constraint_schema
-							dStringOrNull(c.name),         // constraint_name
+							dStringOrNull(name),           // constraint_name
 							defString,                     // table_catalog
 							parser.NewDString(db.Name),    // table_schema
 							parser.NewDString(table.Name), // table_name
@@ -218,10 +218,10 @@ CREATE TABLE information_schema.key_column_usage (
 var informationSchemaSchemataTable = virtualSchemaTable{
 	schema: `
 CREATE TABLE information_schema.schemata (
-  CATALOG_NAME STRING NOT NULL DEFAULT '',
-  SCHEMA_NAME STRING NOT NULL DEFAULT '',
-  DEFAULT_CHARACTER_SET_NAME STRING NOT NULL DEFAULT '',
-  SQL_PATH STRING
+	CATALOG_NAME STRING NOT NULL DEFAULT '',
+	SCHEMA_NAME STRING NOT NULL DEFAULT '',
+	DEFAULT_CHARACTER_SET_NAME STRING NOT NULL DEFAULT '',
+	SQL_PATH STRING
 );`,
 	populate: func(p *planner, addRow func(...parser.Datum) error) error {
 		return forEachDatabaseDesc(p, func(db *sqlbase.DatabaseDescriptor) error {
@@ -266,62 +266,136 @@ CREATE TABLE information_schema.schema_privileges (
 }
 
 var (
-	constraintTypeCheck      = parser.NewDString("CHECK")
-	constraintTypeForeignKey = parser.NewDString("FOREIGN KEY")
-	constraintTypePrimaryKey = parser.NewDString("PRIMARY KEY")
-	constraintTypeUnique     = parser.NewDString("UNIQUE")
+	indexDirectionNA   = parser.NewDString("N/A")
+	indexDirectionAsc  = parser.NewDString(sqlbase.IndexDescriptor_ASC.String())
+	indexDirectionDesc = parser.NewDString(sqlbase.IndexDescriptor_DESC.String())
 )
 
-// TODO(dt): switch using common GetConstraintInfo helper.
-var informationSchemaTableConstraintTable = virtualSchemaTable{
+func dStringForIndexDirection(dir sqlbase.IndexDescriptor_Direction) parser.Datum {
+	switch dir {
+	case sqlbase.IndexDescriptor_ASC:
+		return indexDirectionAsc
+	case sqlbase.IndexDescriptor_DESC:
+		return indexDirectionDesc
+	}
+	panic("unreachable")
+}
+
+var informationSchemaStatisticsTable = virtualSchemaTable{
 	schema: `
-CREATE TABLE information_schema.table_constraints (
-  CONSTRAINT_CATALOG STRING NOT NULL DEFAULT '',
-  CONSTRAINT_SCHEMA STRING NOT NULL DEFAULT '',
-  CONSTRAINT_NAME STRING NOT NULL DEFAULT '',
-  TABLE_SCHEMA STRING NOT NULL DEFAULT '',
-  TABLE_NAME STRING NOT NULL DEFAULT '',
-  CONSTRAINT_TYPE STRING NOT NULL DEFAULT ''
+CREATE TABLE information_schema.statistics (
+	TABLE_CATALOG STRING NOT NULL DEFAULT '',
+	TABLE_SCHEMA STRING NOT NULL DEFAULT '',
+	TABLE_NAME STRING NOT NULL DEFAULT '',
+	NON_UNIQUE BOOL NOT NULL DEFAULT FALSE,
+	INDEX_SCHEMA STRING NOT NULL DEFAULT '',
+	INDEX_NAME STRING NOT NULL DEFAULT '',
+	SEQ_IN_INDEX INT NOT NULL DEFAULT 0,
+	COLUMN_NAME STRING NOT NULL DEFAULT '',
+	"COLLATION" STRING NOT NULL DEFAULT '',
+	CARDINALITY INT NOT NULL DEFAULT 0,
+	DIRECTION STRING NOT NULL DEFAULT '',
+	STORING BOOL NOT NULL DEFAULT FALSE,
+	IMPLICIT BOOL NOT NULL DEFAULT FALSE
 );`,
 	populate: func(p *planner, addRow func(...parser.Datum) error) error {
 		return forEachTableDesc(p,
 			func(db *sqlbase.DatabaseDescriptor, table *sqlbase.TableDescriptor) error {
-				type constraint struct {
-					name string
-					typ  parser.Datum
+				appendRow := func(index *sqlbase.IndexDescriptor, colName string, sequence int,
+					direction parser.Datum, isStored, isImplicit bool,
+				) error {
+					return addRow(
+						defString,                                     // table_catalog
+						parser.NewDString(db.GetName()),               // table_schema
+						parser.NewDString(table.GetName()),            // table_name
+						parser.MakeDBool(parser.DBool(!index.Unique)), // non_unique
+						parser.NewDString(db.GetName()),               // index_schema
+						parser.NewDString(index.Name),                 // index_name
+						parser.NewDInt(parser.DInt(sequence)),         // seq_in_index
+						parser.NewDString(colName),                    // column_name
+						parser.DNull,                                  // collation
+						parser.DNull,                                  // cardinality
+						direction,                                     // direction
+						parser.MakeDBool(parser.DBool(isStored)),   // storing
+						parser.MakeDBool(parser.DBool(isImplicit)), // implicit
+					)
 				}
-				var constraints []constraint
-				if table.IsPhysicalTable() {
-					constraints = append(constraints, constraint{
-						name: table.PrimaryIndex.Name,
-						typ:  constraintTypePrimaryKey,
-					})
-				}
-				for _, index := range table.Indexes {
-					c := constraint{name: index.Name}
-					switch {
-					case index.Unique:
-						c.typ = constraintTypeUnique
-						constraints = append(constraints, c)
-					case index.ForeignKey.IsSet():
-						c.typ = constraintTypeForeignKey
-						constraints = append(constraints, c)
+
+				return forEachIndexInTable(table, func(index *sqlbase.IndexDescriptor) error {
+					// Columns in the primary key that aren't in index.ColumnNames or
+					// index.StoreColumnNames are implicit columns in the index.
+					var implicitCols map[string]struct{}
+					if len(index.ExtraColumnIDs) > len(index.StoreColumnNames) {
+						implicitCols = make(map[string]struct{})
+						for _, col := range table.PrimaryIndex.ColumnNames {
+							implicitCols[col] = struct{}{}
+						}
 					}
+
+					sequence := 1
+					for i, col := range index.ColumnNames {
+						// We add a row for each column of index.
+						dir := dStringForIndexDirection(index.ColumnDirections[i])
+						if err := appendRow(index, col, sequence, dir, false, false); err != nil {
+							return err
+						}
+						sequence++
+						delete(implicitCols, col)
+					}
+					for _, col := range index.StoreColumnNames {
+						// We add a row for each stored column of index.
+						if err := appendRow(index, col, sequence,
+							indexDirectionNA, true, false); err != nil {
+							return err
+						}
+						sequence++
+						delete(implicitCols, col)
+					}
+					for col := range implicitCols {
+						// We add a row for each implicit column of index.
+						if err := appendRow(index, col, sequence,
+							indexDirectionAsc, false, true); err != nil {
+							return err
+						}
+						sequence++
+					}
+					return nil
+				})
+			},
+		)
+	},
+}
+
+var informationSchemaTableConstraintTable = virtualSchemaTable{
+	schema: `
+CREATE TABLE information_schema.table_constraints (
+	CONSTRAINT_CATALOG STRING NOT NULL DEFAULT '',
+	CONSTRAINT_SCHEMA STRING NOT NULL DEFAULT '',
+	CONSTRAINT_NAME STRING NOT NULL DEFAULT '',
+	TABLE_SCHEMA STRING NOT NULL DEFAULT '',
+	TABLE_NAME STRING NOT NULL DEFAULT '',
+	CONSTRAINT_TYPE STRING NOT NULL DEFAULT ''
+);`,
+	populate: func(p *planner, addRow func(...parser.Datum) error) error {
+		return forEachTableDescWithTableLookup(p,
+			func(
+				db *sqlbase.DatabaseDescriptor,
+				table *sqlbase.TableDescriptor,
+				tableLookup tableLookupFn,
+			) error {
+				info, err := table.GetConstraintInfoWithLookup(tableLookup.tableOrErr)
+				if err != nil {
+					return err
 				}
-				for _, check := range table.Checks {
-					constraints = append(constraints, constraint{
-						name: check.Name,
-						typ:  constraintTypeCheck,
-					})
-				}
-				for _, c := range constraints {
+
+				for name, c := range info {
 					if err := addRow(
-						defString,                     // constraint_catalog
-						parser.NewDString(db.Name),    // constraint_schema
-						dStringOrNull(c.name),         // constraint_name
-						parser.NewDString(db.Name),    // table_schema
-						parser.NewDString(table.Name), // table_name
-						c.typ, // constraint_type
+						defString,                         // constraint_catalog
+						parser.NewDString(db.Name),        // constraint_schema
+						dStringOrNull(name),               // constraint_name
+						parser.NewDString(db.Name),        // table_schema
+						parser.NewDString(table.Name),     // table_name
+						parser.NewDString(string(c.Kind)), // constraint_type
 					); err != nil {
 						return err
 					}
@@ -379,11 +453,11 @@ var (
 var informationSchemaTablesTable = virtualSchemaTable{
 	schema: `
 CREATE TABLE information_schema.tables (
-  TABLE_CATALOG STRING NOT NULL DEFAULT '',
-  TABLE_SCHEMA STRING NOT NULL DEFAULT '',
-  TABLE_NAME STRING NOT NULL DEFAULT '',
-  TABLE_TYPE STRING NOT NULL DEFAULT '',
-  VERSION INT
+	TABLE_CATALOG STRING NOT NULL DEFAULT '',
+	TABLE_SCHEMA STRING NOT NULL DEFAULT '',
+	TABLE_NAME STRING NOT NULL DEFAULT '',
+	TABLE_TYPE STRING NOT NULL DEFAULT '',
+	VERSION INT
 );`,
 	populate: func(p *planner, addRow func(...parser.Datum) error) error {
 		return forEachTableDesc(p,
@@ -400,6 +474,51 @@ CREATE TABLE information_schema.tables (
 					parser.NewDString(table.Name), // table_name
 					tableType,                     // table_type
 					parser.NewDInt(parser.DInt(table.Version)), // version
+				)
+			},
+		)
+	},
+}
+
+var informationSchemaViewsTable = virtualSchemaTable{
+	schema: `
+CREATE TABLE information_schema.views (
+    TABLE_CATALOG STRING NOT NULL DEFAULT '',
+    TABLE_SCHEMA STRING NOT NULL DEFAULT '',
+    TABLE_NAME STRING NOT NULL DEFAULT '',
+    VIEW_DEFINITION STRING NOT NULL DEFAULT '',
+    CHECK_OPTION STRING NOT NULL DEFAULT '',
+    IS_UPDATABLE BOOL NOT NULL DEFAULT FALSE,
+    IS_INSERTABLE_INTO BOOL NOT NULL DEFAULT FALSE,
+    IS_TRIGGER_UPDATABLE BOOL NOT NULL DEFAULT FALSE,
+    IS_TRIGGER_DELETABLE BOOL NOT NULL DEFAULT FALSE,
+    IS_TRIGGER_INSERTABLE_INTO BOOL NOT NULL DEFAULT FALSE
+);`,
+	populate: func(p *planner, addRow func(...parser.Datum) error) error {
+		return forEachTableDesc(p,
+			func(db *sqlbase.DatabaseDescriptor, table *sqlbase.TableDescriptor) error {
+				if !table.IsView() {
+					return nil
+				}
+				// Note that the view query printed will not include any column aliases
+				// specified outside the initial view query into the definition returned,
+				// unlike Postgres. For example, for the view created via
+				//  `CREATE VIEW (a) AS SELECT b FROM foo`
+				// we'll only print `SELECT b FROM foo` as the view definition here,
+				// while Postgres would more accurately print `SELECT b AS a FROM foo`.
+				// TODO(a-robinson): Insert column aliases into view query once we
+				// have a semantic query representation to work with (#10083).
+				return addRow(
+					defString,                          // table_catalog
+					parser.NewDString(db.Name),         // table_schema
+					parser.NewDString(table.Name),      // table_name
+					parser.NewDString(table.ViewQuery), // view_definition
+					parser.DNull,                       // check_option
+					parser.DNull,                       // is_updatable
+					parser.DNull,                       // is_insertable_into
+					parser.DNull,                       // is_trigger_updatable
+					parser.DNull,                       // is_trigger_deletable
+					parser.DNull,                       // is_trigger_insertable_into
 				)
 			},
 		)
@@ -425,7 +544,7 @@ func forEachDatabaseDesc(p *planner, fn func(*sqlbase.DatabaseDescriptor) error)
 	}
 
 	// Handle virtual schemas.
-	for _, schema := range p.virtualSchemas().entries {
+	for _, schema := range p.session.virtualSchemas.entries {
 		dbDescs = append(dbDescs, schema.desc)
 	}
 
@@ -440,16 +559,58 @@ func forEachDatabaseDesc(p *planner, fn func(*sqlbase.DatabaseDescriptor) error)
 	return nil
 }
 
-// forEachTableDesc retrieves all table descriptors and iterates through them in
-// lexicographical order with respect primarily to database name and secondarily
-// to table name. For each table, the function will call fn with its respective
-// database and table descriptor.
+// forEachTableDesc retrieves all table descriptors from the current database
+// and all system databases and iterates through them in lexicographical order
+// with respect primarily to database name and secondarily to table name. For
+// each table, the function will call fn with its respective database and table
+// descriptor.
 func forEachTableDesc(
 	p *planner, fn func(*sqlbase.DatabaseDescriptor, *sqlbase.TableDescriptor) error,
 ) error {
+	return forEachTableDescWithTableLookup(p, func(
+		db *sqlbase.DatabaseDescriptor,
+		table *sqlbase.TableDescriptor,
+		_ tableLookupFn,
+	) error {
+		return fn(db, table)
+	})
+}
+
+// tableLookupFn can be used to retrieve a table descriptor and its corresponding
+// database descriptor using the table's ID. Both descriptors will be nil if a
+// table with the provided ID was not found.
+type tableLookupFn func(tableID sqlbase.ID) (*sqlbase.DatabaseDescriptor, *sqlbase.TableDescriptor)
+
+func (fn tableLookupFn) tableOrErr(id sqlbase.ID) (*sqlbase.TableDescriptor, error) {
+	if _, t := fn(id); t != nil {
+		return t, nil
+	}
+	return nil, errors.Errorf("could not find referenced table with ID %v", id)
+}
+
+// isSystemDatabaseName returns true if the input name is not a user db name.
+func isSystemDatabaseName(name string) bool {
+	switch name {
+	case informationSchemaName:
+	case pgCatalogName:
+	case sqlbase.SystemDB.Name:
+	default:
+		return false
+	}
+	return true
+}
+
+// forEachTableDescWithTableLookup acts like forEachTableDesc, except it also provides a
+// tableLookupFn when calling fn to allow callers to lookup fetched table descriptors
+// on demand. This is important for callers dealing with objects like foreign keys, where
+// the metadata for each object must be augmented by looking at the referenced table.
+func forEachTableDescWithTableLookup(
+	p *planner, fn func(*sqlbase.DatabaseDescriptor, *sqlbase.TableDescriptor, tableLookupFn) error,
+) error {
 	type dbDescTables struct {
-		desc   *sqlbase.DatabaseDescriptor
-		tables map[string]*sqlbase.TableDescriptor
+		desc       *sqlbase.DatabaseDescriptor
+		tables     map[string]*sqlbase.TableDescriptor
+		tablesByID map[sqlbase.ID]*sqlbase.TableDescriptor
 	}
 	databases := make(map[string]dbDescTables)
 
@@ -465,8 +626,9 @@ func forEachTableDesc(
 		if db, ok := desc.(*sqlbase.DatabaseDescriptor); ok {
 			dbIDsToName[db.GetID()] = db.GetName()
 			databases[db.GetName()] = dbDescTables{
-				desc:   db,
-				tables: make(map[string]*sqlbase.TableDescriptor),
+				desc:       db,
+				tables:     make(map[string]*sqlbase.TableDescriptor),
+				tablesByID: make(map[sqlbase.ID]*sqlbase.TableDescriptor),
 			}
 		}
 	}
@@ -479,12 +641,13 @@ func forEachTableDesc(
 				return errors.Errorf("no database with ID %d found", table.GetParentID())
 			}
 			dbTables := databases[dbName]
-			dbTables.tables[table.GetName()] = table
+			dbTables.tables[table.Name] = table
+			dbTables.tablesByID[table.ID] = table
 		}
 	}
 
 	// Handle virtual schemas.
-	for dbName, schema := range p.virtualSchemas().entries {
+	for dbName, schema := range p.session.virtualSchemas.entries {
 		dbTables := make(map[string]*sqlbase.TableDescriptor, len(schema.tables))
 		for tableName, entry := range schema.tables {
 			dbTables[tableName] = entry.desc
@@ -493,6 +656,18 @@ func forEachTableDesc(
 			desc:   schema.desc,
 			tables: dbTables,
 		}
+	}
+
+	// Create table lookup function, which some callers of this function, like those
+	// dealing with foreign keys, will need.
+	tableLookup := func(id sqlbase.ID) (*sqlbase.DatabaseDescriptor, *sqlbase.TableDescriptor) {
+		for _, db := range databases {
+			table, ok := db.tablesByID[id]
+			if ok {
+				return db.desc, table
+			}
+		}
+		return nil, nil
 	}
 
 	// Below we use the same trick twice of sorting a slice of strings lexicographically
@@ -504,6 +679,9 @@ func forEachTableDesc(
 	}
 	sort.Strings(dbNames)
 	for _, dbName := range dbNames {
+		if !p.isDatabaseVisible(dbName) {
+			continue
+		}
 		db := databases[dbName]
 		dbTableNames := make([]string, 0, len(db.tables))
 		for tableName := range db.tables {
@@ -513,7 +691,7 @@ func forEachTableDesc(
 		for _, tableName := range dbTableNames {
 			tableDesc := db.tables[tableName]
 			if userCanSeeTable(tableDesc, p.session.User) {
-				if err := fn(db.desc, tableDesc); err != nil {
+				if err := fn(db.desc, tableDesc, tableLookup); err != nil {
 					return err
 				}
 			}
@@ -566,6 +744,40 @@ func forEachColumnInIndex(
 			if err := fn(column); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func forEachUser(p *planner, fn func(username string) error) error {
+	query := `SELECT username FROM system.users`
+	plan, err := p.query(query)
+	if err != nil {
+		return nil
+	}
+	defer plan.Close()
+	if err := p.startPlan(plan); err != nil {
+		return err
+	}
+
+	// TODO(cuongdo/asubiotto): Get rid of root user special-casing if/when a row
+	// for "root" exists in system.user.
+	if err := fn(security.RootUser); err != nil {
+		return err
+	}
+
+	for {
+		next, err := plan.Next()
+		if err != nil {
+			return err
+		}
+		if !next {
+			break
+		}
+		row := plan.Values()
+		username := row[0].(*parser.DString)
+		if err := fn(string(*username)); err != nil {
+			return err
 		}
 	}
 	return nil

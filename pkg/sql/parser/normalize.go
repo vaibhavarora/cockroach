@@ -416,7 +416,8 @@ func (expr *ComparisonExpr) normalize(v *normalizeVisitor) TypedExpr {
 		ILike, NotILike,
 		SimilarTo, NotSimilarTo,
 		RegMatch, NotRegMatch,
-		RegIMatch, NotRegIMatch:
+		RegIMatch, NotRegIMatch,
+		Any, Some, All:
 		if expr.TypedLeft() == DNull || expr.TypedRight() == DNull {
 			return DNull
 		}
@@ -670,6 +671,7 @@ func (v *containsVarsVisitor) VisitPre(expr Expr) (recurse bool, newExpr Expr) {
 func (*containsVarsVisitor) VisitPost(expr Expr) Expr { return expr }
 
 // ContainsVars returns true if the expression contains any variables.
+// (variables = sub-expressions, placeholders, indexed vars, etc.)
 func ContainsVars(expr Expr) bool {
 	v := containsVarsVisitor{containsVars: false}
 	WalkExprConst(&v, expr)
@@ -722,7 +724,7 @@ func IsNumericOne(expr TypedExpr) bool {
 // ReType ensures that the given numeric expression evaluates
 // to the requested type, inserting a cast if necessary.
 func ReType(expr TypedExpr, wantedType Type) (TypedExpr, error) {
-	if expr.ResolvedType().Equal(wantedType) {
+	if expr.ResolvedType().Equivalent(wantedType) {
 		return expr, nil
 	}
 	reqType, err := DatumTypeToColumnType(wantedType)

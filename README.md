@@ -1,10 +1,12 @@
 ![logo](docs/media/cockroach_db.png?raw=true "Cockroach Labs logo")
 
 
-[![Circle CI](https://circleci.com/gh/cockroachdb/cockroach.svg?style=svg)](https://circleci.com/gh/cockroachdb/cockroach) [![GoDoc](https://godoc.org/github.com/cockroachdb/cockroach?status.svg)](https://godoc.org/github.com/cockroachdb/cockroach) ![Project Status](https://img.shields.io/badge/status-beta-yellow.svg) [![Gitter](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/cockroachdb/cockroach?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
+[![TeamCity CI](https://teamcity.cockroachdb.com/guestAuth/app/rest/builds/buildType:(id:Cockroach_UnitTests)/statusIcon.svg)](https://teamcity.cockroachdb.com/viewLog.html?buildTypeId=Cockroach_UnitTests&buildId=lastFinished&guest=1)
+[![GoDoc](https://godoc.org/github.com/cockroachdb/cockroach?status.svg)](https://godoc.org/github.com/cockroachdb/cockroach)
+![Project Status](https://img.shields.io/badge/status-beta-yellow.svg)
+[![Gitter](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/cockroachdb/cockroach?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
 
 ## A Scalable, Survivable, Strongly-Consistent SQL Database
-
 
 - [What is CockroachDB?](#what-is-cockroachdb)
 - [Docs](#docs)
@@ -26,14 +28,14 @@ https://github.com/cockroachdb/cockroach#design).
 ## Status
 
 CockroachDB is currently in beta. See our
-[Roadmap](https://github.com/cockroachdb/cockroach/wiki) and
+[1.0 Roadmap](https://github.com/cockroachdb/cockroach/issues/12854) and
 [Issues](https://github.com/cockroachdb/cockroach/issues) for a list of features planned or in development.
 
 ## Docs
 
 For guidance on installation, development, deployment, and administration, see our [User Documentation](https://cockroachlabs.com/docs).
 
-## Quickstart 
+## Quickstart
 
 1.  [Install Cockroach DB](https://www.cockroachlabs.com/docs/install-cockroachdb.html).
 

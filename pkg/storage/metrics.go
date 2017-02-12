@@ -33,23 +33,45 @@ var (
 	metaRaftLeaderCount               = metric.Metadata{Name: "replicas.leaders"}
 	metaRaftLeaderNotLeaseHolderCount = metric.Metadata{
 		Name: "replicas.leaders_not_leaseholders",
-		Help: "Total number of Replicas that are Raft leaders whose Range lease is held by another store.",
+		Help: "Number of replicas that are Raft leaders whose range lease is held by another store",
 	}
 	metaLeaseHolderCount = metric.Metadata{Name: "replicas.leaseholders"}
 	metaQuiescentCount   = metric.Metadata{Name: "replicas.quiescent"}
 
-	// Range metrics.
-	metaAvailableRangeCount = metric.Metadata{Name: "ranges.available"}
+	// Replica CommandQueue metrics. Max size metrics track the maximum value
+	// seen for all replicas during a single replica scan.
+	metaMaxCommandQueueSize = metric.Metadata{Name: "replicas.commandqueue.maxsize",
+		Help: "Largest number of commands in any CommandQueue"}
+	metaMaxCommandQueueWriteCount = metric.Metadata{Name: "replicas.commandqueue.maxwritecount",
+		Help: "Largest number of read-write commands in any CommandQueue"}
+	metaMaxCommandQueueReadCount = metric.Metadata{Name: "replicas.commandqueue.maxreadcount",
+		Help: "Largest number of read-only commands in any CommandQueue"}
+	metaMaxCommandQueueTreeSize = metric.Metadata{Name: "replicas.commandqueue.maxtreesize",
+		Help: "Largest number of intervals in any CommandQueue's interval tree"}
+	metaMaxCommandQueueOverlaps = metric.Metadata{Name: "replicas.commandqueue.maxoverlaps",
+		Help: "Largest number of overlapping commands seen when adding to any CommandQueue"}
+	metaCombinedCommandQueueSize = metric.Metadata{Name: "replicas.commandqueue.combinedqueuesize",
+		Help: "Number of commands in all CommandQueues combined"}
+	metaCombinedCommandWriteCount = metric.Metadata{Name: "replicas.commandqueue.combinedwritecount",
+		Help: "Number of read-write commands in all CommandQueues combined"}
+	metaCombinedCommandReadCount = metric.Metadata{Name: "replicas.commandqueue.combinedreadcount",
+		Help: "Number of read-only commands in all CommandQueues combined"}
 
-	// Replication metrics.
-	metaReplicaAllocatorNoopCount       = metric.Metadata{Name: "ranges.allocator.noop"}
-	metaReplicaAllocatorRemoveCount     = metric.Metadata{Name: "ranges.allocator.remove"}
-	metaReplicaAllocatorAddCount        = metric.Metadata{Name: "ranges.allocator.add"}
-	metaReplicaAllocatorRemoveDeadCount = metric.Metadata{Name: "ranges.allocator.removedead"}
+	// Range metrics.
+	metaRangeCount = metric.Metadata{Name: "ranges",
+		Help: "Number of ranges"}
+	metaUnavailableRangeCount = metric.Metadata{Name: "ranges.unavailable",
+		Help: "Number of ranges with fewer live replicas than needed for quorum"}
+	metaUnderReplicatedRangeCount = metric.Metadata{Name: "ranges.underreplicated",
+		Help: "Number of ranges with fewer live replicas than the replication target"}
 
 	// Lease request metrics.
-	metaLeaseRequestSuccessCount = metric.Metadata{Name: "leases.success"}
-	metaLeaseRequestErrorCount   = metric.Metadata{Name: "leases.error"}
+	metaLeaseRequestSuccessCount  = metric.Metadata{Name: "leases.success"}
+	metaLeaseRequestErrorCount    = metric.Metadata{Name: "leases.error"}
+	metaLeaseTransferSuccessCount = metric.Metadata{Name: "leasestransfers.success"}
+	metaLeaseTransferErrorCount   = metric.Metadata{Name: "leasestransfers.error"}
+	metaLeaseExpirationCount      = metric.Metadata{Name: "leases.expiration"}
+	metaLeaseEpochCount           = metric.Metadata{Name: "leases.epoch"}
 
 	// Storage metrics.
 	metaLiveBytes       = metric.Metadata{Name: "livebytes"}
@@ -95,67 +117,93 @@ var (
 	metaRangeSnapshotsGenerated         = metric.Metadata{Name: "range.snapshots.generated"}
 	metaRangeSnapshotsNormalApplied     = metric.Metadata{Name: "range.snapshots.normal-applied"}
 	metaRangeSnapshotsPreemptiveApplied = metric.Metadata{Name: "range.snapshots.preemptive-applied"}
+	metaRangeRaftLeaderTransfers        = metric.Metadata{Name: "range.raftleadertransfers"}
 
 	// Raft processing metrics.
 	metaRaftTicks = metric.Metadata{
 		Name: "raft.ticks",
 		Help: "Number of Raft ticks queued",
 	}
-	metaRaftWorkingDurationNanos = metric.Metadata{Name: "raft.process.workingnanos",
+	metaRaftWorkingDurationNanos = metric.Metadata{
+		Name: "raft.process.workingnanos",
 		Help: "Nanoseconds spent in store.processRaft() working",
 	}
-	metaRaftTickingDurationNanos = metric.Metadata{Name: "raft.process.tickingnanos",
+	metaRaftTickingDurationNanos = metric.Metadata{
+		Name: "raft.process.tickingnanos",
 		Help: "Nanoseconds spent in store.processRaft() processing replica.Tick()",
+	}
+	metaRaftCommandsApplied = metric.Metadata{
+		Name: "raft.commandsapplied",
+		Help: "Count of Raft commands applied",
 	}
 
 	// Raft message metrics.
 	metaRaftRcvdProp = metric.Metadata{
 		Name: "raft.rcvd.prop",
-		Help: "Total number of MsgProp messages received by this store",
+		Help: "Number of MsgProp messages received by this store",
 	}
 	metaRaftRcvdApp = metric.Metadata{
 		Name: "raft.rcvd.app",
-		Help: "Total number of MsgApp messages received by this store",
+		Help: "Number of MsgApp messages received by this store",
 	}
 	metaRaftRcvdAppResp = metric.Metadata{
 		Name: "raft.rcvd.appresp",
-		Help: "Total number of MsgAppResp messages received by this store",
+		Help: "Number of MsgAppResp messages received by this store",
 	}
 	metaRaftRcvdVote = metric.Metadata{
 		Name: "raft.rcvd.vote",
-		Help: "Total number of MsgVote messages received by this store",
+		Help: "Number of MsgVote messages received by this store",
 	}
 	metaRaftRcvdVoteResp = metric.Metadata{
 		Name: "raft.rcvd.voteresp",
-		Help: "Total number of MsgVoteResp messages received by this store",
+		Help: "Number of MsgVoteResp messages received by this store",
+	}
+	metaRaftRcvdPreVote = metric.Metadata{
+		Name: "raft.rcvd.prevote",
+		Help: "Number of MsgPreVote messages received by this store",
+	}
+	metaRaftRcvdPreVoteResp = metric.Metadata{
+		Name: "raft.rcvd.prevoteresp",
+		Help: "Number of MsgPreVoteResp messages received by this store",
 	}
 	metaRaftRcvdSnap = metric.Metadata{
 		Name: "raft.rcvd.snap",
-		Help: "Total number of MsgSnap messages received by this store",
+		Help: "Number of MsgSnap messages received by this store",
 	}
 	metaRaftRcvdHeartbeat = metric.Metadata{
 		Name: "raft.rcvd.heartbeat",
-		Help: "Total number of MsgHeartbeat messages received by this store",
+		Help: "Number of (coalesced, if enabled) MsgHeartbeat messages received by this store",
 	}
 	metaRaftRcvdHeartbeatResp = metric.Metadata{
 		Name: "raft.rcvd.heartbeatresp",
-		Help: "Total number of MsgHeartbeatResp messages received by this store",
+		Help: "Number of (coalesced, if enabled) MsgHeartbeatResp messages received by this store",
 	}
 	metaRaftRcvdTransferLeader = metric.Metadata{
 		Name: "raft.rcvd.transferleader",
-		Help: "Total number of MsgTransferLeader messages received by this store",
+		Help: "Number of MsgTransferLeader messages received by this store",
 	}
 	metaRaftRcvdTimeoutNow = metric.Metadata{
 		Name: "raft.rcvd.timeoutnow",
-		Help: "Total number of MsgTimeoutNow messages received by this store",
+		Help: "Number of MsgTimeoutNow messages received by this store",
 	}
 	metaRaftRcvdDropped = metric.Metadata{
 		Name: "raft.rcvd.dropped",
 		Help: "Number of dropped incoming Raft messages",
 	}
+	metaRaftEnqueuedPending = metric.Metadata{
+		Name: "raft.enqueued.pending",
+		Help: "Number of pending outgoing messages in the Raft Transport queue",
+	}
+	metaRaftCoalescedHeartbeatsPending = metric.Metadata{
+		Name: "raft.heartbeats.pending",
+		Help: "Number of pending heartbeats and responses waiting to be coalesced",
+	}
 
-	metaRaftEnqueuedPending = metric.Metadata{Name: "raft.enqueued.pending",
-		Help: "Number of pending outgoing messages in the Raft Transport queue"}
+	// Raft log metrics.
+	metaRaftLogBehindCount = metric.Metadata{Name: "raftlog.behind",
+		Help: "Number of Raft log entries followers are behind"}
+	metaRaftLogTruncated = metric.Metadata{Name: "raftlog.truncated",
+		Help: "Number of Raft log entries truncated"}
 
 	// Replica queue metrics.
 	metaGCQueueSuccesses = metric.Metadata{Name: "queue.gc.process.success",
@@ -167,13 +215,21 @@ var (
 	metaGCQueueProcessingNanos = metric.Metadata{Name: "queue.gc.processingnanos",
 		Help: "Nanoseconds spent processing replicas in the GC queue"}
 	metaRaftLogQueueSuccesses = metric.Metadata{Name: "queue.raftlog.process.success",
-		Help: "Number of replicas successfully processed by the raft log queue"}
+		Help: "Number of replicas successfully processed by the Raft log queue"}
 	metaRaftLogQueueFailures = metric.Metadata{Name: "queue.raftlog.process.failure",
-		Help: "Number of replicas which failed processing in the raft log queue"}
+		Help: "Number of replicas which failed processing in the Raft log queue"}
 	metaRaftLogQueuePending = metric.Metadata{Name: "queue.raftlog.pending",
-		Help: "Number of pending replicas in the raft log queue"}
+		Help: "Number of pending replicas in the Raft log queue"}
 	metaRaftLogQueueProcessingNanos = metric.Metadata{Name: "queue.raftlog.processingnanos",
-		Help: "Nanoseconds spent processing replicas in the raft log queue"}
+		Help: "Nanoseconds spent processing replicas in the Raft log queue"}
+	metaRaftSnapshotQueueSuccesses = metric.Metadata{Name: "queue.raftsnapshot.process.success",
+		Help: "Number of replicas successfully processed by the Raft repair queue"}
+	metaRaftSnapshotQueueFailures = metric.Metadata{Name: "queue.raftsnapshot.process.failure",
+		Help: "Number of replicas which failed processing in the Raft repair queue"}
+	metaRaftSnapshotQueuePending = metric.Metadata{Name: "queue.raftsnapshot.pending",
+		Help: "Number of pending replicas in the Raft repair queue"}
+	metaRaftSnapshotQueueProcessingNanos = metric.Metadata{Name: "queue.raftsnapshot.processingnanos",
+		Help: "Nanoseconds spent processing replicas in the Raft repair queue"}
 	metaConsistencyQueueSuccesses = metric.Metadata{Name: "queue.consistency.process.success",
 		Help: "Number of replicas successfully processed by the consistency checker queue"}
 	metaConsistencyQueueFailures = metric.Metadata{Name: "queue.consistency.process.failure",
@@ -226,7 +282,7 @@ var (
 	metaGCIntentTxns = metric.Metadata{Name: "queue.gc.info.intenttxns",
 		Help: "Number of associated distinct transactions"}
 	metaGCTransactionSpanScanned = metric.Metadata{Name: "queue.gc.info.transactionspanscanned",
-		Help: "Total number of entries in the transaction span scanned from the engine"}
+		Help: "Number of entries in the transaction span scanned from the engine"}
 	metaGCTransactionSpanGCAborted = metric.Metadata{Name: "queue.gc.info.transactionspangcaborted",
 		Help: "Number of GC'able entries corresponding to aborted txns"}
 	metaGCTransactionSpanGCCommitted = metric.Metadata{Name: "queue.gc.info.transactionspangccommitted",
@@ -234,26 +290,36 @@ var (
 	metaGCTransactionSpanGCPending = metric.Metadata{Name: "queue.gc.info.transactionspangcpending",
 		Help: "Number of GC'able entries corresponding to pending txns"}
 	metaGCAbortSpanScanned = metric.Metadata{Name: "queue.gc.info.abortspanscanned",
-		Help: "Total number of transactions present in the abort cache scanned from the engine"}
+		Help: "Number of transactions present in the abort cache scanned from the engine"}
 	metaGCAbortSpanConsidered = metric.Metadata{Name: "queue.gc.info.abortspanconsidered",
 		Help: "Number of abort cache entries old enough to be considered for removal"}
 	metaGCAbortSpanGCNum = metric.Metadata{Name: "queue.gc.info.abortspangcnum",
 		Help: "Number of abort cache entries fit for removal"}
 	metaGCPushTxn = metric.Metadata{Name: "queue.gc.info.pushtxn",
-		Help: "Total number of attempted pushes"}
+		Help: "Number of attempted pushes"}
 	metaGCResolveTotal = metric.Metadata{Name: "queue.gc.info.resolvetotal",
-		Help: "Total number of attempted intent resolutions"}
+		Help: "Number of attempted intent resolutions"}
 	metaGCResolveSuccess = metric.Metadata{Name: "queue.gc.info.resolvesuccess",
 		Help: "Number of successful intent resolutions"}
 
 	metaMuReplicaNanos = metric.Metadata{Name: "mutex.replicananos",
 		Help: "Duration of Replica mutex critical sections"}
+	metaMuCommandQueueNanos = metric.Metadata{Name: "mutex.commandqueuenanos",
+		Help: "Duration of Command Queue mutex critical sections"}
 	metaMuRaftNanos = metric.Metadata{Name: "mutex.raftnanos",
 		Help: "Duration of Replica Raft mutex critical sections"}
 	metaMuStoreNanos = metric.Metadata{Name: "mutex.storenanos",
 		Help: "Duration of Store mutex critical sections"}
 	metaMuSchedulerNanos = metric.Metadata{Name: "mutex.schedulernanos",
 		Help: "Duration of Raft Scheduler mutex critical sections"}
+
+	// Slow request metrics.
+	metaSlowCommandQueueRequests = metric.Metadata{Name: "requests.slow.commandqueue",
+		Help: "Number of requests that have been stuck for a long time in the command queue"}
+	metaSlowLeaseRequests = metric.Metadata{Name: "requests.slow.lease",
+		Help: "Number of requests that have been stuck for a long time acquiring a lease"}
+	metaSlowRaftRequests = metric.Metadata{Name: "requests.slow.raft",
+		Help: "Number of requests that have been stuck for a long time in raft"}
 )
 
 // StoreMetrics is the set of metrics for a given store.
@@ -268,20 +334,30 @@ type StoreMetrics struct {
 	LeaseHolderCount              *metric.Gauge
 	QuiescentCount                *metric.Gauge
 
-	// Range metrics.
-	AvailableRangeCount *metric.Gauge
+	// Replica CommandQueue metrics.
+	MaxCommandQueueSize       *metric.Gauge
+	MaxCommandQueueWriteCount *metric.Gauge
+	MaxCommandQueueReadCount  *metric.Gauge
+	MaxCommandQueueTreeSize   *metric.Gauge
+	MaxCommandQueueOverlaps   *metric.Gauge
+	CombinedCommandQueueSize  *metric.Gauge
+	CombinedCommandWriteCount *metric.Gauge
+	CombinedCommandReadCount  *metric.Gauge
 
-	// Replication metrics.
-	ReplicaAllocatorNoopCount       *metric.Gauge
-	ReplicaAllocatorRemoveCount     *metric.Gauge
-	ReplicaAllocatorAddCount        *metric.Gauge
-	ReplicaAllocatorRemoveDeadCount *metric.Gauge
+	// Range metrics.
+	RangeCount                *metric.Gauge
+	UnavailableRangeCount     *metric.Gauge
+	UnderReplicatedRangeCount *metric.Gauge
 
 	// Lease request metrics for successful and failed lease requests. These
-	// count proposals (i.e. it does not matter how many Replicas apply the
+	// count proposals (i.e. it does not matter how many replicas apply the
 	// lease).
-	LeaseRequestSuccessCount *metric.Counter
-	LeaseRequestErrorCount   *metric.Counter
+	LeaseRequestSuccessCount  *metric.Counter
+	LeaseRequestErrorCount    *metric.Counter
+	LeaseTransferSuccessCount *metric.Counter
+	LeaseTransferErrorCount   *metric.Counter
+	LeaseExpirationCount      *metric.Gauge
+	LeaseEpochCount           *metric.Gauge
 
 	// Storage metrics.
 	LiveBytes       *metric.Gauge
@@ -329,11 +405,13 @@ type StoreMetrics struct {
 	RangeSnapshotsGenerated         *metric.Counter
 	RangeSnapshotsNormalApplied     *metric.Counter
 	RangeSnapshotsPreemptiveApplied *metric.Counter
+	RangeRaftLeaderTransfers        *metric.Counter
 
 	// Raft processing metrics.
 	RaftTicks                *metric.Counter
 	RaftWorkingDurationNanos *metric.Counter
 	RaftTickingDurationNanos *metric.Counter
+	RaftCommandsApplied      *metric.Counter
 
 	// Raft message metrics.
 	RaftRcvdMsgProp           *metric.Counter
@@ -341,6 +419,8 @@ type StoreMetrics struct {
 	RaftRcvdMsgAppResp        *metric.Counter
 	RaftRcvdMsgVote           *metric.Counter
 	RaftRcvdMsgVoteResp       *metric.Counter
+	RaftRcvdMsgPreVote        *metric.Counter
+	RaftRcvdMsgPreVoteResp    *metric.Counter
 	RaftRcvdMsgSnap           *metric.Counter
 	RaftRcvdMsgHeartbeat      *metric.Counter
 	RaftRcvdMsgHeartbeatResp  *metric.Counter
@@ -348,13 +428,18 @@ type StoreMetrics struct {
 	RaftRcvdMsgTimeoutNow     *metric.Counter
 	RaftRcvdMsgDropped        *metric.Counter
 
+	// Raft log metrics.
+	RaftLogBehindCount *metric.Gauge
+	RaftLogTruncated   *metric.Counter
+
 	// A map for conveniently finding the appropriate metric. The individual
 	// metric references must exist as AddMetricStruct adds them by reflection
 	// on this struct and does not process map types.
 	// TODO(arjun): eliminate this duplication.
 	raftRcvdMessages map[raftpb.MessageType]*metric.Counter
 
-	RaftEnqueuedPending *metric.Gauge
+	RaftEnqueuedPending            *metric.Gauge
+	RaftCoalescedHeartbeatsPending *metric.Gauge
 
 	// Replica queue metrics.
 	GCQueueSuccesses                          *metric.Counter
@@ -365,6 +450,10 @@ type StoreMetrics struct {
 	RaftLogQueueFailures                      *metric.Counter
 	RaftLogQueuePending                       *metric.Gauge
 	RaftLogQueueProcessingNanos               *metric.Counter
+	RaftSnapshotQueueSuccesses                *metric.Counter
+	RaftSnapshotQueueFailures                 *metric.Counter
+	RaftSnapshotQueuePending                  *metric.Gauge
+	RaftSnapshotQueueProcessingNanos          *metric.Counter
 	ConsistencyQueueSuccesses                 *metric.Counter
 	ConsistencyQueueFailures                  *metric.Counter
 	ConsistencyQueuePending                   *metric.Gauge
@@ -403,10 +492,16 @@ type StoreMetrics struct {
 	GCResolveSuccess             *metric.Counter
 
 	// Mutex timing information.
-	MuStoreNanos     *metric.Histogram
-	MuSchedulerNanos *metric.Histogram
-	MuRaftNanos      *metric.Histogram
-	MuReplicaNanos   *metric.Histogram
+	MuStoreNanos        *metric.Histogram
+	MuSchedulerNanos    *metric.Histogram
+	MuRaftNanos         *metric.Histogram
+	MuReplicaNanos      *metric.Histogram
+	MuCommandQueueNanos *metric.Histogram
+
+	// Slow request counts.
+	SlowCommandQueueRequests *metric.Gauge
+	SlowLeaseRequests        *metric.Gauge
+	SlowRaftRequests         *metric.Gauge
 
 	// Stats for efficient merges.
 	mu struct {
@@ -428,18 +523,28 @@ func newStoreMetrics(sampleInterval time.Duration) *StoreMetrics {
 		LeaseHolderCount:              metric.NewGauge(metaLeaseHolderCount),
 		QuiescentCount:                metric.NewGauge(metaQuiescentCount),
 
-		// Range metrics.
-		AvailableRangeCount: metric.NewGauge(metaAvailableRangeCount),
+		// Replica CommandQueue metrics.
+		MaxCommandQueueSize:       metric.NewGauge(metaMaxCommandQueueSize),
+		MaxCommandQueueWriteCount: metric.NewGauge(metaMaxCommandQueueWriteCount),
+		MaxCommandQueueReadCount:  metric.NewGauge(metaMaxCommandQueueReadCount),
+		MaxCommandQueueTreeSize:   metric.NewGauge(metaMaxCommandQueueTreeSize),
+		MaxCommandQueueOverlaps:   metric.NewGauge(metaMaxCommandQueueOverlaps),
+		CombinedCommandQueueSize:  metric.NewGauge(metaCombinedCommandQueueSize),
+		CombinedCommandWriteCount: metric.NewGauge(metaCombinedCommandWriteCount),
+		CombinedCommandReadCount:  metric.NewGauge(metaCombinedCommandReadCount),
 
-		// Replication metrics.
-		ReplicaAllocatorNoopCount:       metric.NewGauge(metaReplicaAllocatorNoopCount),
-		ReplicaAllocatorRemoveCount:     metric.NewGauge(metaReplicaAllocatorRemoveCount),
-		ReplicaAllocatorAddCount:        metric.NewGauge(metaReplicaAllocatorAddCount),
-		ReplicaAllocatorRemoveDeadCount: metric.NewGauge(metaReplicaAllocatorRemoveDeadCount),
+		// Range metrics.
+		RangeCount:                metric.NewGauge(metaRangeCount),
+		UnavailableRangeCount:     metric.NewGauge(metaUnavailableRangeCount),
+		UnderReplicatedRangeCount: metric.NewGauge(metaUnderReplicatedRangeCount),
 
 		// Lease request metrics.
-		LeaseRequestSuccessCount: metric.NewCounter(metaLeaseRequestSuccessCount),
-		LeaseRequestErrorCount:   metric.NewCounter(metaLeaseRequestErrorCount),
+		LeaseRequestSuccessCount:  metric.NewCounter(metaLeaseRequestSuccessCount),
+		LeaseRequestErrorCount:    metric.NewCounter(metaLeaseRequestErrorCount),
+		LeaseTransferSuccessCount: metric.NewCounter(metaLeaseTransferSuccessCount),
+		LeaseTransferErrorCount:   metric.NewCounter(metaLeaseTransferErrorCount),
+		LeaseExpirationCount:      metric.NewGauge(metaLeaseExpirationCount),
+		LeaseEpochCount:           metric.NewGauge(metaLeaseEpochCount),
 
 		// Storage metrics.
 		LiveBytes:       metric.NewGauge(metaLiveBytes),
@@ -482,11 +587,13 @@ func newStoreMetrics(sampleInterval time.Duration) *StoreMetrics {
 		RangeSnapshotsGenerated:         metric.NewCounter(metaRangeSnapshotsGenerated),
 		RangeSnapshotsNormalApplied:     metric.NewCounter(metaRangeSnapshotsNormalApplied),
 		RangeSnapshotsPreemptiveApplied: metric.NewCounter(metaRangeSnapshotsPreemptiveApplied),
+		RangeRaftLeaderTransfers:        metric.NewCounter(metaRangeRaftLeaderTransfers),
 
 		// Raft processing metrics.
 		RaftTicks:                metric.NewCounter(metaRaftTicks),
 		RaftWorkingDurationNanos: metric.NewCounter(metaRaftWorkingDurationNanos),
 		RaftTickingDurationNanos: metric.NewCounter(metaRaftTickingDurationNanos),
+		RaftCommandsApplied:      metric.NewCounter(metaRaftCommandsApplied),
 
 		// Raft message metrics.
 		RaftRcvdMsgProp:           metric.NewCounter(metaRaftRcvdProp),
@@ -494,6 +601,8 @@ func newStoreMetrics(sampleInterval time.Duration) *StoreMetrics {
 		RaftRcvdMsgAppResp:        metric.NewCounter(metaRaftRcvdAppResp),
 		RaftRcvdMsgVote:           metric.NewCounter(metaRaftRcvdVote),
 		RaftRcvdMsgVoteResp:       metric.NewCounter(metaRaftRcvdVoteResp),
+		RaftRcvdMsgPreVote:        metric.NewCounter(metaRaftRcvdPreVote),
+		RaftRcvdMsgPreVoteResp:    metric.NewCounter(metaRaftRcvdPreVoteResp),
 		RaftRcvdMsgSnap:           metric.NewCounter(metaRaftRcvdSnap),
 		RaftRcvdMsgHeartbeat:      metric.NewCounter(metaRaftRcvdHeartbeat),
 		RaftRcvdMsgHeartbeatResp:  metric.NewCounter(metaRaftRcvdHeartbeatResp),
@@ -504,6 +613,14 @@ func newStoreMetrics(sampleInterval time.Duration) *StoreMetrics {
 
 		RaftEnqueuedPending: metric.NewGauge(metaRaftEnqueuedPending),
 
+		// This Gauge measures the number of heartbeats queued up just before
+		// the queue is cleared, to avoid flapping wildly.
+		RaftCoalescedHeartbeatsPending: metric.NewGauge(metaRaftCoalescedHeartbeatsPending),
+
+		// Raft log metrics.
+		RaftLogBehindCount: metric.NewGauge(metaRaftLogBehindCount),
+		RaftLogTruncated:   metric.NewCounter(metaRaftLogTruncated),
+
 		// Replica queue metrics.
 		GCQueueSuccesses:                          metric.NewCounter(metaGCQueueSuccesses),
 		GCQueueFailures:                           metric.NewCounter(metaGCQueueFailures),
@@ -513,6 +630,10 @@ func newStoreMetrics(sampleInterval time.Duration) *StoreMetrics {
 		RaftLogQueueFailures:                      metric.NewCounter(metaRaftLogQueueFailures),
 		RaftLogQueuePending:                       metric.NewGauge(metaRaftLogQueuePending),
 		RaftLogQueueProcessingNanos:               metric.NewCounter(metaRaftLogQueueProcessingNanos),
+		RaftSnapshotQueueSuccesses:                metric.NewCounter(metaRaftSnapshotQueueSuccesses),
+		RaftSnapshotQueueFailures:                 metric.NewCounter(metaRaftSnapshotQueueFailures),
+		RaftSnapshotQueuePending:                  metric.NewGauge(metaRaftSnapshotQueuePending),
+		RaftSnapshotQueueProcessingNanos:          metric.NewCounter(metaRaftSnapshotQueueProcessingNanos),
 		ConsistencyQueueSuccesses:                 metric.NewCounter(metaConsistencyQueueSuccesses),
 		ConsistencyQueueFailures:                  metric.NewCounter(metaConsistencyQueueFailures),
 		ConsistencyQueuePending:                   metric.NewGauge(metaConsistencyQueuePending),
@@ -561,6 +682,10 @@ func newStoreMetrics(sampleInterval time.Duration) *StoreMetrics {
 			metaMuReplicaNanos, sampleInterval,
 			time.Second.Nanoseconds(), 1,
 		),
+		MuCommandQueueNanos: metric.NewHistogram(
+			metaMuCommandQueueNanos, sampleInterval,
+			time.Second.Nanoseconds(), 1,
+		),
 		MuRaftNanos: metric.NewHistogram(
 			metaMuRaftNanos, sampleInterval,
 			time.Second.Nanoseconds(), 1,
@@ -573,6 +698,11 @@ func newStoreMetrics(sampleInterval time.Duration) *StoreMetrics {
 			metaMuSchedulerNanos, time.Minute,
 			time.Second.Nanoseconds(), 1,
 		),
+
+		// Wedge request counters.
+		SlowCommandQueueRequests: metric.NewGauge(metaSlowCommandQueueRequests),
+		SlowLeaseRequests:        metric.NewGauge(metaSlowLeaseRequests),
+		SlowRaftRequests:         metric.NewGauge(metaSlowRaftRequests),
 	}
 
 	sm.raftRcvdMessages[raftpb.MsgProp] = sm.RaftRcvdMsgProp
@@ -580,6 +710,8 @@ func newStoreMetrics(sampleInterval time.Duration) *StoreMetrics {
 	sm.raftRcvdMessages[raftpb.MsgAppResp] = sm.RaftRcvdMsgAppResp
 	sm.raftRcvdMessages[raftpb.MsgVote] = sm.RaftRcvdMsgVote
 	sm.raftRcvdMessages[raftpb.MsgVoteResp] = sm.RaftRcvdMsgVoteResp
+	sm.raftRcvdMessages[raftpb.MsgPreVote] = sm.RaftRcvdMsgPreVote
+	sm.raftRcvdMessages[raftpb.MsgPreVoteResp] = sm.RaftRcvdMsgPreVoteResp
 	sm.raftRcvdMessages[raftpb.MsgSnap] = sm.RaftRcvdMsgSnap
 	sm.raftRcvdMessages[raftpb.MsgHeartbeat] = sm.RaftRcvdMsgHeartbeat
 	sm.raftRcvdMessages[raftpb.MsgHeartbeatResp] = sm.RaftRcvdMsgHeartbeatResp
@@ -650,5 +782,13 @@ func (sm *StoreMetrics) leaseRequestComplete(success bool) {
 		sm.LeaseRequestSuccessCount.Inc(1)
 	} else {
 		sm.LeaseRequestErrorCount.Inc(1)
+	}
+}
+
+func (sm *StoreMetrics) leaseTransferComplete(success bool) {
+	if success {
+		sm.LeaseTransferSuccessCount.Inc(1)
+	} else {
+		sm.LeaseTransferErrorCount.Inc(1)
 	}
 }

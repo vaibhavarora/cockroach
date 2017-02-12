@@ -52,7 +52,7 @@ func testTableDesc() *sqlbase.TableDescriptor {
 	}
 }
 
-func makeSelectNode(t *testing.T) *selectNode {
+func makeSelectNode(t *testing.T) *renderNode {
 	desc := testTableDesc()
 	sel := testInitDummySelectNode(desc)
 	if err := desc.AllocateIDs(); err != nil {
@@ -64,7 +64,7 @@ func makeSelectNode(t *testing.T) *selectNode {
 	return sel
 }
 
-func parseAndNormalizeExpr(t *testing.T, sql string, sel *selectNode) parser.TypedExpr {
+func parseAndNormalizeExpr(t *testing.T, sql string, sel *renderNode) parser.TypedExpr {
 	expr, err := parser.ParseExprTraditional(sql)
 	if err != nil {
 		t.Fatalf("%s: %v", sql, err)
@@ -72,10 +72,10 @@ func parseAndNormalizeExpr(t *testing.T, sql string, sel *selectNode) parser.Typ
 
 	// Perform name resolution because {analyze,simplify}Expr want
 	// expressions containing IndexedVars.
-	if expr, err = sel.resolveNames(expr); err != nil {
+	if expr, _, err = sel.resolveNames(expr); err != nil {
 		t.Fatalf("%s: %v", sql, err)
 	}
-	typedExpr, err := parser.TypeCheck(expr, nil, parser.NoTypePreference)
+	typedExpr, err := parser.TypeCheck(expr, nil, parser.TypeAny)
 	if err != nil {
 		t.Fatalf("%s: %v", sql, err)
 	}
@@ -86,7 +86,7 @@ func parseAndNormalizeExpr(t *testing.T, sql string, sel *selectNode) parser.Typ
 	return typedExpr
 }
 
-func checkEquivExpr(a, b parser.TypedExpr, sel *selectNode) error {
+func checkEquivExpr(a, b parser.TypedExpr, sel *renderNode) error {
 	// The expressions above only use the values 1 and 2. Verify that the
 	// simplified expressions evaluate to the same value as the original
 	// expression for interesting values.
@@ -209,10 +209,12 @@ func TestSimplifyExpr(t *testing.T) {
 		{`a < 9223372036854775807`, `a < 9223372036854775807`, true},
 		{`a > -9223372036854775808`, `a > -9223372036854775808`, true},
 		{`a > 9223372036854775807`, `false`, true},
-		{`h < -1.7976931348623157e+308`, `false`, true},
+		{`h < (-1:::float/0:::float)`, `false`, true},
+		{`h < -1.7976931348623157e+308`, `h < -1.7976931348623157e+308`, true},
 		{`h < 1.7976931348623157e+308`, `h < 1.7976931348623157e+308`, true},
 		{`h > -1.7976931348623157e+308`, `h > -1.7976931348623157e+308`, true},
-		{`h > 1.7976931348623157e+308`, `false`, true},
+		{`h > 1.7976931348623157e+308`, `h > 1.7976931348623157e+308`, true},
+		{`h > (1:::float/0:::float)`, `false`, true},
 		{`i < ''`, `false`, true},
 		{`i > ''`, `i > ''`, true},
 

@@ -22,28 +22,24 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
-func setupMVCCRocksDB(b testing.TB, loc string) (Engine, *stop.Stopper) {
-	stopper := stop.NewStopper()
-	rocksdb := NewRocksDB(
+func setupMVCCRocksDB(b testing.TB, loc string) Engine {
+	rocksdb, err := NewRocksDB(
 		roachpb.Attributes{},
 		loc,
 		RocksDBCache{},
 		0,
 		DefaultMaxOpenFiles,
-		stopper,
 	)
-	if err := rocksdb.Open(); err != nil {
+	if err != nil {
 		b.Fatalf("could not create new rocksdb db instance at %s: %v", loc, err)
 	}
-	return rocksdb, stopper
+	return rocksdb
 }
 
-func setupMVCCInMemRocksDB(_ testing.TB, loc string) (Engine, *stop.Stopper) {
-	stopper := stop.NewStopper()
-	return NewInMem(roachpb.Attributes{}, testCacheSize, stopper), stopper
+func setupMVCCInMemRocksDB(_ testing.TB, loc string) Engine {
+	return NewInMem(roachpb.Attributes{}, testCacheSize)
 }
 
 // Read benchmarks. All of them run with on-disk data.
@@ -265,6 +261,14 @@ func BenchmarkMVCCDeleteRange1Version256Bytes_RocksDB(b *testing.B) {
 	runMVCCDeleteRange(setupMVCCRocksDB, 256, b)
 }
 
+func BenchmarkBatchApplyBatchRepr(b *testing.B) {
+	runBatchApplyBatchRepr(setupMVCCInMemRocksDB, false /* writeOnly */, 10, 1000000, b)
+}
+
+func BenchmarkWriteOnlyBatchApplyBatchRepr(b *testing.B) {
+	runBatchApplyBatchRepr(setupMVCCInMemRocksDB, true /* writeOnly */, 10, 1000000, b)
+}
+
 func BenchmarkBatchBuilderPut(b *testing.B) {
 	value := make([]byte, 10)
 	for i := range value {
@@ -275,7 +279,7 @@ func BenchmarkBatchBuilderPut(b *testing.B) {
 	b.ResetTimer()
 
 	const batchSize = 1000
-	batch := &rocksDBBatchBuilder{}
+	batch := &RocksDBBatchBuilder{}
 	for i := 0; i < b.N; i += batchSize {
 		end := i + batchSize
 		if end > b.N {

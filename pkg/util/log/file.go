@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/pkg/errors"
 )
 
@@ -43,57 +44,71 @@ var MaxSize uint64 = 1024 * 1024 * 10
 // If non-empty, overrides the choice of directory in which to write logs. See
 // createLogDirs for the full list of possible destinations. Note that the
 // default is to log to stderr independent of this setting. See --logtostderr.
-var logDir = func() string {
-	name, err := ioutil.TempDir("", "cockroach")
-	if err != nil {
-		panic(err)
-	}
-	return name
-}()
-var logDirSet bool
 
-// DirSet returns true of the log directory has been changed from its default.
-func DirSet() bool {
-	return logDirSet
+type logDirName struct {
+	syncutil.Mutex
+	name string
 }
 
-type stringValue struct {
-	val *string
-	set *bool
-}
+var _ flag.Value = &logDirName{}
 
-var _ flag.Value = &stringValue{}
+var logDir logDirName
 
-func newStringValue(val *string, set *bool) *stringValue {
-	return &stringValue{val: val, set: set}
-}
-
-func (s *stringValue) Set(val string) error {
-	*s.val = val
-	*s.set = true
+// Set implements the flag.Value interface.
+func (l *logDirName) Set(dir string) error {
+	l.Lock()
+	defer l.Unlock()
+	l.name = dir
 	return nil
 }
 
-func (s *stringValue) Type() string {
+// Type implements the flag.Value interface.
+func (l *logDirName) Type() string {
 	return "string"
 }
 
-func (s *stringValue) String() string {
-	if s.val == nil {
-		return ""
-	}
-	return *s.val
+// String implements the flag.Value interface.
+func (l *logDirName) String() string {
+	l.Lock()
+	defer l.Unlock()
+	return l.name
 }
+
+func (l *logDirName) clear() {
+	// For testing only.
+	l.Lock()
+	defer l.Unlock()
+	l.name = ""
+}
+
+func (l *logDirName) get() (string, error) {
+	l.Lock()
+	defer l.Unlock()
+	if len(l.name) == 0 {
+		return "", errDirectoryNotSet
+	}
+	return l.name, nil
+}
+
+func (l *logDirName) isSet() bool {
+	l.Lock()
+	res := l.name != ""
+	l.Unlock()
+	return res
+}
+
+// DirSet returns true of the log directory has been changed from its default.
+func DirSet() bool { return logDir.isSet() }
 
 // logFileRE matches log files to avoid exposing non-log files accidentally
 // and it splits the details of the filename into groups for easy parsing.
-// The log file format is {process}.{host}.{username}.log.{severity}.{timestamp}
-// cockroach.Brams-MacBook-Pro.bram.log.WARNING.2015-06-09T16_10_48-04_00.30209
+// The log file format is {process}.{host}.{username}.{timestamp}.{pid}.{severity}.log
+// cockroach.Brams-MacBook-Pro.bram.2015-06-09T16-10-48Z.30209.WARNING.log
 // All underscore in process, host and username are escaped to double
 // underscores and all periods are escaped to an underscore.
 // For compatibility with Windows filenames, all colons from the timestamp
-// (RFC3339) are converted to underscores.
-var logFileRE = regexp.MustCompile(`([^\.]+)\.([^\.]+)\.([^\.]+)\.log\.(ERROR|WARNING|INFO)\.([^\.]+)\.(\d+)`)
+// (RFC3339) are converted from underscores.
+var logFileRE = regexp.MustCompile(`^(?:.*/)?([^/.]+)\.([^/\.]+)\.([^/\.]+)\.([^/\.]+)\.(\d+)\.(ERROR|WARNING|INFO)\.log$`)
 
 var (
 	pid      = os.Getpid()
@@ -140,13 +155,13 @@ func logName(severity Severity, t time.Time) (name, link string) {
 	// Windows.
 	tFormatted := strings.Replace(t.Format(time.RFC3339), ":", "_", -1)
 
-	name = fmt.Sprintf("%s.%s.%s.log.%s.%s.%d",
+	name = fmt.Sprintf("%s.%s.%s.%s.%06d.%s.log",
 		removePeriods(program),
 		removePeriods(host),
 		removePeriods(userName),
-		severity.Name(),
 		tFormatted,
-		pid)
+		pid,
+		severity.Name())
 	return name, removePeriods(program) + "." + severity.Name()
 }
 
@@ -159,21 +174,21 @@ func parseLogFilename(filename string) (FileDetails, error) {
 		return FileDetails{}, errMalformedName
 	}
 
-	sev, sevFound := SeverityByName(matches[4])
-	if !sevFound {
-		return FileDetails{}, errMalformedSev
-	}
-
 	// Replace the '_'s with ':'s to restore the correct time format.
-	fixTime := strings.Replace(matches[5], "_", ":", -1)
+	fixTime := strings.Replace(matches[4], "_", ":", -1)
 	time, err := time.Parse(time.RFC3339, fixTime)
 	if err != nil {
 		return FileDetails{}, err
 	}
 
-	pid, err := strconv.ParseInt(matches[6], 10, 0)
+	pid, err := strconv.ParseInt(matches[5], 10, 0)
 	if err != nil {
 		return FileDetails{}, err
+	}
+
+	sev, sevFound := SeverityByName(matches[6])
+	if !sevFound {
+		return FileDetails{}, errMalformedSev
 	}
 
 	return FileDetails{
@@ -192,22 +207,35 @@ var errDirectoryNotSet = errors.New("log: log directory not set")
 // contains severity ("INFO", "FATAL", etc.) and t. If the file is created
 // successfully, create also attempts to update the symlink for that tag, ignoring
 // errors.
-func create(severity Severity, t time.Time) (f *os.File, filename string, err error) {
-	if len(logDir) == 0 {
-		return nil, "", errDirectoryNotSet
+func create(
+	severity Severity, t time.Time, lastRotation int64,
+) (f *os.File, updatedRotation int64, filename string, err error) {
+	dir, err := logDir.get()
+	if err != nil {
+		return nil, lastRotation, "", err
 	}
-	name, link := logName(severity, t)
-	fname := filepath.Join(logDir, name)
 
+	// Ensure that the timestamp of the new file name is greater than
+	// the timestamp of the previous generated file name.
+	unix := t.Unix()
+	if unix <= lastRotation {
+		unix = lastRotation + 1
+	}
+	updatedRotation = unix
+	t = time.Unix(unix, 0)
+
+	// Generate the file name.
+	name, link := logName(severity, t)
+	fname := filepath.Join(dir, name)
 	// Open the file os.O_APPEND|os.O_CREATE rather than use os.Create.
 	// Append is almost always more efficient than O_RDRW on most modern file systems.
 	f, err = os.OpenFile(fname, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
 	if err == nil {
-		symlink := filepath.Join(logDir, link)
+		symlink := filepath.Join(dir, link)
 		_ = os.Remove(symlink) // ignore err
 		err = os.Symlink(fname, symlink)
 	}
-	return f, fname, errors.Wrapf(err, "log: cannot create log")
+	return f, updatedRotation, fname, errors.Wrapf(err, "log: cannot create log")
 }
 
 var errNotAFile = errors.New("not a regular file")
@@ -231,7 +259,7 @@ func getFileDetails(info os.FileInfo) (FileDetails, error) {
 func verifyFile(filename string) error {
 	info, err := os.Stat(filename)
 	if err != nil {
-		return err
+		return errors.Errorf("stat: %s: %v", filename, err)
 	}
 	_, err = getFileDetails(info)
 	return err
@@ -241,10 +269,13 @@ func verifyFile(filename string) error {
 // on the local node, in any of the configured log directories.
 func ListLogFiles() ([]FileInfo, error) {
 	var results []FileInfo
-	if logDir == "" {
+	dir, err := logDir.get()
+	if err != nil {
+		// No log directory configured: simply indicate that there are no
+		// log files.
 		return nil, nil
 	}
-	infos, err := ioutil.ReadDir(logDir)
+	infos, err := ioutil.ReadDir(dir)
 	if err != nil {
 		return results, err
 	}
@@ -266,28 +297,70 @@ func ListLogFiles() ([]FileInfo, error) {
 // restricted mode, the filename must be the base name of a file in
 // this process's log directory (this is safe for cases when the
 // filename comes from external sources, such as the admin UI via
-// HTTP). In unrestricted mode any path is allowed, with the added
-// feature that relative paths will be searched in both the current
-// directory and this process's log directory.
+// HTTP). In unrestricted mode any path is allowed, relative to the
+// current directory, with the added feature that simple (base name)
+// file names will be searched in this process's log directory if not
+// found in the current directory.
 func GetLogReader(filename string, restricted bool) (io.ReadCloser, error) {
-	// Verify there are no path separators in a restricted-mode pathname.
-	if restricted && filepath.Base(filename) != filename {
-		return nil, fmt.Errorf("pathnames must be basenames only: %s", filename)
+	dir, err := logDir.get()
+	if err != nil {
+		return nil, err
 	}
-	if !filepath.IsAbs(filename) {
-		filename = filepath.Join(logDir, filename)
-	}
-	if !restricted {
-		var err error
+
+	switch restricted {
+	case true:
+		// Verify there are no path separators in a restricted-mode pathname.
+		if filepath.Base(filename) != filename {
+			return nil, errors.Errorf("pathnames must be basenames only: %s", filename)
+		}
+		filename = filepath.Join(dir, filename)
+
+	case false:
+		if !filepath.IsAbs(filename) {
+			exists, err := fileExists(filename)
+			if err != nil {
+				return nil, err
+			}
+			if !exists && filepath.Base(filename) == filename {
+				// If the file name is not absolute and is simple and not
+				// found in the cwd, try to find the file first relative to
+				// the log directory.
+				fileNameAttempt := filepath.Join(dir, filename)
+				exists, err = fileExists(fileNameAttempt)
+				if err != nil {
+					return nil, err
+				}
+				if !exists {
+					return nil, errors.Errorf("no such file %s either in current directory or in %s", filename, dir)
+				}
+				filename = fileNameAttempt
+			}
+		}
+
+		// Normalize the name to an absolute path without symlinks.
 		filename, err = filepath.EvalSymlinks(filename)
 		if err != nil {
-			return nil, err
+			return nil, errors.Errorf("EvalSymLinks: %s: %v", filename, err)
 		}
 	}
+
+	// Check the file name is valid.
 	if err := verifyFile(filename); err != nil {
 		return nil, err
 	}
+
 	return os.Open(filename)
+}
+
+func fileExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return true, err
 }
 
 // sortableFileInfoSlice is required so we can sort FileInfos.

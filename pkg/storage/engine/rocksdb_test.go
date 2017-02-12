@@ -23,10 +23,8 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
@@ -36,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -45,8 +42,8 @@ const testCacheSize = 1 << 30 // 1 GB
 func TestBatchIterReadOwnWrite(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	db, stopper := setupMVCCInMemRocksDB(t, "iter_read_own_write")
-	defer stopper.Stop()
+	db := setupMVCCInMemRocksDB(t, "iter_read_own_write")
+	defer db.Close()
 
 	b := db.NewBatch()
 	defer b.Close()
@@ -113,8 +110,8 @@ func TestBatchIterReadOwnWrite(t *testing.T) {
 func TestBatchPrefixIter(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	db, stopper := setupMVCCInMemRocksDB(t, "iter_read_own_write")
-	defer stopper.Stop()
+	db := setupMVCCInMemRocksDB(t, "iter_read_own_write")
+	defer db.Close()
 
 	b := db.NewBatch()
 	defer b.Close()
@@ -145,10 +142,8 @@ func makeKey(i int) MVCCKey {
 }
 
 func benchmarkIterOnBatch(b *testing.B, writes int) {
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-
-	engine := createTestEngine(stopper)
+	engine := createTestEngine()
+	defer engine.Close()
 
 	for i := 0; i < writes; i++ {
 		if err := engine.Put(makeKey(i), []byte(strconv.Itoa(i))); err != nil {
@@ -195,9 +190,6 @@ func TestRocksDBOpenWithVersions(t *testing.T) {
 
 	for i, testCase := range testCases {
 		err := openRocksDBWithVersion(t, testCase.hasFile, testCase.ver)
-		if err == nil && len(testCase.expectedErr) == 0 {
-			continue
-		}
 		if !testutils.IsError(err, testCase.expectedErr) {
 			t.Errorf("%d: expected error '%s', actual '%v'", i, testCase.expectedErr, err)
 		}
@@ -207,9 +199,6 @@ func TestRocksDBOpenWithVersions(t *testing.T) {
 // openRocksDBWithVersion attempts to open a rocks db instance, optionally with
 // the supplied Version struct.
 func openRocksDBWithVersion(t *testing.T, hasVersionFile bool, ver Version) error {
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-
 	dir, err := ioutil.TempDir("", "testing")
 	if err != nil {
 		t.Fatal(err)
@@ -230,95 +219,17 @@ func openRocksDBWithVersion(t *testing.T, hasVersionFile bool, ver Version) erro
 		}
 	}
 
-	rocksdb := NewRocksDB(
+	rocksdb, err := NewRocksDB(
 		roachpb.Attributes{},
 		dir,
 		RocksDBCache{},
 		0,
 		DefaultMaxOpenFiles,
-		stopper,
 	)
-	return rocksdb.Open()
-}
-
-func TestCheckpoint(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	dir, err := ioutil.TempDir("", "testing")
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		rocksdb.Close()
 	}
-	defer func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	var expectedKeys []string
-	func() {
-		stopper := stop.NewStopper()
-		defer stopper.Stop()
-
-		db := NewRocksDB(
-			roachpb.Attributes{},
-			dir,
-			RocksDBCache{},
-			0,
-			DefaultMaxOpenFiles,
-			stopper,
-		)
-		if err := db.Open(); err != nil {
-			t.Fatal(err)
-		}
-
-		// Add 20 keys, creating a checkpoint after the 10th key is added.
-		for i := 0; i < 20; i++ {
-			if i == 10 {
-				if err := db.Checkpoint("checkpoint"); err != nil {
-					t.Fatal(err)
-				}
-			}
-			s := fmt.Sprintf("%02d", i)
-			if err := db.Put(mvccKey(s), []byte(s)); err != nil {
-				t.Fatal(err)
-			}
-			if i < 10 {
-				expectedKeys = append(expectedKeys, s)
-			}
-		}
-	}()
-
-	func() {
-		stopper := stop.NewStopper()
-		defer stopper.Stop()
-
-		dir = filepath.Join(dir, "checkpoint")
-		db := NewRocksDB(
-			roachpb.Attributes{},
-			dir,
-			RocksDBCache{},
-			0,
-			DefaultMaxOpenFiles,
-			stopper,
-		)
-		if err := db.Open(); err != nil {
-			t.Fatal(err)
-		}
-
-		// The checkpoint should only contain the first 10 keys.
-		var keys []string
-		err := db.Iterate(NilKey, MVCCKeyMax, func(kv MVCCKeyValue) (bool, error) {
-			keys = append(keys, string(kv.Key.Key))
-			return false, nil
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if !reflect.DeepEqual(expectedKeys, keys) {
-			t.Fatalf("expected %s, but got %s", expectedKeys, keys)
-		}
-	}()
+	return err
 }
 
 func TestSSTableInfosString(t *testing.T) {
@@ -421,6 +332,10 @@ func TestReadAmplification(t *testing.T) {
 func TestConcurrentBatch(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
+	if testutils.Stress() {
+		t.Skip()
+	}
+
 	dir, err := ioutil.TempDir("", "TestConcurrentBatch")
 	if err != nil {
 		t.Fatal(err)
@@ -431,14 +346,12 @@ func TestConcurrentBatch(t *testing.T) {
 		}
 	}()
 
-	stopper := stop.NewStopper()
-	defer stopper.Stop()
-
-	db := NewRocksDB(roachpb.Attributes{}, dir, RocksDBCache{},
-		0, DefaultMaxOpenFiles, stopper)
-	if err := db.Open(); err != nil {
+	db, err := NewRocksDB(roachpb.Attributes{}, dir, RocksDBCache{},
+		0, DefaultMaxOpenFiles)
+	if err != nil {
 		t.Fatalf("could not create new rocksdb db instance at %s: %v", dir, err)
 	}
+	defer db.Close()
 
 	// Prepare 16 4 MB batches containing non-overlapping contents.
 	var batches []Batch
@@ -457,32 +370,25 @@ func TestConcurrentBatch(t *testing.T) {
 		batches = append(batches, batch)
 	}
 
+	errChan := make(chan error, len(batches))
+
 	// Concurrently write all the batches.
-	start := timeutil.Now()
-	var wg sync.WaitGroup
-	wg.Add(len(batches))
 	for _, batch := range batches {
 		go func(batch Batch) {
-			if err := batch.Commit(); err != nil {
-				t.Fatal(err)
-			}
-			wg.Done()
+			errChan <- batch.Commit()
 		}(batch)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		fmt.Printf("%d batches committed: %0.1fs\n", len(batches), timeutil.Since(start).Seconds())
-		close(done)
-	}()
-
 	// While the batch writes are in progress, try to write another key.
 	time.Sleep(100 * time.Millisecond)
-	for i := 0; true; i++ {
+	remainingBatches := len(batches)
+	for i := 0; remainingBatches > 0; i++ {
 		select {
-		case <-done:
-			return
+		case err := <-errChan:
+			if err != nil {
+				t.Fatal(err)
+			}
+			remainingBatches--
 		default:
 		}
 
@@ -619,5 +525,52 @@ func BenchmarkRocksDBSstFileReader(b *testing.B) {
 		if count >= b.N {
 			break
 		}
+	}
+}
+
+func TestRocksDBTimeBound(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	dir, dirCleanup := testutils.TempDir(t, 0)
+	defer dirCleanup()
+
+	rocksdb, err := NewRocksDB(roachpb.Attributes{}, dir, RocksDBCache{}, 0, DefaultMaxOpenFiles)
+	if err != nil {
+		t.Fatalf("could not create new rocksdb db instance at %s: %v", dir, err)
+	}
+	defer rocksdb.Close()
+
+	var minTimestamp = hlc.Timestamp{WallTime: 1, Logical: 0}
+	var maxTimestamp = hlc.Timestamp{WallTime: 3, Logical: 0}
+	times := []hlc.Timestamp{
+		{WallTime: 2, Logical: 0},
+		minTimestamp,
+		maxTimestamp,
+		{WallTime: 2, Logical: 0},
+	}
+
+	for i, time := range times {
+		s := fmt.Sprintf("%02d", i)
+		key := MVCCKey{Key: roachpb.Key(s), Timestamp: time}
+		if err := rocksdb.Put(key, []byte(s)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := rocksdb.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	ssts, err := rocksdb.getUserProperties()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ssts.Sst) != 1 {
+		t.Fatalf("expected 1 sstable got %d", len(ssts.Sst))
+	}
+	sst := ssts.Sst[0]
+	if sst.TsMin == nil || !sst.TsMin.Equal(minTimestamp) {
+		t.Fatalf("got min %v expected %v", sst.TsMin, minTimestamp)
+	}
+	if sst.TsMax == nil || !sst.TsMax.Equal(maxTimestamp) {
+		t.Fatalf("got max %v expected %v", sst.TsMax, maxTimestamp)
 	}
 }

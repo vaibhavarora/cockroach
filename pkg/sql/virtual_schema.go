@@ -116,12 +116,13 @@ func (e virtualTableEntry) getPlanInfo() (ResultColumns, nodeConstructor) {
 			}
 			for i, col := range v.columns {
 				datum := datums[i]
-				if !(datum == parser.DNull || datum.ResolvedType().Equal(col.Typ)) {
+				if !(datum == parser.DNull || datum.ResolvedType().Equivalent(col.Typ)) {
 					panic(fmt.Sprintf("datum column %q expected to be type %s; found type %s",
 						col.Name, col.Typ, datum.ResolvedType()))
 				}
 			}
-			return v.rows.AddRow(datums)
+			_, err := v.rows.AddRow(datums)
+			return err
 		})
 		if err != nil {
 			v.Close()
@@ -227,13 +228,19 @@ func (e *Executor) IsVirtualDatabase(name string) bool {
 func (vs *virtualSchemaHolder) getVirtualTableEntry(
 	tn *parser.TableName,
 ) (virtualTableEntry, error) {
-	if db, ok := vs.getVirtualSchemaEntry(sqlbase.NormalizeName(tn.DatabaseName)); ok {
-		if t, ok := db.tables[sqlbase.NormalizeName(tn.TableName)]; ok {
+	if db, ok := vs.getVirtualSchemaEntry(tn.DatabaseName.Normalize()); ok {
+		if t, ok := db.tables[tn.TableName.Normalize()]; ok {
 			return t, nil
 		}
 		return virtualTableEntry{}, sqlbase.NewUndefinedTableError(tn.String())
 	}
 	return virtualTableEntry{}, nil
+}
+
+// VirtualTabler is used to fetch descriptors for virtual tables and databases.
+type VirtualTabler interface {
+	getVirtualTableDesc(tn *parser.TableName) (*sqlbase.TableDescriptor, error)
+	getVirtualDatabaseDesc(name string) *sqlbase.DatabaseDescriptor
 }
 
 // getVirtualTableDesc checks if the provided name matches a virtual database/table

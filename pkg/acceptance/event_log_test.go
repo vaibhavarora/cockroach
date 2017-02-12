@@ -22,21 +22,28 @@ import (
 	"testing"
 
 	"github.com/pkg/errors"
+	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/acceptance/cluster"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	csql "github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
 // TestEventLog verifies that "node joined" and "node restart" events are
 // recorded whenever a node starts and contacts the cluster.
 func TestEventLog(t *testing.T) {
+	s := log.Scope(t, "")
+	defer s.Close(t)
+
 	runTestOnConfigs(t, testEventLogInner)
 }
 
-func testEventLogInner(t *testing.T, c cluster.Cluster, cfg cluster.TestConfig) {
+func testEventLogInner(
+	ctx context.Context, t *testing.T, c cluster.Cluster, cfg cluster.TestConfig,
+) {
 	num := c.NumNodes()
 	if num <= 0 {
 		t.Fatalf("%d nodes in cluster", num)
@@ -51,8 +58,8 @@ func testEventLogInner(t *testing.T, c cluster.Cluster, cfg cluster.TestConfig) 
 	// Verify that a node_join message was logged for each node in the cluster.
 	// We expect there to eventually be one such message for each node in the
 	// cluster, and each message must be correctly formatted.
-	util.SucceedsSoon(t, func() error {
-		db := makePGClient(t, c.PGUrl(0))
+	testutils.SucceedsSoon(t, func() error {
+		db := makePGClient(t, c.PGUrl(ctx, 0))
 		defer db.Close()
 
 		// Query all node join events. There should be one for each node in the
@@ -115,15 +122,15 @@ func testEventLogInner(t *testing.T, c cluster.Cluster, cfg cluster.TestConfig) 
 	})
 
 	// Stop and Start Node 0, and verify the node restart message.
-	if err := c.Kill(0); err != nil {
+	if err := c.Kill(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Restart(0); err != nil {
+	if err := c.Restart(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
 
-	util.SucceedsSoon(t, func() error {
-		db := makePGClient(t, c.PGUrl(0))
+	testutils.SucceedsSoon(t, func() error {
+		db := makePGClient(t, c.PGUrl(ctx, 0))
 		defer db.Close()
 
 		// Query all node restart events. There should only be one.

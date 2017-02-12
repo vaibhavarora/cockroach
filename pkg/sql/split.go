@@ -17,38 +17,31 @@
 package sql
 
 import (
-	"bytes"
-	"fmt"
-	"strings"
-
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
-	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/pkg/errors"
 )
-
-const maxSplitRetries = 4
 
 // Split executes a KV split.
 // Privileges: INSERT on table.
 func (p *planner) Split(n *parser.Split) (planNode, error) {
-	var tableName parser.NormalizableTableName
+	var tn *parser.TableName
+	var err error
 	if n.Index == nil {
-		tableName = n.Table
+		// Variant: ALTER TABLE ... SPLIT AT ...
+		tn, err = n.Table.NormalizeWithDatabaseName(p.session.Database)
 	} else {
-		tableName = n.Index.Table
+		// Variant: ALTER INDEX ... SPLIT AT ...
+		tn, err = p.expandIndexName(n.Index)
 	}
-
-	// Check that the table exists and that the user has permission.
-	tn, err := tableName.NormalizeWithDatabaseName(p.session.Database)
 	if err != nil {
 		return nil, err
 	}
+
 	tableDesc, err := p.getTableDesc(tn)
 	if err != nil {
 		return nil, err
@@ -65,7 +58,7 @@ func (p *planner) Split(n *parser.Split) (planNode, error) {
 	if n.Index == nil {
 		index = tableDesc.PrimaryIndex
 	} else {
-		normIdxName := sqlbase.NormalizeName(n.Index.Index)
+		normIdxName := n.Index.Index.Normalize()
 		status, i, err := tableDesc.FindIndexByNormalizedName(normIdxName)
 		if err != nil {
 			return nil, err
@@ -114,9 +107,6 @@ func (n *splitNode) Start() error {
 	values := make([]parser.Datum, len(n.exprs))
 	colMap := make(map[sqlbase.ColumnID]int)
 	for i, e := range n.exprs {
-		if err := n.p.startSubqueryPlans(e); err != nil {
-			return err
-		}
 		val, err := e.Eval(&n.p.evalCtx)
 		if err != nil {
 			return err
@@ -135,28 +125,7 @@ func (n *splitNode) Start() error {
 	}
 	n.key = keys.MakeRowSentinelKey(key)
 
-	// We retry a few times if we hit a "conflict updating range descriptors"
-	// error; this can happen if we try to split right after table creation.
-	// TODO(radu): we should find a way to prevent this error, like waiting for
-	// whatever condition we need to wait.
-	for r := retry.Start(retry.Options{MaxRetries: maxSplitRetries}); ; {
-		err := n.p.execCfg.DB.AdminSplit(context.TODO(), n.key)
-		if err != nil &&
-			strings.Contains(err.Error(), storage.ErrMsgConflictUpdatingRangeDesc) &&
-			r.Next() {
-			continue
-		}
-		return err
-	}
-}
-
-func (n *splitNode) expandPlan() error {
-	for _, e := range n.exprs {
-		if err := n.p.expandSubqueryPlans(e); err != nil {
-			return err
-		}
-	}
-	return nil
+	return n.p.execCfg.DB.AdminSplit(context.TODO(), n.key)
 }
 
 func (n *splitNode) Next() (bool, error) {
@@ -189,24 +158,6 @@ func (*splitNode) Close()                       {}
 func (*splitNode) Ordering() orderingInfo       { return orderingInfo{} }
 func (*splitNode) SetLimitHint(_ int64, _ bool) {}
 func (*splitNode) MarkDebug(_ explainMode)      {}
-
-func (n *splitNode) ExplainPlan(_ bool) (name, description string, children []planNode) {
-	var buf bytes.Buffer
-	for i, e := range n.exprs {
-		if i > 0 {
-			buf.WriteString(", ")
-		}
-		e.Format(&buf, parser.FmtSimple)
-		children = n.p.collectSubqueryPlans(e, children)
-	}
-	return "split", buf.String(), children
-}
-
-func (n *splitNode) ExplainTypes(regTypes func(string, string)) {
-	for i, expr := range n.exprs {
-		regTypes(fmt.Sprintf("expr %d", i), parser.AsStringWithFlags(expr, parser.FmtShowTypes))
-	}
-}
 
 func (n *splitNode) DebugValues() debugValues {
 	return debugValues{

@@ -26,6 +26,8 @@ import (
 	"bytes"
 	"fmt"
 
+	"golang.org/x/text/language"
+
 	"github.com/pkg/errors"
 )
 
@@ -33,7 +35,10 @@ import (
 type CreateDatabase struct {
 	IfNotExists bool
 	Name        Name
+	Template    *StrVal
 	Encoding    *StrVal
+	Collate     *StrVal
+	CType       *StrVal
 }
 
 // Format implements the NodeFormatter interface.
@@ -43,9 +48,21 @@ func (node *CreateDatabase) Format(buf *bytes.Buffer, f FmtFlags) {
 		buf.WriteString("IF NOT EXISTS ")
 	}
 	FormatNode(buf, f, node.Name)
+	if node.Template != nil {
+		buf.WriteString(" TEMPLATE = ")
+		Name((*node.Template).s).Format(buf, f)
+	}
 	if node.Encoding != nil {
-		buf.WriteString(" ENCODING=")
+		buf.WriteString(" ENCODING = ")
 		node.Encoding.Format(buf, f)
+	}
+	if node.Collate != nil {
+		buf.WriteString(" LC_COLLATE = ")
+		node.Collate.Format(buf, f)
+	}
+	if node.CType != nil {
+		buf.WriteString(" LC_CTYPE = ")
+		node.CType.Format(buf, f)
 	}
 }
 
@@ -201,6 +218,20 @@ func newColumnTableDef(
 	d.Nullable.Nullability = SilentNull
 	for _, c := range qualifications {
 		switch t := c.Qualification.(type) {
+		case ColumnCollation:
+			locale := string(t)
+			_, err := language.Parse(locale)
+			if err != nil {
+				return nil, errors.Wrapf(err, "invalid locale %s", locale)
+			}
+			switch s := d.Type.(type) {
+			case *StringColType:
+				d.Type = &CollatedStringColType{s.Name, s.N, locale}
+			case *CollatedStringColType:
+				return nil, errors.Errorf("multiple COLLATE declarations for column %q", name)
+			default:
+				return nil, errors.Errorf("COLLATE declaration for non-string-typed column %q", name)
+			}
 		case *ColumnDefault:
 			if d.HasDefaultExpr() {
 				return nil, errors.Errorf("multiple default values specified for column %q", name)
@@ -341,6 +372,7 @@ type ColumnQualification interface {
 	columnQualification()
 }
 
+func (ColumnCollation) columnQualification()         {}
 func (*ColumnDefault) columnQualification()          {}
 func (NotNullConstraint) columnQualification()       {}
 func (NullConstraint) columnQualification()          {}
@@ -349,6 +381,9 @@ func (UniqueConstraint) columnQualification()        {}
 func (*ColumnCheckConstraint) columnQualification()  {}
 func (*ColumnFKConstraint) columnQualification()     {}
 func (*ColumnFamilyConstraint) columnQualification() {}
+
+// ColumnCollation represents a COLLATE clause for a column.
+type ColumnCollation string
 
 // ColumnDefault represents a DEFAULT clause for a column.
 type ColumnDefault struct {
@@ -613,6 +648,21 @@ func (node *CreateTable) Format(buf *bytes.Buffer, f FmtFlags) {
 		if node.Interleave != nil {
 			FormatNode(buf, f, node.Interleave)
 		}
+	}
+}
+
+// CreateUser represents a CREATE USER statement.
+type CreateUser struct {
+	Name     Name
+	Password *StrVal
+}
+
+// Format implements the NodeFormatter interface.
+func (node *CreateUser) Format(buf *bytes.Buffer, f FmtFlags) {
+	buf.WriteString("CREATE USER ")
+	FormatNode(buf, f, node.Name)
+	if node.Password != nil {
+		buf.WriteString(" WITH PASSWORD *****")
 	}
 }
 

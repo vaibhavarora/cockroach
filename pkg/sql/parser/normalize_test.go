@@ -17,6 +17,24 @@
 package parser
 
 import "testing"
+import "github.com/cockroachdb/cockroach/pkg/util/leaktest"
+
+func TestReNormalizeName(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	testCases := []struct {
+		in, expected string
+	}{
+		{"HELLO", "hello"},                            // Lowercase is the norm
+		{"ıİ", "ii"},                                  // Turkish/Azeri special cases
+		{"no\u0308rmalization", "n\u00f6rmalization"}, // NFD -> NFC.
+	}
+	for _, test := range testCases {
+		s := ReNormalizeName(test.in)
+		if test.expected != s {
+			t.Errorf("%s: expected %s, but found %s", test.in, test.expected, s)
+		}
+	}
+}
 
 func TestNormalizeExpr(t *testing.T) {
 	defer mockNameTypes(map[string]Type{
@@ -82,6 +100,18 @@ func TestNormalizeExpr(t *testing.T) {
 		{`a IN (3, 2, 1)`, `a IN (1, 2, 3)`},
 		{`1 IN (1, 2, a)`, `1 IN (1, 2, a)`},
 		{`NULL IN (1, 2, 3)`, `NULL`},
+		{`1 = ANY ARRAY[3, 2, 1]`, `true`},
+		{`1 < SOME ARRAY[3, 2, 1]`, `true`},
+		{`1 > SOME (ARRAY[3, 2, 1])`, `false`},
+		{`1 > SOME (NULL)`, `NULL`},
+		{`1 > SOME (((NULL)))`, `NULL`},
+		{`NULL > SOME ARRAY[3, 2, 1]`, `NULL`},
+		{`NULL > ALL ARRAY[3, 2, 1]`, `NULL`},
+		{`4 > ALL ARRAY[3, 2, 1]`, `true`},
+		{`a > ALL ARRAY[3, 2, 1]`, `a > ALL {3,2,1}`},
+		{`3 > ALL ARRAY[3, 2, a]`, `3 > ALL ARRAY[3, 2, a]`},
+		{`3 > ANY (ARRAY[3, 2, a])`, `3 > ANY ARRAY[3, 2, a]`},
+		{`3 > SOME (((ARRAY[3, 2, a])))`, `3 > SOME ARRAY[3, 2, a]`},
 		{`NULL LIKE 'a'`, `NULL`},
 		{`NULL NOT LIKE 'a'`, `NULL`},
 		{`NULL ILIKE 'a'`, `NULL`},
@@ -120,8 +150,7 @@ func TestNormalizeExpr(t *testing.T) {
 		{`(1, 2, 3) IN ((1, 2, 3), (4, 5, 6))`, `true`},
 		{`(1, 'one')`, `(1, 'one')`},
 		{`ANNOTATE_TYPE(1, float)`, `1.0`},
-		// TODO(nvanbenschoten) introduce a shorthand type annotation notation.
-		// {`1!float`, `1.0`},
+		{`1:::float`, `1.0`},
 		{`IF((true AND a < 0), (0 + a)::decimal, 2 / (1 - 1))`, `IF(a < 0, a::DECIMAL, 2 / 0)`},
 		{`IF((true OR a < 0), (0 + a)::decimal, 2 / (1 - 1))`, `a::DECIMAL`},
 		{`COALESCE(NULL, (NULL < 3), a = 2 - 1, d)`, `COALESCE(a = 1, d)`},
@@ -132,7 +161,7 @@ func TestNormalizeExpr(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", d.expr, err)
 		}
-		typedExpr, err := expr.TypeCheck(nil, NoTypePreference)
+		typedExpr, err := expr.TypeCheck(nil, TypeAny)
 		if err != nil {
 			t.Fatalf("%s: %v", d.expr, err)
 		}

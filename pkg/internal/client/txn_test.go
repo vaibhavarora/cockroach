@@ -21,14 +21,19 @@ import (
 	"testing"
 	"time"
 
+	basictracer "github.com/opentracing/basictracer-go"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
+
+	"regexp"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
@@ -39,12 +44,52 @@ var (
 	txnKey      = roachpb.Key("test-txn")
 )
 
+// An example of snowball tracing being used to dump a trace around a
+// transaction. Use something similar whenever you cannot use
+// COCKROACH_TRACE_SQL.
+func TestTxnSnowballTrace(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	db := NewDB(newTestSender(nil, nil))
+	var collectedSpans []basictracer.RawSpan
+	sp, err := tracing.JoinOrNewSnowball("coordinator", nil, func(sp basictracer.RawSpan) {
+		collectedSpans = append(collectedSpans, sp)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := opentracing.ContextWithSpan(context.TODO(), sp)
+	if err := db.Txn(ctx, func(txn *Txn) error {
+		log.Event(ctx, "collecting spans")
+		collectedSpans = append(collectedSpans, txn.CollectedSpans...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	log.Event(ctx, "txn complete")
+	// Cannot use ctx once Finish() is called.
+	sp.Finish()
+	dump := tracing.FormatRawSpans(collectedSpans)
+	// dump:
+	//    0.105ms      0.000ms    event:collecting spans
+	//    0.275ms      0.171ms    event:client.Txn did AutoCommit. err: <nil>
+	//txn: "internal/client/txn_test.go:67 TestTxnSnowballTrace" id=<nil> key=/Min rw=false pri=0.00000000 iso=SERIALIZABLE stat=COMMITTED epo=0 ts=0.000000000,0 orig=0.000000000,0 max=0.000000000,0 wto=false rop=false
+	//    0.278ms      0.173ms    event:txn complete
+	found, err := regexp.MatchString(".*event:collecting spans\n.*event:client.Txn did AutoCommit. err: <nil>\n.*\n.*event:txn complete.*", dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatalf("didnt match: %s", dump)
+	}
+}
+
 // TestSender mocks out some of the txn coordinator sender's
 // functionality. It responds to PutRequests using testPutResp.
 func newTestSender(
 	pre, post func(roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error),
 ) SenderFunc {
-	txnID := uuid.NewV4()
+	txnID := uuid.MakeV4()
 
 	return func(_ context.Context, ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
 		if ba.UserPriority == 0 {
@@ -52,7 +97,7 @@ func newTestSender(
 		}
 		if ba.Txn != nil && ba.Txn.ID == nil {
 			ba.Txn.Key = txnKey
-			ba.Txn.ID = txnID
+			ba.Txn.ID = &txnID
 		}
 
 		var br *roachpb.BatchResponse
@@ -566,8 +611,8 @@ func TestAbortedRetryRenewsTimestamp(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	// Create a TestSender that aborts a transaction 2 times before succeeding.
-	mc := hlc.NewManualClock(0)
-	clock := hlc.NewClock(mc.UnixNano)
+	mc := hlc.NewManualClock(123)
+	clock := hlc.NewClock(mc.UnixNano, time.Nanosecond)
 	count := 0
 	db := NewDB(newTestSender(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
 		if _, ok := ba.GetArg(roachpb.Put); ok {
@@ -719,10 +764,11 @@ func TestTimestampSelectionInOptions(t *testing.T) {
 	txn := NewTxn(context.Background(), *db)
 
 	mc := hlc.NewManualClock(100)
-	clock := hlc.NewClock(mc.UnixNano)
-	var execOpt TxnExecOptions
+	clock := hlc.NewClock(mc.UnixNano, time.Nanosecond)
+	execOpt := TxnExecOptions{
+		Clock: clock,
+	}
 	refTimestamp := clock.Now()
-	execOpt.Clock = clock
 
 	txnClosure := func(txn *Txn, opt *TxnExecOptions) error {
 		// Ensure the KV transaction is created.

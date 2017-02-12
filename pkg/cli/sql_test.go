@@ -17,11 +17,13 @@
 package cli
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/chzyer/readline"
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -35,7 +37,7 @@ func TestSQLLex(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
 	defer s.Stopper().Stop()
 
-	pgurl, err := s.(*server.TestServer).Cfg.PGURL("")
+	pgurl, err := s.(*server.TestServer).Cfg.PGURL(url.User(security.RootUser))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +179,7 @@ func TestIsEndOfStatement(t *testing.T) {
 		if syntax == 0 {
 			syntax = parser.Traditional
 		}
-		isEmpty, isEnd, hasSet := isEndOfStatement(syntax, &[]string{test.in})
+		isEmpty, isEnd, hasSet := isEndOfStatement(test.in, syntax)
 		if isEmpty != test.isEmpty {
 			t.Errorf("%q: isEmpty expected %v, got %v", test.in, test.isEmpty, isEmpty)
 		}

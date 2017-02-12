@@ -19,6 +19,8 @@ package parser
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -104,6 +106,168 @@ var isoTimeUnitMap = map[string]duration.Duration{
 	"H": {Nanos: time.Hour.Nanoseconds()},
 }
 
+const errInvalidSQLDuration = "invalid input syntax for type interval %s"
+
+type parsedIndex uint8
+
+const (
+	nothingParsed parsedIndex = iota
+	hmsParsed
+	dayParsed
+	yearMonthParsed
+)
+
+// Parses a SQL standard interval string.
+// See the following links for exampels:
+//  - http://www.postgresql.org/docs/9.1/static/datatype-datetime.html#DATATYPE-INTERVAL-INPUT-EXAMPLES
+//  - http://www.ibm.com/support/knowledgecenter/SSGU8G_12.1.0/com.ibm.esqlc.doc/ids_esqlc_0190.htm
+func sqlStdToDuration(s string) (duration.Duration, error) {
+	var d duration.Duration
+	parts := strings.Fields(s)
+	if len(parts) > 3 || len(parts) == 0 {
+		return d, fmt.Errorf(errInvalidSQLDuration, s)
+	}
+	// Index of which part(s) have been parsed for detecting bad order such as `HH:MM:SS Year-Month`.
+	parsedIdx := nothingParsed
+	// Both 'Day' and 'Second' can be float, but 'Day Second'::interval is invalid.
+	floatParsed := false
+	// Parsing backward makes it easy to distinguish 'Day' and 'Second' when encountering a single value.
+	//   `1-2 5 9:` and `1-2 5`
+	//        |              |
+	// day ---+              |
+	// second ---------------+
+	for i := len(parts) - 1; i >= 0; i-- {
+		// Parses leading sign
+		part := parts[i]
+		neg := false
+		// Consumes [-+]
+		if part != "" {
+			c := part[0]
+			if c == '-' || c == '+' {
+				neg = c == '-'
+				part = part[1:]
+			}
+		}
+		if part[0] == '-' {
+			return d, fmt.Errorf(errInvalidSQLDuration, s)
+		}
+
+		if strings.ContainsRune(part, ':') {
+			// Try to parse as HH:MM:SS
+			if parsedIdx != nothingParsed {
+				return d, fmt.Errorf(errInvalidSQLDuration, s)
+			}
+			parsedIdx = hmsParsed
+			// Colon-separated intervals in Postgres are odd. They have day, hour,
+			// minute, or second parts depending on number of fields and if the field
+			// is an int or float.
+			//
+			// Instead of supporting unit changing based on int or float, use the
+			// following rules:
+			// - One field is S.
+			// - Two fields is H:M.
+			// - Three fields is H:M:S.
+			// - All fields support both int and float.
+			hms := strings.Split(part, ":")
+			var err error
+			var dur time.Duration
+			// Support such as `HH:` and `HH:MM:` as postgres do. Set the last part to "0".
+			if hms[len(hms)-1] == "" {
+				hms[len(hms)-1] = "0"
+			}
+			switch len(hms) {
+			case 2:
+				toParse := hms[0] + "h" + hms[1] + "m"
+				if neg {
+					toParse = "-" + toParse
+				}
+				dur, err = time.ParseDuration(toParse)
+			case 3:
+				// Support such as `HH::SS` as postgres do. Set minute part to 0.
+				// TODO(hainesc): `:1:2 -> 1 hour 2 min` as postgres do?
+				if hms[1] == "" {
+					hms[1] = "0"
+				}
+				toParse := hms[0] + "h" + hms[1] + "m" + hms[2] + "s"
+				if neg {
+					toParse = "-" + toParse
+				}
+				dur, err = time.ParseDuration(toParse)
+			default:
+				return d, fmt.Errorf(errInvalidSQLDuration, s)
+			}
+			if err != nil {
+				return d, makeParseError(part, TypeInterval, err)
+			}
+			d = d.Add(duration.Duration{Nanos: dur.Nanoseconds()})
+		} else if strings.ContainsRune(part, '-') {
+			// Try to parse as Year-Month.
+			if parsedIdx >= yearMonthParsed {
+				return d, fmt.Errorf(errInvalidSQLDuration, s)
+			}
+			parsedIdx = yearMonthParsed
+
+			yms := strings.Split(part, "-")
+			if len(yms) != 2 {
+				return d, fmt.Errorf(errInvalidSQLDuration, s)
+			}
+			year, errYear := strconv.Atoi(yms[0])
+			var month int
+			var errMonth error
+			if yms[1] != "" {
+				month, errMonth = strconv.Atoi(yms[1])
+			}
+			if errYear == nil && errMonth == nil {
+				delta := duration.Duration{Months: 1}.Mul(int64(year)*12 + int64(month))
+				if neg {
+					d = d.Sub(delta)
+				} else {
+					d = d.Add(delta)
+				}
+			} else {
+				return d, fmt.Errorf(errInvalidSQLDuration, s)
+			}
+
+		} else if value, err := strconv.ParseFloat(part, 64); err == nil {
+			// Try to parse as Day or Second.
+			var dur time.Duration
+			var err error
+			// Make sure 'Day Second'::interval invalid.
+			if floatParsed {
+				return d, fmt.Errorf(errInvalidSQLDuration, s)
+			}
+			floatParsed = true
+			if parsedIdx == nothingParsed {
+				// It must be 'Second' part because nothing has been parsed.
+				toParse := part + "s"
+				if neg {
+					toParse = "-" + toParse
+				}
+				dur, err = time.ParseDuration(toParse)
+
+				if err != nil {
+					return d, fmt.Errorf(errInvalidSQLDuration, s)
+				}
+				d = d.Add(duration.Duration{Nanos: dur.Nanoseconds()})
+				parsedIdx = hmsParsed
+			} else if parsedIdx == hmsParsed {
+				// Day part.
+				// TODO(hainesc): support float value in day part?
+				delta := duration.Duration{Days: 1}.Mul(int64(value))
+				if neg {
+					d = d.Sub(delta)
+				} else {
+					d = d.Add(delta)
+				}
+				parsedIdx = dayParsed
+			} else {
+				return d, fmt.Errorf(errInvalidSQLDuration, s)
+			}
+		}
+	}
+	return d, nil
+}
+
 // Parses an ISO8601 (with designators) string.
 // See the following links for examples:
 //  - http://www.postgresql.org/docs/9.1/static/datatype-datetime.html#DATATYPE-INTERVAL-INPUT-EXAMPLES
@@ -144,20 +308,24 @@ func iso8601ToDuration(s string) (duration.Duration, error) {
 
 // Postgres Units.
 var postgresUnitMap = map[string]duration.Duration{
-	"second":  {Nanos: time.Second.Nanoseconds()},
-	"seconds": {Nanos: time.Second.Nanoseconds()},
-	"minute":  {Nanos: time.Minute.Nanoseconds()},
-	"minutes": {Nanos: time.Minute.Nanoseconds()},
-	"hour":    {Nanos: time.Hour.Nanoseconds()},
-	"hours":   {Nanos: time.Hour.Nanoseconds()},
-	"day":     {Days: 1},
-	"days":    {Days: 1},
-	"week":    {Days: 7},
-	"weeks":   {Days: 7},
-	"month":   {Months: 1},
-	"months":  {Months: 1},
-	"year":    {Months: 12},
-	"years":   {Months: 12},
+	"nanosecond":   {Nanos: time.Nanosecond.Nanoseconds()},
+	"nanoseconds":  {Nanos: time.Nanosecond.Nanoseconds()},
+	"microsecond":  {Nanos: time.Microsecond.Nanoseconds()},
+	"microseconds": {Nanos: time.Microsecond.Nanoseconds()},
+	"second":       {Nanos: time.Second.Nanoseconds()},
+	"seconds":      {Nanos: time.Second.Nanoseconds()},
+	"minute":       {Nanos: time.Minute.Nanoseconds()},
+	"minutes":      {Nanos: time.Minute.Nanoseconds()},
+	"hour":         {Nanos: time.Hour.Nanoseconds()},
+	"hours":        {Nanos: time.Hour.Nanoseconds()},
+	"day":          {Days: 1},
+	"days":         {Days: 1},
+	"week":         {Days: 7},
+	"weeks":        {Days: 7},
+	"month":        {Months: 1},
+	"months":       {Months: 1},
+	"year":         {Months: 12},
+	"years":        {Months: 12},
 }
 
 // Parses a duration in the "traditional" Postgres format.
@@ -171,10 +339,11 @@ func postgresToDuration(s string) (duration.Duration, error) {
 		l.consumeSpaces()
 		if unit, ok := postgresUnitMap[u]; ok {
 			d = d.Add(unit.Mul(v))
-		} else {
+		} else if u != "" {
 			return d, fmt.Errorf("interval: unknown unit %s in postgres duration %s", u, s)
+		} else {
+			return d, fmt.Errorf("interval: missing unit in postgres duration %s", s)
 		}
 	}
-
 	return d, nil
 }

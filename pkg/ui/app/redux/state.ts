@@ -24,7 +24,9 @@ export interface AdminUIState {
     cachedData: apiReducers.APIReducersState;
 }
 
-export const store = createStore(
+// createAdminUIStore is a function that returns a new store for the admin UI.
+// It's in a function so it can be recreated as necessary for testing.
+export const createAdminUIStore = () => createStore(
   combineReducers<AdminUIState>({
     routing: routerReducer,
     ui: uiReducer,
@@ -40,15 +42,17 @@ export const store = createStore(
     (window as any).devToolsExtension ? (window as any).devToolsExtension({
       // TODO(maxlang): implement {,de}serializeAction.
       // TODO(maxlang): implement deserializeState.
-      serializeState: (key: string, value: any): Object => {
+      serializeState: (_key: string, value: any): Object => {
         if (value && value.toRaw) {
           return value.toRaw();
         }
         return value;
       },
-    }) : _.identity
-  ) as GenericStoreEnhancer
+    }) : _.identity,
+  ) as GenericStoreEnhancer,
 );
+
+export const store = createAdminUIStore();
 
 // Connect react-router history with redux.
 export const history = syncHistoryWithStore(hashHistory, store);

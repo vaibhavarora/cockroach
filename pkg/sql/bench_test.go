@@ -21,7 +21,7 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"math/rand"
-	"sync"
+	"net"
 	"sync/atomic"
 	"testing"
 
@@ -59,9 +59,6 @@ func benchmarkMultinodeCockroach(b *testing.B, f func(b *testing.B, db *gosql.DB
 	if _, err := tc.Conns[0].Exec(`CREATE DATABASE bench`); err != nil {
 		b.Fatal(err)
 	}
-	if err := tc.WaitForFullReplication(); err != nil {
-		b.Fatal(err)
-	}
 	defer tc.Stopper().Stop()
 
 	f(b, tc.Conns[0])
@@ -92,6 +89,13 @@ func benchmarkPostgres(b *testing.B, f func(b *testing.B, db *gosql.DB)) {
 	// is replaced with your local Cockroach source directory.
 	// Be sure to restart Postgres for this to take effect.
 
+	const addr = "localhost:5432"
+	if conn, err := net.Dial("tcp", addr); err != nil {
+		b.Skipf("unable to connect to postgres server on %s: %s", addr, err)
+	} else {
+		conn.Close()
+	}
+
 	db, err := gosql.Open("postgres", "sslmode=require host=localhost port=5432")
 	if err != nil {
 		b.Fatal(err)
@@ -106,6 +110,13 @@ func benchmarkPostgres(b *testing.B, f func(b *testing.B, db *gosql.DB)) {
 }
 
 func benchmarkMySQL(b *testing.B, f func(b *testing.B, db *gosql.DB)) {
+	const addr = "localhost:3306"
+	if conn, err := net.Dial("tcp", addr); err != nil {
+		b.Skipf("unable to connect to mysql server on %s: %s", addr, err)
+	} else {
+		conn.Close()
+	}
+
 	db, err := gosql.Open("mysql", "root@tcp(localhost:3306)/")
 	if err != nil {
 		b.Fatal(err)
@@ -500,7 +511,9 @@ func runBenchmarkUpsert(b *testing.B, db *gosql.DB, count int) {
 			key++
 		}
 		insertBuf.WriteString(`; `)
-		updateBuf.WriteTo(&insertBuf)
+		if _, err := updateBuf.WriteTo(&insertBuf); err != nil {
+			b.Fatal(err)
+		}
 		if _, err := db.Exec(insertBuf.String()); err != nil {
 			b.Fatal(err)
 		}
@@ -1173,46 +1186,51 @@ CREATE TABLE bench.insert_distinct (
 
 	b.ResetTimer()
 
-	var wg sync.WaitGroup
-	wg.Add(numUsers)
+	errChan := make(chan error)
 
 	var count int64
 	for i := 0; i < numUsers; i++ {
 		go func(i int) {
-			defer wg.Done()
-			var buf bytes.Buffer
+			errChan <- func() error {
+				var buf bytes.Buffer
 
-			rnd := rand.New(rand.NewSource(int64(i)))
-			// Article IDs are chosen from a zipf distribution. These values select
-			// articleIDs that are mostly <10000. The parameters were experimentally
-			// determined, but somewhat arbitrary.
-			zipf := rand.NewZipf(rnd, 2, 10000, 100000)
+				rnd := rand.New(rand.NewSource(int64(i)))
+				// Article IDs are chosen from a zipf distribution. These values select
+				// articleIDs that are mostly <10000. The parameters were experimentally
+				// determined, but somewhat arbitrary.
+				zipf := rand.NewZipf(rnd, 2, 10000, 100000)
 
-			for {
-				n := atomic.AddInt64(&count, 1)
-				if int(n) >= b.N {
-					return
-				}
-
-				// Insert between [1,100] articles in a batch.
-				numArticles := 1 + rnd.Intn(100)
-				buf.Reset()
-				buf.WriteString(`INSERT INTO bench.insert_distinct VALUES `)
-				for j := 0; j < numArticles; j++ {
-					if j > 0 {
-						buf.WriteString(", ")
+				for {
+					n := atomic.AddInt64(&count, 1)
+					if int(n) >= b.N {
+						return nil
 					}
-					fmt.Fprintf(&buf, "(%d, %d)", zipf.Uint64(), n)
-				}
 
-				if _, err := db.Exec(buf.String()); err != nil {
-					b.Fatal(err)
+					// Insert between [1,100] articles in a batch.
+					numArticles := 1 + rnd.Intn(100)
+					buf.Reset()
+					buf.WriteString(`INSERT INTO bench.insert_distinct VALUES `)
+					for j := 0; j < numArticles; j++ {
+						if j > 0 {
+							buf.WriteString(", ")
+						}
+						fmt.Fprintf(&buf, "(%d, %d)", zipf.Uint64(), n)
+					}
+
+					if _, err := db.Exec(buf.String()); err != nil {
+						return err
+					}
 				}
-			}
+			}()
 		}(i)
 	}
 
-	wg.Wait()
+	for i := 0; i < numUsers; i++ {
+		if err := <-errChan; err != nil {
+			b.Fatal(err)
+		}
+	}
+
 	b.StopTimer()
 }
 

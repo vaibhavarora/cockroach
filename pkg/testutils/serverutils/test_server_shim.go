@@ -27,23 +27,21 @@ package serverutils
 import (
 	gosql "database/sql"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/gogo/protobuf/proto"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
@@ -79,6 +77,9 @@ type TestServerInterface interface {
 	// DistSender returns the DistSender used by the TestServer.
 	DistSender() *kv.DistSender
 
+	// DistSQLServer returns the *distsqlrun.ServerImpl as an interface{}.
+	DistSQLServer() interface{}
+
 	// AdminURL returns the URL for the admin UI.
 	AdminURL() string
 	// GetHTTPClient returns an http client connected to the server. It uses the
@@ -95,6 +96,15 @@ type TestServerInterface interface {
 	// WriteSummaries records summaries of time-series data, which is required for
 	// any tests that query server stats.
 	WriteSummaries() error
+
+	// GetFirstStoreID is a utility function returning the StoreID of the first
+	// store on this node.
+	GetFirstStoreID() roachpb.StoreID
+
+	// SplitRange splits the range containing splitKey.
+	SplitRange(
+		splitKey roachpb.Key,
+	) (left roachpb.RangeDescriptor, right roachpb.RangeDescriptor, err error)
 }
 
 // TestServerFactory encompasses the actual implementation of the shim
@@ -125,7 +135,7 @@ func StartServer(
 
 	kvClient := server.KVClient().(*client.DB)
 	pgURL, cleanupGoDB := sqlutils.PGUrl(
-		t, server.ServingAddr(), security.RootUser, "StartServer")
+		t, server.ServingAddr(), "StartServer", url.User(security.RootUser))
 	pgURL.Path = params.UseDatabase
 	goDB, err := gosql.Open("postgres", pgURL.String())
 	if err != nil {
@@ -161,7 +171,7 @@ func GetJSONProto(ts TestServerInterface, path string, response proto.Message) e
 	if err != nil {
 		return err
 	}
-	return util.GetJSON(httpClient, ts.AdminURL()+path, response)
+	return httputil.GetJSON(httpClient, ts.AdminURL()+path, response)
 }
 
 // PostJSONProto uses the supplied client to POST request to the URL specified by
@@ -171,21 +181,5 @@ func PostJSONProto(ts TestServerInterface, path string, request, response proto.
 	if err != nil {
 		return err
 	}
-	return util.PostJSON(httpClient, ts.AdminURL()+path, request, response)
-}
-
-// LookupRange returns the descriptor of the range containing key.
-func LookupRange(ds *kv.DistSender, key roachpb.Key) (roachpb.RangeDescriptor, error) {
-	rangeLookupReq := roachpb.RangeLookupRequest{
-		Span: roachpb.Span{
-			Key: keys.RangeMetaKey(keys.MustAddr(key)),
-		},
-		MaxRanges: 1,
-	}
-	resp, pErr := client.SendWrapped(context.Background(), ds, &rangeLookupReq)
-	if pErr != nil {
-		return roachpb.RangeDescriptor{}, errors.Errorf(
-			"%q: lookup range unexpected error: %s", key, pErr)
-	}
-	return resp.(*roachpb.RangeLookupResponse).Ranges[0], nil
+	return httputil.PostJSON(httpClient, ts.AdminURL()+path, request, response)
 }

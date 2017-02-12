@@ -140,7 +140,7 @@ func queryDescriptors(conn *sqlConn) (map[sqlbase.ID]*sqlbase.Descriptor, error)
 func queryNamespace(conn *sqlConn, parentID sqlbase.ID, name string) (sqlbase.ID, error) {
 	rows, err := makeQuery(
 		`SELECT id FROM system.namespace WHERE parentID = $1 AND name = $2`,
-		parentID, sqlbase.NormalizeName(parser.Name(name)))(conn)
+		parentID, parser.Name(name).Normalize())(conn)
 	if err != nil {
 		return 0, err
 	}
@@ -209,7 +209,7 @@ Fetches and displays the zone configuration for the specified database or
 table.
 `,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runGetZone),
+	RunE:         MaybeDecorateGRPCError(runGetZone),
 }
 
 // runGetZone retrieves the zone config for a given object id,
@@ -224,7 +224,7 @@ func runGetZone(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	conn, err := makeSQLClient()
+	conn, err := getPasswordAndMakeSQLClient()
 	if err != nil {
 		return err
 	}
@@ -271,14 +271,14 @@ var lsZonesCmd = &cobra.Command{
 List zone configs.
 `,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runLsZones),
+	RunE:         MaybeDecorateGRPCError(runLsZones),
 }
 
 func runLsZones(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		return usageAndError(cmd)
 	}
-	conn, err := makeSQLClient()
+	conn, err := getPasswordAndMakeSQLClient()
 	if err != nil {
 		return err
 	}
@@ -345,7 +345,7 @@ var rmZoneCmd = &cobra.Command{
 Remove an existing zone config for the specified database or table.
 `,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runRmZone),
+	RunE:         MaybeDecorateGRPCError(runRmZone),
 }
 
 func runRmZone(cmd *cobra.Command, args []string) error {
@@ -358,7 +358,7 @@ func runRmZone(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	conn, err := makeSQLClient()
+	conn, err := getPasswordAndMakeSQLClient()
 	if err != nil {
 		return err
 	}
@@ -415,7 +415,7 @@ Note that the specified zone config is merged with the existing zone config for
 the database or table.
 `,
 	SilenceUsage: true,
-	RunE:         maybeDecorateGRPCError(runSetZone),
+	RunE:         MaybeDecorateGRPCError(runSetZone),
 }
 
 func readZoneConfig() (conf []byte, err error) {
@@ -444,7 +444,7 @@ func runSetZone(cmd *cobra.Command, args []string) error {
 		return usageAndError(cmd)
 	}
 
-	conn, err := makeSQLClient()
+	conn, err := getPasswordAndMakeSQLClient()
 	if err != nil {
 		return err
 	}

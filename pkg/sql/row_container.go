@@ -13,13 +13,23 @@
 // permissions and limitations under the License.
 //
 // Author: Raphael 'kena' Poss (knz@cockroachlabs.com)
+// Author: Irfan Sharif (irfansharif@cockroachlabs.com)
 
 package sql
 
 import (
+	"fmt"
 	"unsafe"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/mon"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+)
+
+const (
+	// targetChunkSize is the target number of Datums in a RowContainer chunk.
+	targetChunkSize = 64
+	sizeOfDatum     = int64(unsafe.Sizeof(parser.Datum(nil)))
+	sizeOfDTuple    = int64(unsafe.Sizeof(parser.DTuple(nil)))
 )
 
 // RowContainer is a container for rows of DTuples which tracks the
@@ -30,9 +40,19 @@ import (
 // TODO(knz): this does not currently track the amount of memory used
 // for the outer array of DTuple references.
 type RowContainer struct {
-	p    *planner
-	rows []parser.DTuple
+	numCols int
 
+	// rowsPerChunk is the number of rows in a chunk; we pack multiple rows in a
+	// single []Datum to reduce the overhead of the slice if we have few columns.
+	rowsPerChunk int
+	// preallocChunks is the number of chunks we allocate upfront (on the first
+	// AddRow call).
+	preallocChunks int
+	chunks         [][]parser.Datum
+	numRows        int
+
+	// chunkMemSize is the memory used by a chunk.
+	chunkMemSize int64
 	// fixedColsSize is the sum of widths of fixed-width columns in a
 	// single row.
 	fixedColsSize int64
@@ -40,12 +60,21 @@ type RowContainer struct {
 	// is variable.
 	varSizedColumns []int
 
+	// deletedRows is the number of rows that have been deleted from the front
+	// of the container. When this number reaches rowsPerChunk we delete that chunk
+	// and reset this back to zero.
+	deletedRows int
+
 	// memAcc tracks the current memory consumption of this
 	// RowContainer.
-	memAcc WrappableMemoryAccount
+	memAcc mon.BoundAccount
 }
 
 // NewRowContainer allocates a new row container.
+//
+// The acc argument indicates where to register memory allocations by
+// this row container. Should probably be created by
+// Session.makeBoundAccount() or Session.TxnState.makeBoundAccount().
 //
 // The rowCapacity argument indicates how many rows are to be
 // expected; it is used to pre-allocate the outer array of row
@@ -62,34 +91,67 @@ type RowContainer struct {
 // test properly.  The trade-off is that very large table schemas or
 // column selections could cause unchecked and potentially dangerous
 // memory growth.
-func (p *planner) NewRowContainer(h ResultColumns, rowCapacity int) *RowContainer {
+func NewRowContainer(acc mon.BoundAccount, h ResultColumns, rowCapacity int) *RowContainer {
 	nCols := len(h)
 
-	res := &RowContainer{
-		p:               p,
-		rows:            make([]parser.DTuple, 0, rowCapacity),
-		varSizedColumns: make([]int, 0, nCols),
-		memAcc:          p.session.OpenAccount(),
+	c := &RowContainer{
+		numCols:        nCols,
+		memAcc:         acc,
+		preallocChunks: 1,
+	}
+
+	if nCols != 0 {
+		c.rowsPerChunk = (targetChunkSize + nCols - 1) / nCols
+		if rowCapacity > 0 {
+			c.preallocChunks = (rowCapacity + c.rowsPerChunk - 1) / c.rowsPerChunk
+		}
 	}
 
 	for i := 0; i < nCols; i++ {
 		sz, variable := h[i].Typ.Size()
 		if variable {
-			res.varSizedColumns = append(res.varSizedColumns, i)
+			if c.varSizedColumns == nil {
+				// Only allocate varSizedColumns if necessary.
+				c.varSizedColumns = make([]int, 0, nCols)
+			}
+			c.varSizedColumns = append(c.varSizedColumns, i)
 		} else {
-			res.fixedColsSize += int64(sz)
+			c.fixedColsSize += int64(sz)
 		}
 	}
-	res.fixedColsSize += int64(unsafe.Sizeof(parser.Datum(nil)) * uintptr(nCols))
 
-	return res
+	// Precalculate the memory used for a chunk, specifically by the Datums in the
+	// chunk and the slice pointing at the chunk.
+	c.chunkMemSize = sizeOfDatum * int64(c.rowsPerChunk*c.numCols)
+	c.chunkMemSize += sizeOfDTuple
+
+	return c
 }
 
 // Close releases the memory associated with the RowContainer.
 func (c *RowContainer) Close() {
-	c.rows = nil
+	c.chunks = nil
 	c.varSizedColumns = nil
-	c.memAcc.W(c.p.session).Close()
+	c.memAcc.Close()
+}
+
+func (c *RowContainer) allocChunks(numChunks int) error {
+	datumsPerChunk := c.rowsPerChunk * c.numCols
+
+	if err := c.memAcc.Grow(c.chunkMemSize * int64(numChunks)); err != nil {
+		return err
+	}
+
+	if c.chunks == nil {
+		c.chunks = make([][]parser.Datum, 0, numChunks)
+	}
+
+	datums := make([]parser.Datum, numChunks*datumsPerChunk)
+	for i, pos := 0, 0; i < numChunks; i++ {
+		c.chunks = append(c.chunks, datums[pos:pos+datumsPerChunk])
+		pos += datumsPerChunk
+	}
+	return nil
 }
 
 // rowSize computes the size of a single row.
@@ -101,64 +163,101 @@ func (c *RowContainer) rowSize(row parser.DTuple) int64 {
 	return rsz
 }
 
-// AddRow attempts to insert a new row in the RowContainer.
-// Returns an error if the allocation was denied by the MemoryUsageMonitor.
-func (c *RowContainer) AddRow(row parser.DTuple) error {
-	if err := c.memAcc.W(c.p.session).Grow(c.rowSize(row)); err != nil {
-		return err
+// getChunkAndPos returns the chunk index and the position inside the chunk for
+// a given row index.
+func (c *RowContainer) getChunkAndPos(rowIdx int) (chunk int, pos int) {
+	// This is a potential hot path; use int32 for faster division.
+	row := int32(rowIdx + c.deletedRows)
+	div := int32(c.rowsPerChunk)
+	return int(row / div), int(row % div * int32(c.numCols))
+}
+
+// AddRow attempts to insert a new row in the RowContainer. The row slice is not
+// used directly: the Datums inside the DTuple are copied to internal storage.
+// Returns an error if the allocation was denied by the MemoryMonitor.
+func (c *RowContainer) AddRow(row parser.DTuple) (parser.DTuple, error) {
+	if len(row) != c.numCols {
+		panic(fmt.Sprintf("invalid row length %d, expected %d", len(row), c.numCols))
 	}
-	c.rows = append(c.rows, row)
-	return nil
+	if c.numCols == 0 {
+		c.numRows++
+		return nil, nil
+	}
+	if err := c.memAcc.Grow(c.rowSize(row)); err != nil {
+		return nil, err
+	}
+	chunk, pos := c.getChunkAndPos(c.numRows)
+	if chunk == len(c.chunks) {
+		numChunks := c.preallocChunks
+		if len(c.chunks) > 0 {
+			// Grow the number of chunks by a fraction.
+			numChunks = 1 + len(c.chunks)/8
+		}
+		if err := c.allocChunks(numChunks); err != nil {
+			return nil, err
+		}
+	}
+	copy(c.chunks[chunk][pos:pos+c.numCols], row)
+	c.numRows++
+	return c.chunks[chunk][pos : pos+c.numCols : pos+c.numCols], nil
 }
 
 // Len reports the number of rows currently held in this RowContainer.
 func (c *RowContainer) Len() int {
-	return len(c.rows)
+	return c.numRows
+}
+
+// NumCols reports the number of columns held in this RowContainer.
+func (c *RowContainer) NumCols() int {
+	return c.numCols
 }
 
 // At accesses a row at a specific index.
 func (c *RowContainer) At(i int) parser.DTuple {
-	return c.rows[i]
+	if i < 0 || i >= c.numRows {
+		panic(fmt.Sprintf("row index %d out of range", i))
+	}
+	if c.numCols == 0 {
+		return nil
+	}
+	chunk, pos := c.getChunkAndPos(i)
+	return c.chunks[chunk][pos : pos+c.numCols : pos+c.numCols]
 }
 
 // Swap exchanges two rows. Used for sorting.
 func (c *RowContainer) Swap(i, j int) {
-	c.rows[i], c.rows[j] = c.rows[j], c.rows[i]
+	r1 := c.At(i)
+	r2 := c.At(j)
+	for idx := 0; idx < c.numCols; idx++ {
+		r1[idx], r2[idx] = r2[idx], r1[idx]
+	}
 }
 
-// PseudoPop retrieves a pointer to the last row, and decreases the
-// visible size of the RowContainer.  This is used for heap sorting in
-// sql.sortNode.  A pointer is returned to avoid an allocation when
-// passing the DTuple as an interface{} to heap.Push().
-// Note that the pointer is only valid until the next call to AddRow.
-// We use this for heap sorting in sort.go.
-func (c *RowContainer) PseudoPop() *parser.DTuple {
-	idx := len(c.rows) - 1
-	x := &(c.rows)[idx]
-	c.rows = c.rows[:idx]
-	return x
-}
-
-// ResetLen cancels the effects of PseudoPop(), that is, it restores
-// the visible size of the RowContainer to its actual size.
-func (c *RowContainer) ResetLen(l int) {
-	c.rows = c.rows[:l]
+// PopFirst discards the the first rows added to the RowContainer.
+func (c *RowContainer) PopFirst() {
+	if c.numRows == 0 {
+		panic("no rows added to container, nothing to pop")
+	}
+	c.deletedRows++
+	c.numRows--
+	if c.deletedRows == c.rowsPerChunk {
+		c.deletedRows = 0
+		c.chunks = c.chunks[1:]
+	}
 }
 
 // Replace substitutes one row for another. This does query the
-// MemoryUsageMonitor to determine whether the new row fits the
+// MemoryMonitor to determine whether the new row fits the
 // allowance.
 func (c *RowContainer) Replace(i int, newRow parser.DTuple) error {
 	newSz := c.rowSize(newRow)
-	oldSz := int64(0)
-	if c.rows[i] != nil {
-		oldSz = c.rowSize(c.rows[i])
-	}
+	row := c.At(i)
+	oldSz := c.rowSize(row)
 	if newSz != oldSz {
-		if err := c.memAcc.W(c.p.session).ResizeItem(oldSz, newSz); err != nil {
+		if err := c.memAcc.ResizeItem(oldSz, newSz); err != nil {
 			return err
 		}
 	}
-	c.rows[i] = newRow
+	copy(row, newRow)
 	return nil
 }

@@ -49,12 +49,18 @@ func mvccKey(k interface{}) MVCCKey {
 	}
 }
 
-func testBatchBasics(t *testing.T, commit func(e Engine, b Batch) error) {
+func testBatchBasics(t *testing.T, writeOnly bool, commit func(e Engine, b Batch) error) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
-	b := e.NewBatch()
+	var b Batch
+	if writeOnly {
+		b = e.NewWriteOnlyBatch()
+	} else {
+		b = e.NewBatch()
+	}
 	defer b.Close()
 
 	if err := b.Put(mvccKey("a"), []byte("value")); err != nil {
@@ -94,13 +100,15 @@ func testBatchBasics(t *testing.T, commit func(e Engine, b Batch) error) {
 		{Key: mvccKey("a"), Value: []byte("value")},
 		{Key: mvccKey("c"), Value: appender("foobar")},
 	}
-	// Scan values from batch directly.
-	kvs, err = Scan(b, mvccKey(roachpb.RKeyMin), mvccKey(roachpb.RKeyMax), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(expValues, kvs) {
-		t.Errorf("%v != %v", kvs, expValues)
+	if !writeOnly {
+		// Scan values from batch directly.
+		kvs, err = Scan(b, mvccKey(roachpb.RKeyMin), mvccKey(roachpb.RKeyMax), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(expValues, kvs) {
+			t.Errorf("%v != %v", kvs, expValues)
+		}
 	}
 
 	// Commit batch and verify direct engine scan yields correct values.
@@ -120,14 +128,14 @@ func testBatchBasics(t *testing.T, commit func(e Engine, b Batch) error) {
 // visible until commit, and then are all visible after commit.
 func TestBatchBasics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	testBatchBasics(t, func(e Engine, b Batch) error {
+	testBatchBasics(t, false /* writeOnly */, func(e Engine, b Batch) error {
 		return b.Commit()
 	})
 }
 
 func TestBatchRepr(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	testBatchBasics(t, func(e Engine, b Batch) error {
+	testBatchBasics(t, false /* writeOnly */, func(e Engine, b Batch) error {
 		repr := b.Repr()
 
 		// Simple sanity checks about the format of the batch representation. This
@@ -227,11 +235,83 @@ func TestBatchRepr(t *testing.T) {
 	})
 }
 
+func TestWriteBatchBasics(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	testBatchBasics(t, true /* writeOnly */, func(e Engine, b Batch) error {
+		return b.Commit()
+	})
+}
+
+// Regression test for flush issue which caused
+// b2.ApplyBatchRepr(b1.Repr()).Repr() to not equal a noop.
+func TestApplyBatchRepr(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	stopper := stop.NewStopper()
+	defer stopper.Stop()
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
+
+	// Failure to represent the absorbed Batch again.
+	{
+		b1 := e.NewBatch()
+		defer b1.Close()
+
+		if err := b1.Put(mvccKey("lost"), []byte("update")); err != nil {
+			t.Fatal(err)
+		}
+
+		repr1 := b1.Repr()
+
+		b2 := e.NewBatch()
+		defer b2.Close()
+		if err := b2.ApplyBatchRepr(repr1); err != nil {
+			t.Fatal(err)
+		}
+		repr2 := b2.Repr()
+
+		if !reflect.DeepEqual(repr1, repr2) {
+			t.Fatalf("old batch represents to:\n%q\nrestored batch to:\n%q", repr1, repr2)
+		}
+	}
+
+	// Failure to commit what was absorbed.
+	{
+		b3 := e.NewBatch()
+		defer b3.Close()
+
+		key := mvccKey("phantom")
+		val := []byte("phantom")
+
+		if err := b3.Put(key, val); err != nil {
+			t.Fatal(err)
+		}
+
+		repr := b3.Repr()
+
+		b4 := e.NewBatch()
+		defer b4.Close()
+		if err := b4.ApplyBatchRepr(repr); err != nil {
+			t.Fatal(err)
+		}
+		// Intentionally don't call Repr() because the expected user wouldn't.
+		if err := b4.Commit(); err != nil {
+			t.Fatal(err)
+		}
+
+		if b, err := e.Get(key); err != nil {
+			t.Fatal(err)
+		} else if !reflect.DeepEqual(b, val) {
+			t.Fatalf("read %q from engine, expected %q", b, val)
+		}
+	}
+}
+
 func TestBatchGet(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	b := e.NewBatch()
 	defer b.Close()
@@ -285,7 +365,8 @@ func TestBatchMerge(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	b := e.NewBatch()
 	defer b.Close()
@@ -342,7 +423,8 @@ func TestBatchProto(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	b := e.NewBatch()
 	defer b.Close()
@@ -389,7 +471,8 @@ func TestBatchScan(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	b := e.NewBatch()
 	defer b.Close()
@@ -482,7 +565,8 @@ func TestBatchScanWithDelete(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	b := e.NewBatch()
 	defer b.Close()
@@ -510,7 +594,8 @@ func TestBatchScanMaxWithDeleted(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	b := e.NewBatch()
 	defer b.Close()
@@ -544,7 +629,8 @@ func TestBatchConcurrency(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	b := e.NewBatch()
 	defer b.Close()
@@ -579,7 +665,8 @@ func TestBatchBuilder(t *testing.T) {
 
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	batch := e.NewBatch().(*rocksDBBatch)
 	// Ensure that, even though we reach into the batch's internals with
@@ -588,7 +675,7 @@ func TestBatchBuilder(t *testing.T) {
 	batch.flushes++
 	defer batch.Close()
 
-	builder := &rocksDBBatchBuilder{}
+	builder := &RocksDBBatchBuilder{}
 
 	testData := []struct {
 		key string
@@ -627,7 +714,8 @@ func TestBatchBuilderStress(t *testing.T) {
 
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	rng, _ := randutil.NewPseudoRand()
 
@@ -642,7 +730,7 @@ func TestBatchBuilderStress(t *testing.T) {
 			batch.flushes++
 			defer batch.Close()
 
-			builder := &rocksDBBatchBuilder{}
+			builder := &RocksDBBatchBuilder{}
 
 			for j := 0; j < count; j++ {
 				var ts hlc.Timestamp
@@ -692,7 +780,8 @@ func TestBatchDistinct(t *testing.T) {
 
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	if err := e.Put(mvccKey("b"), []byte("b")); err != nil {
 		t.Fatal(err)
@@ -763,7 +852,8 @@ func TestBatchDistinctPanics(t *testing.T) {
 
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := NewInMem(roachpb.Attributes{}, 1<<20, stopper)
+	e := NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
 
 	batch := e.NewBatch()
 	defer batch.Close()

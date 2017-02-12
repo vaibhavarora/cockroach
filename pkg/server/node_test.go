@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
-
 	"google.golang.org/grpc"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -53,7 +53,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/pkg/errors"
 )
 
 // createTestNode creates an rpc server using the specified address,
@@ -63,22 +62,43 @@ import (
 func createTestNode(
 	addr net.Addr, engines []engine.Engine, gossipBS net.Addr, t *testing.T,
 ) (*grpc.Server, net.Addr, *hlc.Clock, *Node, *stop.Stopper) {
-	cfg := storage.StoreConfig{}
+	cfg := storage.TestStoreConfig(nil)
 
 	stopper := stop.NewStopper()
-	cfg.Clock = hlc.NewClock(hlc.UnixNano)
 	nodeRPCContext := rpc.NewContext(log.AmbientContext{}, nodeTestBaseContext, cfg.Clock, stopper)
 	cfg.ScanInterval = 10 * time.Hour
 	cfg.ConsistencyCheckInterval = 10 * time.Hour
 	grpcServer := rpc.NewServer(nodeRPCContext)
-	serverCfg := makeTestConfig()
-	g := gossip.New(
-		log.AmbientContext{},
+	cfg.Gossip = gossip.NewTest(
+		0,
 		nodeRPCContext,
 		grpcServer,
-		serverCfg.GossipBootstrapResolvers,
+		nil,
 		stopper,
-		metric.NewRegistry())
+		metric.NewRegistry(),
+	)
+	retryOpts := base.DefaultRetryOptions()
+	retryOpts.Closer = stopper.ShouldQuiesce()
+	distSender := kv.NewDistSender(kv.DistSenderConfig{
+		Clock:           cfg.Clock,
+		RPCContext:      nodeRPCContext,
+		RPCRetryOptions: &retryOpts,
+	}, cfg.Gossip)
+	cfg.AmbientCtx.Tracer = tracing.NewTracer()
+	sender := kv.NewTxnCoordSender(
+		cfg.AmbientCtx,
+		distSender,
+		cfg.Clock,
+		false,
+		stopper,
+		kv.MakeTxnMetrics(metric.TestSampleInterval),
+	)
+	cfg.DB = client.NewDB(sender)
+	cfg.Transport = storage.NewDummyRaftTransport()
+	cfg.MetricsSampleInterval = metric.TestSampleInterval
+	node := NewNode(cfg, status.NewMetricsRecorder(cfg.Clock), metric.NewRegistry(), stopper,
+		kv.MakeTxnMetrics(metric.TestSampleInterval), sql.MakeEventLogger(nil))
+	roachpb.RegisterInternalServer(grpcServer, node)
 	ln, err := netutil.ListenAndServeGRPC(stopper, grpcServer, addr)
 	if err != nil {
 		t.Fatal(err)
@@ -90,29 +110,11 @@ func createTestNode(
 		}
 		r, err := resolver.NewResolverFromAddress(gossipBS)
 		if err != nil {
-			t.Fatalf("bad gossip address %s: %s", gossipBS, err)
+			t.Fatal(err)
 		}
-		g.SetResolvers([]resolver.Resolver{r})
-		g.Start(ln.Addr())
+		cfg.Gossip.SetResolvers([]resolver.Resolver{r})
+		cfg.Gossip.Start(ln.Addr())
 	}
-	cfg.Gossip = g
-	retryOpts := base.DefaultRetryOptions()
-	retryOpts.Closer = stopper.ShouldQuiesce()
-	distSender := kv.NewDistSender(&kv.DistSenderConfig{
-		Clock:           cfg.Clock,
-		RPCContext:      nodeRPCContext,
-		RPCRetryOptions: &retryOpts,
-	}, g)
-	cfg.AmbientCtx.Tracer = tracing.NewTracer()
-	ctx := tracing.WithTracer(context.Background(), cfg.AmbientCtx.Tracer)
-	sender := kv.NewTxnCoordSender(ctx, distSender, cfg.Clock, false, stopper,
-		kv.MakeTxnMetrics(metric.TestSampleInterval))
-	cfg.DB = client.NewDB(sender)
-	cfg.Transport = storage.NewDummyRaftTransport()
-	cfg.MetricsSampleInterval = metric.TestSampleInterval
-	node := NewNode(cfg, status.NewMetricsRecorder(cfg.Clock), metric.NewRegistry(), stopper,
-		kv.MakeTxnMetrics(metric.TestSampleInterval), sql.MakeEventLogger(nil))
-	roachpb.RegisterInternalServer(grpcServer, node)
 	return grpcServer, ln.Addr(), cfg.Clock, node, stopper
 }
 
@@ -155,8 +157,11 @@ func TestBootstrapCluster(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	e := engine.NewInMem(roachpb.Attributes{}, 1<<20, stopper)
-	if _, err := bootstrapCluster([]engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval)); err != nil {
+	e := engine.NewInMem(roachpb.Attributes{}, 1<<20)
+	stopper.AddCloser(e)
+	if _, err := bootstrapCluster(
+		storage.StoreConfig{}, []engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval),
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -194,19 +199,20 @@ func TestBootstrapCluster(t *testing.T) {
 // stores and verifies both stores are added and started.
 func TestBootstrapNewStore(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	engineStopper := stop.NewStopper()
-	defer engineStopper.Stop()
-	e := engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper)
-	if _, err := bootstrapCluster([]engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval)); err != nil {
+	e := engine.NewInMem(roachpb.Attributes{}, 1<<20)
+	if _, err := bootstrapCluster(
+		storage.StoreConfig{}, []engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval),
+	); err != nil {
 		t.Fatal(err)
 	}
 
 	// Start a new node with two new stores which will require bootstrapping.
-	engines := []engine.Engine{
+	engines := Engines([]engine.Engine{
 		e,
-		engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper),
-		engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper),
-	}
+		engine.NewInMem(roachpb.Attributes{}, 1<<20),
+		engine.NewInMem(roachpb.Attributes{}, 1<<20),
+	})
+	defer engines.Close()
 	_, _, node, stopper := createAndStartTestNode(
 		util.TestAddr,
 		engines,
@@ -220,7 +226,7 @@ func TestBootstrapNewStore(t *testing.T) {
 	// store) will be bootstrapped by the node upon start. This happens
 	// in a goroutine, so we'll have to wait a bit until we can find the
 	// new node.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if n := node.stores.GetStoreCount(); n != 3 {
 			return errors.Errorf("expected 3 stores but got %d", n)
 		}
@@ -244,8 +250,11 @@ func TestNodeJoin(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	engineStopper := stop.NewStopper()
 	defer engineStopper.Stop()
-	e := engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper)
-	if _, err := bootstrapCluster([]engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval)); err != nil {
+	e := engine.NewInMem(roachpb.Attributes{}, 1<<20)
+	engineStopper.AddCloser(e)
+	if _, err := bootstrapCluster(
+		storage.StoreConfig{}, []engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval),
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -261,7 +270,9 @@ func TestNodeJoin(t *testing.T) {
 	defer stopper1.Stop()
 
 	// Create a new node.
-	engines2 := []engine.Engine{engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper)}
+	e2 := engine.NewInMem(roachpb.Attributes{}, 1<<20)
+	engineStopper.AddCloser(e2)
+	engines2 := []engine.Engine{e2}
 	_, server2Addr, node2, stopper2 := createAndStartTestNode(
 		util.TestAddr,
 		engines2,
@@ -272,7 +283,7 @@ func TestNodeJoin(t *testing.T) {
 	defer stopper2.Stop()
 
 	// Verify new node is able to bootstrap its store.
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		if sc := node2.stores.GetStoreCount(); sc != 1 {
 			return errors.Errorf("GetStoreCount() expected 1; got %d", sc)
 		}
@@ -282,7 +293,7 @@ func TestNodeJoin(t *testing.T) {
 	// Verify node1 sees node2 via gossip and vice versa.
 	node1Key := gossip.MakeNodeIDKey(node1.Descriptor.NodeID)
 	node2Key := gossip.MakeNodeIDKey(node2.Descriptor.NodeID)
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		var nodeDesc1 roachpb.NodeDescriptor
 		if err := node1.storeCfg.Gossip.GetInfoProto(node2Key, &nodeDesc1); err != nil {
 			return err
@@ -306,9 +317,9 @@ func TestNodeJoin(t *testing.T) {
 func TestNodeJoinSelf(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	engineStopper := stop.NewStopper()
-	defer engineStopper.Stop()
-	engines := []engine.Engine{engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper)}
+	e := engine.NewInMem(roachpb.Attributes{}, 1<<20)
+	defer e.Close()
+	engines := []engine.Engine{e}
 	_, addr, _, node, stopper := createTestNode(util.TestAddr, engines, util.TestAddr, t)
 	defer stopper.Stop()
 	err := node.start(context.Background(), addr, engines, roachpb.Attributes{}, roachpb.Locality{})
@@ -321,16 +332,18 @@ func TestNodeJoinSelf(t *testing.T) {
 // store's cluster ID is empty.
 func TestCorruptedClusterID(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	engineStopper := stop.NewStopper()
-	e := engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper)
-	defer engineStopper.Stop()
-	if _, err := bootstrapCluster([]engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval)); err != nil {
+
+	e := engine.NewInMem(roachpb.Attributes{}, 1<<20)
+	defer e.Close()
+	if _, err := bootstrapCluster(
+		storage.StoreConfig{}, []engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval),
+	); err != nil {
 		t.Fatal(err)
 	}
 
 	// Set the cluster ID to the empty UUID.
 	sIdent := roachpb.StoreIdent{
-		ClusterID: *uuid.EmptyUUID,
+		ClusterID: uuid.UUID{},
 		NodeID:    1,
 		StoreID:   1,
 	}
@@ -450,9 +463,6 @@ func compareNodeStatus(
 				"replicas.leaseholders",
 			},
 			[]string{
-				"livebytes",
-				"keybytes",
-				"valbytes",
 				"livecount",
 				"keycount",
 				"valcount",
@@ -499,7 +509,7 @@ func TestStatusSummaries(t *testing.T) {
 
 	// Wait for full replication of initial ranges.
 	initialRanges := ExpectedInitialRangeCount()
-	util.SucceedsSoon(t, func() error {
+	testutils.SucceedsSoon(t, func() error {
 		for i := 1; i <= int(initialRanges); i++ {
 			if s.RaftStatus(roachpb.RangeID(i)) == nil {
 				return errors.Errorf("Store %d replica %d is not present in raft", s.StoreID(), i)
@@ -558,7 +568,7 @@ func TestStatusSummaries(t *testing.T) {
 	// were multiple replicas, more care would need to be taken in the initial
 	// syncFeed().
 	forceWriteStatus := func() {
-		if err := ts.node.computePeriodicMetrics(0); err != nil {
+		if err := ts.node.computePeriodicMetrics(ctx, 0); err != nil {
 			t.Fatalf("error publishing store statuses: %s", err)
 		}
 
@@ -633,7 +643,7 @@ func TestStatusSummaries(t *testing.T) {
 	store1["replicas"]++
 	store1["replicas.leaders"]++
 	store1["replicas.leaseholders"]++
-	store1["ranges.available"]++
+	store1["ranges"]++
 
 	forceWriteStatus()
 	expectedNodeStatus = compareNodeStatus(t, ts, expectedNodeStatus, 3)
@@ -648,11 +658,10 @@ func TestStartNodeWithLocality(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	testLocalityWitNewNode := func(locality roachpb.Locality) {
-		engineStopper := stop.NewStopper()
-		defer engineStopper.Stop()
-		e := engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper)
+		e := engine.NewInMem(roachpb.Attributes{}, 1<<20)
+		defer e.Close()
 		if _, err := bootstrapCluster(
-			[]engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval),
+			storage.StoreConfig{}, []engine.Engine{e}, kv.MakeTxnMetrics(metric.TestSampleInterval),
 		); err != nil {
 			t.Fatal(err)
 		}

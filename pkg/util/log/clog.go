@@ -570,8 +570,10 @@ func formatLogEntry(entry Entry, stacks []byte, colors *colorProfile) *buffer {
 }
 
 func init() {
-	// Default stderrThreshold to log nothing.
-	logging.stderrThreshold = Severity_NONE
+	// Default stderrThreshold to log everything.
+	// This will be the default in tests unless overridden; the CLI
+	// commands set their default separately in cli/flags.go
+	logging.stderrThreshold = Severity_INFO
 
 	logging.setVState(0, nil, false)
 	logging.exitFunc = os.Exit
@@ -718,12 +720,10 @@ func (l *loggingT) outputLogEntry(s Severity, file string, line int, msg string)
 		}
 	}
 
-	if l.toStderr {
+	if s >= l.stderrThreshold.get() {
 		l.outputToStderr(entry, stacks)
-	} else {
-		if s >= l.stderrThreshold.get() {
-			l.outputToStderr(entry, stacks)
-		}
+	}
+	if logDir.isSet() {
 		if l.file[s] == nil {
 			if err := l.createFiles(s); err != nil {
 				// Make sure the message appears somewhere.
@@ -808,7 +808,7 @@ func (l *loggingT) getTermColorProfile() *colorProfile {
 			if (fi.Mode() & os.ModeCharDevice) != 0 {
 				term := os.Getenv("TERM")
 				switch term {
-				case "ansi", "xterm-color":
+				case "ansi", "xterm-color", "screen":
 					l.colorProfile = colorProfile8
 				case "xterm-256color", "screen-256color":
 					l.colorProfile = colorProfile256
@@ -885,9 +885,10 @@ func (l *loggingT) exit(err error) {
 type syncBuffer struct {
 	logger *loggingT
 	*bufio.Writer
-	file   *os.File
-	sev    Severity
-	nbytes uint64 // The number of bytes written to this file
+	file         *os.File
+	sev          Severity
+	lastRotation int64
+	nbytes       uint64 // The number of bytes written to this file
 }
 
 func (sb *syncBuffer) Sync() error {
@@ -919,7 +920,7 @@ func (sb *syncBuffer) rotateFile(now time.Time) error {
 		}
 	}
 	var err error
-	sb.file, _, err = create(sb.sev, now)
+	sb.file, sb.lastRotation, _, err = create(sb.sev, now, sb.lastRotation)
 	sb.nbytes = 0
 	if err != nil {
 		return err
@@ -970,6 +971,20 @@ func (l *loggingT) removeFilesLocked() error {
 			}
 		}
 		l.file[s] = nil
+	}
+	return nil
+}
+
+func (l *loggingT) closeFilesLocked() error {
+	for s := Severity_FATAL; s >= Severity_INFO; s-- {
+		if l.file[s] != nil {
+			if sb, ok := l.file[s].(*syncBuffer); ok {
+				if err := sb.file.Close(); err != nil {
+					return err
+				}
+			}
+			l.file[s] = nil
+		}
 	}
 	return nil
 }
