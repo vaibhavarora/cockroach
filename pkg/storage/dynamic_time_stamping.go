@@ -128,5 +128,7 @@ func EvalDyTSReverseScan(ctx context.Context, d *DynanicTimeStamper, h roachpb.H
 }
 
 func EvalDyTSEndTransaction(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSEndTransaction")
+	}
 }
