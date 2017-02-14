@@ -53,6 +53,8 @@ func callbenchmark() {
 	numAccounts := 100000
 	contention := "low"
 	contentionratio := "50:50"
+	warm_up_tnxs := 100000
+
 	err := os.Chdir("../")
 	if err != nil {
 		log.Fatal(err)
@@ -72,21 +74,21 @@ func callbenchmark() {
 		arg5 := "-contention-ratio=" + contentionratio
 		arg6 := "-report-concurrency=true"
 		arg7 := "-concurrency=" + strconv.Itoa(concurrency)
+		arg8 := "-warm-up-tnx=" + strconv.Itoa(warm_up_tnxs)
 
-		for i := 0; i < 5; i++ {
-			cmd := exec.Command(binary, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
-			//log.Printf("cmd is %s", strings.Join(cmd.Args, " "))
-			var out bytes.Buffer
-			var stderr bytes.Buffer
-			cmd.Stdout = &out
-			cmd.Stderr = &stderr
-			time.Sleep(100 * time.Millisecond)
-			err = cmd.Run()
-			if err != nil {
-				fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
-				log.Fatal(err)
-			}
+		cmd := exec.Command(binary, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+		//log.Printf("cmd is %s", strings.Join(cmd.Args, " "))
+		var out bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &stderr
+		time.Sleep(100 * time.Millisecond)
+		err = cmd.Run()
+		if err != nil {
+			fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+			log.Fatal(err)
 		}
+
 		//log.Printf("done with concurrency %d", concurrency)
 		concurrency += *concurrencystep
 		time.Sleep(1 * time.Second)

@@ -50,12 +50,36 @@ def run_local_task(cmd, time_to_sleep):
   time.sleep(time_to_sleep)
   os.killpg(pro.pid, signal.SIGTERM)  # Send the signal to all the process groups
 
+def concurrency_experiment():
+
+  start=1 
+  end=5
+  step=5 
+  while( start <= 300 ):
+    arg0 ="/home/migr/tcoder/benchmark/concurrency/concurrency"
+    arg1 =" -start=" + str(start)
+    arg2 =" -max=" + str(end)
+    arg3 =" -step=" + str(step)
+    arg4 =" 2>> concurrencynew"
+    cmd = arg0 + arg1 + arg2 + arg3 + arg4
+    time_to_sleep = 800 
+    for each in range(0,5):
+        stop_crdb_on_all_hosts()
+        time.sleep(3)
+        start_crdb_on_all_hosts()
+        time.sleep(2)      
+        run_local_task(cmd,time_to_sleep)
+
+    start += step
+    end += step
+
+
+
 def contention_experiment():
 
   contention1 = 50
   contention2 = 50
   concurrency = 100
-  count = 0
   while(contention1 <=90):
     ratio = str(contention1) + ":" + str(contention2)
     arg0 ="/home/migr/tcoder/benchmark/contention/contention "
@@ -69,7 +93,7 @@ def contention_experiment():
         stop_crdb_on_all_hosts()
         time.sleep(3)
         start_crdb_on_all_hosts()
-        time.sleep(1)      
+        time.sleep(2)      
         run_local_task(cmd,time_to_sleep)
 
     contention1 += 10
@@ -82,7 +106,8 @@ def contention_experiment():
 #stop_crdb_on_all_hosts()
 #clean_all_hosts()
 #start_crdb_on_all_hosts()
-contention_experiment()
+#contention_experiment()
+concurrency_experiment()
 
 
 
