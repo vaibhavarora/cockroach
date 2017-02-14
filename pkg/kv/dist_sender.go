@@ -601,7 +601,7 @@ func (ds *DistSender) Send(
 
 	var rplChunks []*roachpb.BatchResponse
 	parts := ba.Split(ctx, true /* don't split ET */)
-	if len(parts) > 1 && ba.MaxSpanRequestKeys != 0 {
+	if len(parts) > 2 && ba.MaxSpanRequestKeys != 0 {
 		// We already verified above that the batch contains only scan requests of the same type.
 		// Such a batch should never need splitting.
 		panic("batch with MaxSpanRequestKeys needs splitting")

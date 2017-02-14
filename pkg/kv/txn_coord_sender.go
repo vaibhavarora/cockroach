@@ -62,7 +62,7 @@ type txnMetadata struct {
 	// keys stores key ranges affected by this transaction through this
 	// coordinator. By keeping this record, the coordinator will be able
 	// to update the write intent when the transaction is committed.
-	keys []roachpb.Span
+	Writekeys []roachpb.Span
 
 	// lastUpdateNanos is the latest wall time in nanos the client sent
 	// transaction operations to this coordinator. Accessed and updated
@@ -352,11 +352,11 @@ func (tc *TxnCoordSender) Send(
 			txnMeta := tc.txnMu.txns[txnID]
 			distinctSpans := true
 			if txnMeta != nil {
-				et.IntentSpans = txnMeta.keys
+				et.IntentSpans = txnMeta.Writekeys
 				// Defensively set distinctSpans to false if we had any previous
 				// requests in this transaction. This effectively limits the distinct
 				// spans optimization to 1pc transactions.
-				distinctSpans = len(txnMeta.keys) == 0
+				distinctSpans = len(txnMeta.Writekeys) == 0
 			}
 			// We can't pass in a batch response here to better limit the key
 			// spans as we don't know what is going to be affected. This will
@@ -384,7 +384,7 @@ func (tc *TxnCoordSender) Send(
 				return roachpb.NewErrorf("cannot commit a read-only transaction")
 			}
 			if txnMeta != nil {
-				txnMeta.keys = et.IntentSpans
+				txnMeta.Writekeys = et.IntentSpans
 			}
 			return nil
 		}(); pErr != nil {
@@ -613,7 +613,7 @@ func (tc *TxnCoordSender) unregisterTxnLocked(
 	restarts = int64(txnMeta.txn.Epoch)
 	status = txnMeta.txn.Status
 
-	txnMeta.keys = nil
+	txnMeta.Writekeys = nil
 
 	delete(tc.txnMu.txns, txnID)
 
@@ -694,8 +694,8 @@ func (tc *TxnCoordSender) tryAsyncAbort(txnID uuid.UUID) {
 	tc.txnMu.Lock()
 	txnMeta := tc.txnMu.txns[txnID]
 	// Clone the intents and the txn to avoid data races.
-	intentSpans, _ := roachpb.MergeSpans(append([]roachpb.Span(nil), txnMeta.keys...))
-	txnMeta.keys = nil
+	intentSpans, _ := roachpb.MergeSpans(append([]roachpb.Span(nil), txnMeta.Writekeys...))
+	txnMeta.Writekeys = nil
 	txn := txnMeta.txn.Clone()
 	tc.txnMu.Unlock()
 
@@ -922,7 +922,7 @@ func (tc *TxnCoordSender) updateState(
 		// See #3346.
 		var keys []roachpb.Span
 		if txnMeta != nil {
-			keys = txnMeta.keys
+			keys = txnMeta.Writekeys
 		}
 		ba.IntentSpanIterate(br, func(key, endKey roachpb.Key) {
 			keys = append(keys, roachpb.Span{
@@ -935,7 +935,7 @@ func (tc *TxnCoordSender) updateState(
 		}
 
 		if txnMeta != nil {
-			txnMeta.keys = keys
+			txnMeta.Writekeys = keys
 			// Ravi : work around for passing through read only transaction
 		} else if len(keys) > 0 {
 			if !newTxn.Writing {
@@ -961,7 +961,7 @@ func (tc *TxnCoordSender) updateState(
 				}
 				txnMeta = &txnMetadata{
 					txn:              newTxn,
-					keys:             keys,
+					Writekeys:        keys,
 					firstUpdateNanos: startNS,
 					lastUpdateNanos:  tc.clock.PhysicalNow(),
 					timeoutDuration:  tc.clientTimeout,
