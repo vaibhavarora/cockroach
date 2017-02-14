@@ -468,6 +468,15 @@ func (ds *DistSender) sendSingleRange(
 				replicas.MoveToFront(i)
 			}
 		}
+	} else {
+		// This is an INCONSISTENT read. Restrict this to the local replica only.
+		// TODO(gitanuj): What if nodeDescriptor is nil?
+		var nodeDesc = ds.getNodeDescriptor()
+		if nodeDesc == nil {
+			replicas = []ReplicaInfo{}
+		} else if len(replicas) > 0 {
+			replicas = []ReplicaInfo{replicas[0]}
+		}
 	}
 
 	// TODO(tschottdorf): should serialize the trace here, not higher up.
