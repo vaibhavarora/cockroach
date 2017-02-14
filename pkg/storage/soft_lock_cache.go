@@ -103,18 +103,18 @@ func (s *SoftLockCache) serveConditionalPut(ctx context.Context, h roachpb.Heade
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In serveConditionalPut")
 	}
-	arg := req.(*roachpb.ConditionalPut)
+	arg := req.(*roachpb.ConditionalPutRequest)
 
 	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, arg.Value, req)
 
 	return rlks, wlks
 }
 
-func (s *SoftLockCache) serveInitPut(ctx context.Context, h roachpb.Header, req roachpb.Request) {
+func (s *SoftLockCache) serveInitPut(ctx context.Context, h roachpb.Header, req roachpb.Request) ([]ReadSoftLock, []WriteSoftLock) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In serveInitPut")
 	}
-	arg := req.(*roachpb.InitPut)
+	arg := req.(*roachpb.InitPutRequest)
 
 	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, arg.Value, req)
 
@@ -134,13 +134,13 @@ func (s *SoftLockCache) serveIncrement(ctx context.Context, h roachpb.Header, re
 	// send the incremented value in response
 }
 
-func (s *SoftLockCache) serveDelete(ctx context.Context, h roachpb.Header, req roachpb.Request) {
+func (s *SoftLockCache) serveDelete(ctx context.Context, h roachpb.Header, req roachpb.Request) ([]ReadSoftLock, []WriteSoftLock) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In serveInitPut")
 	}
-	arg := req.(*roachpb.InitPut)
-
-	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, nil, req)
+	arg := req.(*roachpb.DeleteRequest)
+	var dummy roachpb.Value
+	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, dummy, req)
 
 	return rlks, wlks
 }
@@ -165,9 +165,9 @@ func (s *SoftLockCache) serveEndTransaction(ctx context.Context, h roachpb.Heade
 		log.Infof(ctx, "Ravi : In serveEndTransaction")
 	}
 	var wlks []WriteSoftLock
-	arg := req.(*roachpb.EndTransaction)
+	arg := req.(*roachpb.EndTransactionRequest)
 	// remove all write locks (for now)
-	for _, span := range args.IntentSpans {
+	for _, span := range arg.IntentSpans {
 		if len(span.EndKey) == 0 { // single keys
 			wlk := s.getWriteSoftLock(span.Key, h.Txn.TxnMeta)
 			wlks = append(wlks, wlk)
@@ -179,7 +179,7 @@ func (s *SoftLockCache) serveEndTransaction(ctx context.Context, h roachpb.Heade
 
 		}
 	}
-
+	return wlks
 }
 
 func NewReadSoftLockQueue() *ReadSoftLockQueue {
