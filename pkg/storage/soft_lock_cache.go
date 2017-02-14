@@ -34,28 +34,30 @@ type WriteSoftLockQueue struct {
 type ReadSoftLock struct {
 	TransactionMeta enginepb.TxnMeta
 	key             roachpb.Key
+	request         roachpb.Request
 }
 
 type WriteSoftLock struct {
 	TransactionMeta enginepb.TxnMeta
 	key             roachpb.Key
 	value           roachpb.Value
+	request         roachpb.Request
 }
 
-func (s *SoftLockCache) processPlaceReadLockRequest(ctx context.Context, h roachpb.Header, key roachpb.Key) []WriteSoftLock {
+func (s *SoftLockCache) processPlaceReadLockRequest(ctx context.Context, h roachpb.Header, key roachpb.Key, req roachpb.Request) []WriteSoftLock {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest")
 	}
-	readlk := ReadSoftLock{TransactionMeta: h.Txn.TxnMeta, key: key}
+	readlk := ReadSoftLock{TransactionMeta: h.Txn.TxnMeta, key: key, request: req}
 	s.addToSoftReadLockCache(readlk)
 	return s.getAllWriteSoftLocksOnKey(key)
 }
 
-func (s *SoftLockCache) processPlaceWriteLockRequest(ctx context.Context, h roachpb.Header, key roachpb.Key, value roachpb.Value) ([]ReadSoftLock, []WriteSoftLock) {
+func (s *SoftLockCache) processPlaceWriteLockRequest(ctx context.Context, h roachpb.Header, key roachpb.Key, value roachpb.Value, req roachpb.Request) ([]ReadSoftLock, []WriteSoftLock) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In processPlaceWriteLockRequest")
 	}
-	writelk := WriteSoftLock{TransactionMeta: h.Txn.TxnMeta, key: key, value: value}
+	writelk := WriteSoftLock{TransactionMeta: h.Txn.TxnMeta, key: key, value: value, request: req}
 	s.addToSoftWriteLockCache(writelk)
 	rlks := s.getAllReadSoftLocksOnKey(key)
 	wlks := s.getAllWriteSoftLocksOnKey(key)
@@ -82,7 +84,7 @@ func (s *SoftLockCache) serveGet(ctx context.Context, h roachpb.Header, req roac
 		log.Infof(ctx, "Ravi : In serveGet")
 	}
 	arg := req.(*roachpb.GetRequest)
-	return s.processPlaceReadLockRequest(ctx, h, arg.Key)
+	return s.processPlaceReadLockRequest(ctx, h, arg.Key, req)
 
 }
 
@@ -92,27 +94,55 @@ func (s *SoftLockCache) servePut(ctx context.Context, h roachpb.Header, req roac
 	}
 	arg := req.(*roachpb.PutRequest)
 
-	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, arg.Value)
+	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, arg.Value, req)
 
 	return rlks, wlks
 }
 
-func (s *SoftLockCache) serveConditionalPut(ctx context.Context, h roachpb.Header, req roachpb.Request) {
+func (s *SoftLockCache) serveConditionalPut(ctx context.Context, h roachpb.Header, req roachpb.Request) ([]ReadSoftLock, []WriteSoftLock) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In serveConditionalPut")
 	}
+	arg := req.(*roachpb.ConditionalPut)
+
+	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, arg.Value, req)
+
+	return rlks, wlks
 }
 
 func (s *SoftLockCache) serveInitPut(ctx context.Context, h roachpb.Header, req roachpb.Request) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In serveInitPut")
+	}
+	arg := req.(*roachpb.InitPut)
 
+	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, arg.Value, req)
+
+	return rlks, wlks
 }
 
 func (s *SoftLockCache) serveIncrement(ctx context.Context, h roachpb.Header, req roachpb.Request) {
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In serveIncrement")
+	}
+	// Convert this to r(x),w(x)
+	// that is.
+	// Place read lock
+	// get the value from mvcc
+	// Increment it locally
+	// Place write lock with the incremented value
+	// send the incremented value in response
 }
 
 func (s *SoftLockCache) serveDelete(ctx context.Context, h roachpb.Header, req roachpb.Request) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In serveInitPut")
+	}
+	arg := req.(*roachpb.InitPut)
 
+	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, nil, req)
+
+	return rlks, wlks
 }
 
 func (s *SoftLockCache) serveDeleteRange(ctx context.Context, h roachpb.Header, req roachpb.Request) {
@@ -130,10 +160,26 @@ func (s *SoftLockCache) serveReverseScan(ctx context.Context, h roachpb.Header, 
 
 }
 
-func (s *SoftLockCache) serveEndTransaction(ctx context.Context, h roachpb.Header, req roachpb.Request) {
+func (s *SoftLockCache) serveEndTransaction(ctx context.Context, h roachpb.Header, req roachpb.Request) []WriteSoftLock {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In serveEndTransaction")
 	}
+	var wlks []WriteSoftLock
+	arg := req.(*roachpb.EndTransaction)
+	// remove all write locks (for now)
+	for _, span := range args.IntentSpans {
+		if len(span.EndKey) == 0 { // single keys
+			wlk := s.getWriteSoftLock(span.Key, h.Txn.TxnMeta)
+			wlks = append(wlks, wlk)
+			s.removeFromWriteLockCache(wlk)
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : removed write lock %v", wlk)
+			}
+		} else { // range of keys
+
+		}
+	}
+
 }
 
 func NewReadSoftLockQueue() *ReadSoftLockQueue {

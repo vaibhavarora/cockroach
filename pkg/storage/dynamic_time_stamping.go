@@ -4,6 +4,7 @@ import (
 	//"fmt"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	//"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
@@ -59,6 +60,13 @@ func NewDynamicTImeStamper() *DynanicTimeStamper {
 
 //func (d *DynanicTimeStamper) applySoftLockCache(ctx context.Context, ba *roachpb.BatchRequest) {
 func (d *DynanicTimeStamper) processDynamicTimestamping(ctx context.Context, ba *roachpb.BatchRequest) (err error) {
+	if ba.Header.Txn == nil {
+		if log.V(2) {
+			log.Infof(ctx, "Non transactional request ")
+		}
+		return nil
+	}
+
 	for _, union := range ba.Requests {
 		args := union.GetInner()
 		if consultsDyTSCommands(args) {
@@ -77,30 +85,20 @@ func (d *DynanicTimeStamper) processDynamicTimestamping(ctx context.Context, ba 
 }
 
 func EvalDyTSGet(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-	if h.Txn == nil {
-		if log.V(2) {
-			log.Infof(ctx, "Get with No tnx")
-		}
-		return
-	}
+	// Places read lock and returns already placed write locks
 	d.slockcache.serveGet(ctx, h, req)
 
 }
 
 func EvalDyTSPut(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-
-	if h.Txn == nil {
-		if log.V(2) {
-			log.Infof(ctx, "Put with No tnx")
-		}
-		return
-	}
+	// places write lock and returns already placed read and write locks
 	d.slockcache.servePut(ctx, h, req)
 
 }
 
 func EvalDyTSConditionalPut(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-
+	// places write lock and returns already placed read and write locks
+	d.slockcache.serveConditionalPut(ctx, h, req)
 }
 
 func EvalDyTSInitPut(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
@@ -128,7 +126,6 @@ func EvalDyTSReverseScan(ctx context.Context, d *DynanicTimeStamper, h roachpb.H
 }
 
 func EvalDyTSEndTransaction(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-	if log.V(2) {
-		log.Infof(ctx, "In EvalDyTSEndTransaction")
-	}
+	//removes all the read and write locks placed by the transaction
+	d.slockcache.serveEndTransaction(ctx, h, req)
 }
