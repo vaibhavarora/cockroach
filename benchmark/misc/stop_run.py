@@ -55,14 +55,14 @@ def concurrency_experiment():
   start=1 
   end=5
   step=5 
-  while( start <= 300 ):
+  while( start <= 10 ):
     arg0 ="/home/migr/tcoder/benchmark/concurrency/concurrency"
     arg1 =" -start=" + str(start)
     arg2 =" -max=" + str(end)
     arg3 =" -step=" + str(step)
     arg4 =" 2>> concurrencynew"
     cmd = arg0 + arg1 + arg2 + arg3 + arg4
-    time_to_sleep = 800 
+    time_to_sleep = 5400 
     for each in range(0,5):
         stop_crdb_on_all_hosts()
         time.sleep(3)
