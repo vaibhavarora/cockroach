@@ -44,47 +44,55 @@ def start_crdb_on_all_hosts():
   execute_cmd_in_remote(EUPHRATES, start_crdb_others+EUPHRATES)
   execute_cmd_in_remote(RUBICON, start_crdb_others+RUBICON)
 
-def run_local_task(cmd, time):
+def run_local_task(cmd, time_to_sleep):
   pro = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
                        shell=True, preexec_fn=os.setsid) 
-  time.sleep(time)
+  time.sleep(time_to_sleep)
   os.killpg(pro.pid, signal.SIGTERM)  # Send the signal to all the process groups
 
-
-#clean_all_hosts()
-
-
-
-
-
-
-
-
-
-
-
-def stop_all_cockroach_instances():
+def contention_experiment():
 
   contention1 = 50
   contention2 = 50
-  concurrency = 50
+  concurrency = 100
   count = 0
   while(contention1 <=90):
     ratio = str(contention1) + ":" + str(contention2)
-    arg0 ="/home/migr/tcoder/contention/contention "
+    arg0 ="/home/migr/tcoder/benchmark/contention/contention "
     arg1 ="-contention-start="
     arg2 ="-contention-end="
     arg3 ="-concurrency=" + str(concurrency)
-    arg4 =" 2>> new"
-    cmd = arg0 + arg1 + ratio + " "+ arg2 + ratio + arg3
-    time = 480
+    arg4 =" 2>> contention100"
+    cmd = arg0 + arg1 + ratio + " "+ arg2 + ratio + arg3 +arg4
+    time_to_sleep = 800 
     for each in range(0,5):
         stop_crdb_on_all_hosts()
-        start_crdb_on_all_hosts()      
-        run_local_task(cmd,time)
+        time.sleep(3)
+        start_crdb_on_all_hosts()
+        time.sleep(1)      
+        run_local_task(cmd,time_to_sleep)
 
     contention1 += 10
     contention2 -= 10
+
+
+
+
+
+#stop_crdb_on_all_hosts()
+#clean_all_hosts()
+#start_crdb_on_all_hosts()
+contention_experiment()
+
+
+
+
+
+
+
+
+
+
 
 
 
