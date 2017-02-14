@@ -112,6 +112,17 @@ func (ba *BatchRequest) IsReadOnly() bool {
 	return len(ba.Requests) > 0 && !ba.hasFlag(isWrite|isAdmin)
 }
 
+func (ba *BatchRequest) HasValidInconsistentMethods() bool {
+	for _, ru := range ba.Requests {
+		req := ru.GetInner()
+		if req.Method() != Get && req.Method() != Scan &&
+			req.Method() != ReverseScan {
+			return false
+		}
+	}
+	return true
+}
+
 // IsReverse returns true iff the BatchRequest contains a reverse request.
 func (ba *BatchRequest) IsReverse() bool {
 	return ba.hasFlag(isReverse)

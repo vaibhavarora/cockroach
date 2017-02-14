@@ -402,7 +402,51 @@ func (ds *DistSender) sendRPC(
 	tracing.AnnotateTrace()
 	defer tracing.AnnotateTrace()
 
-	reply, err := ds.sendToReplicas(ctx, rpcOpts, rangeID, replicas, ba, ds.rpcContext)
+	var reply *roachpb.BatchResponse
+	var err error
+	if ba.HasValidInconsistentMethods() && ba.ReadConsistency != roachpb.CONSISTENT {
+		// Create a quorum (including local node and excluding lease holder)
+		total := len(replicas)
+		quorum := total/2 + 1
+		quorumReplicas := make(ReplicaSlice, len(replicas))
+		copy(quorumReplicas, replicas)
+
+		localIndex := -1
+		var localReplica *ReplicaInfo
+		nodeDesc := ds.getNodeDescriptor()
+		if nodeDesc != nil {
+			localIndex = quorumReplicas.FindReplicaByNodeID(nodeDesc.NodeID)
+			if localIndex != -1 {
+				localReplica = &quorumReplicas[localIndex]
+				quorumReplicas.MoveToFront(localIndex)
+				quorumReplicas = quorumReplicas[1:]
+			}
+		}
+
+		leaseHolderIndex := -1
+		if leaseHolder, ok := ds.leaseHolderCache.Lookup(ctx, rangeID); ok {
+			leaseHolderIndex = quorumReplicas.FindReplica(leaseHolder.StoreID)
+			if leaseHolderIndex != -1 {
+				quorumReplicas.MoveToFront(leaseHolderIndex)
+				quorumReplicas = quorumReplicas[1:]
+			}
+		}
+
+		shuffle.Shuffle(quorumReplicas)
+		if localReplica != nil {
+			if len(quorumReplicas) > quorum-1 {
+				quorumReplicas = quorumReplicas[:quorum-1]
+			}
+			quorumReplicas = append(quorumReplicas, *localReplica)
+		}
+
+		reply, err = ds.sendToAllReplicas(ctx, rpcOpts, rangeID, quorumReplicas, ba, ds.rpcContext)
+	}
+
+	if reply == nil && err == nil {
+		reply, err = ds.sendToReplicas(ctx, rpcOpts, rangeID, replicas, ba, ds.rpcContext)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -471,12 +515,12 @@ func (ds *DistSender) sendSingleRange(
 	} else {
 		// This is an INCONSISTENT read. Restrict this to the local replica only.
 		// TODO(gitanuj): What if nodeDescriptor is nil?
-		var nodeDesc = ds.getNodeDescriptor()
-		if nodeDesc == nil {
-			replicas = []ReplicaInfo{}
-		} else if len(replicas) > 0 {
-			replicas = []ReplicaInfo{replicas[0]}
-		}
+		// var nodeDesc = ds.getNodeDescriptor()
+		// if nodeDesc == nil {
+		// 	replicas = []ReplicaInfo{}
+		// } else if len(replicas) > 0 {
+		// 	replicas = []ReplicaInfo{replicas[0]}
+		// }
 	}
 
 	// TODO(tschottdorf): should serialize the trace here, not higher up.
@@ -1093,6 +1137,164 @@ func fillSkippedResponses(ba roachpb.BatchRequest, br *roachpb.BatchResponse, ne
 			}
 		}
 		br.Responses[i].GetInner().SetHeader(hdr)
+	}
+}
+
+func selectLatestValues(request roachpb.BatchRequest, reply1 *roachpb.BatchResponse,
+	reply2 *roachpb.BatchResponse) *roachpb.BatchResponse {
+	if reply1 == nil {
+		return reply2
+	}
+
+	if reply1 != nil && reply2 != nil {
+		if len(request.Requests) != len(reply1.Responses) || len(request.Requests) != len(reply2.Responses) {
+			return nil
+		}
+
+		response := roachpb.BatchResponse{
+			BatchResponse_Header: reply2.BatchResponse_Header,
+		}
+
+		for i, r := range request.Requests {
+			switch r.GetInner().Method() {
+			case roachpb.Get:
+				getResponse1 := reply1.Responses[i].GetValue().(*roachpb.GetResponse)
+				getResponse2 := reply2.Responses[i].GetValue().(*roachpb.GetResponse)
+				toAppend := reply2.Responses[i]
+
+				if getResponse2.Value != nil && getResponse1.Value != nil {
+					if getResponse2.Value.Timestamp.Less(getResponse1.Value.Timestamp) {
+						toAppend = reply1.Responses[i]
+					}
+				}
+				response.Responses = append(response.Responses, toAppend)
+
+			case roachpb.Scan:
+				scanResponse1 := reply1.Responses[i].GetValue().(*roachpb.ScanResponse)
+				scanResponse2 := reply2.Responses[i].GetValue().(*roachpb.ScanResponse)
+				scanResponse := roachpb.ScanResponse{
+					ResponseHeader: scanResponse2.ResponseHeader,
+				}
+
+				if len(scanResponse1.Rows) != len(scanResponse2.Rows) {
+					return nil
+				}
+
+				for j, row1 := range scanResponse1.Rows {
+					row2 := scanResponse2.Rows[j]
+					toAppend := row2
+					if row2.Value.Timestamp.Less(row1.Value.Timestamp) {
+						toAppend = row1
+					}
+					scanResponse.Rows = append(scanResponse.Rows, toAppend)
+				}
+
+				response.Responses = append(response.Responses, roachpb.ResponseUnion{
+					Scan: &scanResponse,
+				})
+
+			case roachpb.ReverseScan:
+				reverseScanResponse1 := reply1.Responses[i].GetValue().(*roachpb.ReverseScanResponse)
+				reverseScanResponse2 := reply2.Responses[i].GetValue().(*roachpb.ReverseScanResponse)
+				reverseScanResponse := roachpb.ReverseScanResponse{
+					ResponseHeader: reverseScanResponse2.ResponseHeader,
+				}
+
+				if len(reverseScanResponse1.Rows) != len(reverseScanResponse2.Rows) {
+					return nil
+				}
+
+				for j, row1 := range reverseScanResponse1.Rows {
+					row2 := reverseScanResponse2.Rows[j]
+					toAppend := row2
+					if row2.Value.Timestamp.Less(row1.Value.Timestamp) {
+						toAppend = row1
+					}
+					reverseScanResponse.Rows = append(reverseScanResponse.Rows, toAppend)
+				}
+
+				response.Responses = append(response.Responses, roachpb.ResponseUnion{
+					ReverseScan: &reverseScanResponse,
+				})
+			}
+		}
+
+		return &response
+	}
+	return nil
+}
+
+// sendToAllReplicas sends RPCs to all clients specified by the
+// slice. If all the clients reply without error, the one with
+// most recent timestamp is returned. If any client returns error,
+// it is considered a failure.
+func (ds *DistSender) sendToAllReplicas(
+	ctx context.Context,
+	opts SendOptions,
+	rangeID roachpb.RangeID,
+	replicas ReplicaSlice,
+	args roachpb.BatchRequest,
+	rpcContext *rpc.Context,
+) (*roachpb.BatchResponse, error) {
+	if len(replicas) < 1 {
+		return nil, roachpb.NewSendError(
+			fmt.Sprintf("insufficient replicas (%d) to satisfy send request",
+				len(replicas)))
+	}
+
+	done := make(chan BatchCall, len(replicas))
+
+	transportFactory := opts.transportFactory
+	if transportFactory == nil {
+		transportFactory = grpcTransportFactory
+	}
+	transport, err := transportFactory(opts, rpcContext, replicas, args)
+	if err != nil {
+		return nil, err
+	}
+	defer transport.Close()
+
+	// Send to all the replicas
+	pending := 0
+	log.VEventf(ctx, 2, "sending batch %s to range %d", args.Summary(), rangeID)
+	for _, replica := range replicas {
+		if transport.IsExhausted() {
+			return nil, roachpb.NewSendError(
+				fmt.Sprintf("sending to replica %+v failed", replica))
+		}
+		pending++
+		transport.SendNext(ctx, done)
+	}
+
+	var latestResponse *roachpb.BatchResponse
+	for {
+		select {
+		case call := <-done:
+			pending--
+			err := call.Err
+			if err == nil {
+				if log.V(2) {
+					log.Infof(ctx, "RPC reply: %s", call.Reply)
+				}
+
+				if call.Reply.Error == nil {
+					latestResponse = selectLatestValues(args, latestResponse, call.Reply)
+				} else {
+					ds.handlePerReplicaError(ctx, transport, rangeID, call.Reply.Error)
+					log.ErrEventf(ctx, "application error: %s", call.Reply.Error)
+					err = call.Reply.Error.GoError()
+					return nil, err
+				}
+			} else {
+				err = roachpb.NewSendError(fmt.Sprintf("sending to replica failed; error: %v", err))
+				log.ErrEvent(ctx, err.Error())
+				return nil, err
+			}
+
+			if pending == 0 {
+				return latestResponse, nil
+			}
+		}
 	}
 }
 
