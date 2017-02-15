@@ -64,6 +64,9 @@ type txnMetadata struct {
 	// to update the write intent when the transaction is committed.
 	Writekeys []roachpb.Span
 
+	// Keys read by the transaction. This will be helpful to remove the
+	// soft read locks placed on it.
+	Readkeys []roachpb.Span
 	// lastUpdateNanos is the latest wall time in nanos the client sent
 	// transaction operations to this coordinator. Accessed and updated
 	// atomically.
@@ -353,6 +356,7 @@ func (tc *TxnCoordSender) Send(
 			distinctSpans := true
 			if txnMeta != nil {
 				et.IntentSpans = txnMeta.Writekeys
+				et.ReadSpans = txnMeta.Readkeys
 				// Defensively set distinctSpans to false if we had any previous
 				// requests in this transaction. This effectively limits the distinct
 				// spans optimization to 1pc transactions.
@@ -368,6 +372,11 @@ func (tc *TxnCoordSender) Send(
 					Key:    key,
 					EndKey: endKey,
 				})
+			}, func(key, endKey roachpb.Key) {
+				et.ReadSpans = append(et.ReadSpans, roachpb.Span{
+					Key:    key,
+					EndKey: endKey,
+				})
 			})
 			// TODO(peter): Populate DistinctSpans on all batches, not just batches
 			// which contain an EndTransactionRequest.
@@ -377,14 +386,18 @@ func (tc *TxnCoordSender) Send(
 			et.IntentSpans = append([]roachpb.Span(nil), et.IntentSpans...)
 			et.IntentSpans, distinct = roachpb.MergeSpans(et.IntentSpans)
 			ba.Header.DistinctSpans = distinct && distinctSpans
-			if len(et.IntentSpans) == 0 {
+
+			et.ReadSpans = append([]roachpb.Span(nil), et.ReadSpans...)
+			et.ReadSpans, _ = roachpb.MergeSpans(et.ReadSpans)
+			if len(et.IntentSpans) == 0 && len(et.ReadSpans) == 0 {
 				// If there aren't any intents, then there's factually no
 				// transaction to end. Read-only txns have all of their state
 				// in the client.
-				return roachpb.NewErrorf("cannot commit a read-only transaction")
+				return roachpb.NewErrorf("cannot commit a transactions with no operations")
 			}
 			if txnMeta != nil {
 				txnMeta.Writekeys = et.IntentSpans
+				txnMeta.Readkeys = et.ReadSpans
 			}
 			return nil
 		}(); pErr != nil {
@@ -393,6 +406,9 @@ func (tc *TxnCoordSender) Send(
 
 		if hasET && log.V(1) {
 			for _, intent := range et.IntentSpans {
+				log.Eventf(ctx, "intent: [%s,%s)", intent.Key, intent.EndKey)
+			}
+			for _, intent := range et.ReadSpans {
 				log.Eventf(ctx, "intent: [%s,%s)", intent.Key, intent.EndKey)
 			}
 		}
@@ -614,7 +630,7 @@ func (tc *TxnCoordSender) unregisterTxnLocked(
 	status = txnMeta.txn.Status
 
 	txnMeta.Writekeys = nil
-
+	txnMeta.Readkeys = nil
 	delete(tc.txnMu.txns, txnID)
 
 	return duration, restarts, status
@@ -695,7 +711,10 @@ func (tc *TxnCoordSender) tryAsyncAbort(txnID uuid.UUID) {
 	txnMeta := tc.txnMu.txns[txnID]
 	// Clone the intents and the txn to avoid data races.
 	intentSpans, _ := roachpb.MergeSpans(append([]roachpb.Span(nil), txnMeta.Writekeys...))
+	readSpans, _ := roachpb.MergeSpans(append([]roachpb.Span(nil), txnMeta.Readkeys...))
 	txnMeta.Writekeys = nil
+	txnMeta.Readkeys = nil
+
 	txn := txnMeta.txn.Clone()
 	tc.txnMu.Unlock()
 
@@ -715,6 +734,7 @@ func (tc *TxnCoordSender) tryAsyncAbort(txnID uuid.UUID) {
 		},
 		Commit:      false,
 		IntentSpans: intentSpans,
+		ReadSpans:   readSpans,
 	}
 	ba.Add(et)
 	ctx := tc.AnnotateCtx(context.TODO())
@@ -920,24 +940,34 @@ func (tc *TxnCoordSender) updateState(
 		// Adding the intents even on error reduces the likelihood of dangling
 		// intents blocking concurrent writers for extended periods of time.
 		// See #3346.
-		var keys []roachpb.Span
+		var wkeys []roachpb.Span
+		var rkeys []roachpb.Span
 		if txnMeta != nil {
-			keys = txnMeta.Writekeys
+			wkeys = txnMeta.Writekeys
+			rkeys = txnMeta.Readkeys
 		}
 		ba.IntentSpanIterate(br, func(key, endKey roachpb.Key) {
-			keys = append(keys, roachpb.Span{
+			wkeys = append(wkeys, roachpb.Span{
 				Key:    key,
 				EndKey: endKey,
 			})
-		})
+		},
+			func(key, endKey roachpb.Key) {
+				rkeys = append(rkeys, roachpb.Span{
+					Key:    key,
+					EndKey: endKey,
+				})
+			})
 		if log.V(2) {
-			log.Infof(ctx, "Ravi : TCS keys : %v", keys)
+			log.Infof(ctx, "Ravi : TCS keys : %v", wkeys, rkeys)
 		}
 
 		if txnMeta != nil {
-			txnMeta.Writekeys = keys
+			txnMeta.Writekeys = wkeys
+			txnMeta.Readkeys = rkeys
 			// Ravi : work around for passing through read only transaction
-		} else if len(keys) > 0 {
+			//} else if len(keys) >= 0 {
+		} else if len(wkeys) > 0 {
 			if !newTxn.Writing {
 				panic("txn with intents marked as non-writing")
 			}
@@ -961,7 +991,8 @@ func (tc *TxnCoordSender) updateState(
 				}
 				txnMeta = &txnMetadata{
 					txn:              newTxn,
-					Writekeys:        keys,
+					Writekeys:        wkeys,
+					Readkeys:         rkeys,
 					firstUpdateNanos: startNS,
 					lastUpdateNanos:  tc.clock.PhysicalNow(),
 					timeoutDuration:  tc.clientTimeout,

@@ -12,6 +12,7 @@ import (
 
 type DynanicTimeStamper struct {
 	slockcache *SoftLockCache
+	store      *Store
 }
 
 var consultsDyTSMethods = [...]bool{
@@ -51,9 +52,10 @@ var DyTSCommands = map[roachpb.Method]DyTSCommand{
 	roachpb.EndTransaction: {EvalDyTSCommand: EvalDyTSEndTransaction},
 }
 
-func NewDynamicTImeStamper() *DynanicTimeStamper {
+func NewDynamicTImeStamper(store *Store) *DynanicTimeStamper {
 	d := &DynanicTimeStamper{
 		slockcache: NewSoftLockCache(),
+		store:      store,
 	}
 	return d
 }
@@ -102,7 +104,7 @@ func EvalDyTSConditionalPut(ctx context.Context, d *DynanicTimeStamper, h roachp
 }
 
 func EvalDyTSInitPut(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-
+	d.slockcache.serveInitPut(ctx, h, req)
 }
 
 func EvalDyTSIncrement(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
@@ -110,22 +112,23 @@ func EvalDyTSIncrement(ctx context.Context, d *DynanicTimeStamper, h roachpb.Hea
 }
 
 func EvalDyTSDelete(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-
+	d.slockcache.serveDelete(ctx, h, req)
 }
 
 func EvalDyTSDeleteRange(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-
+	d.slockcache.serveDeleteRange(ctx, h, req, d.store.Engine())
 }
 
 func EvalDyTSScan(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
-
+	d.slockcache.serveScan(ctx, h, req, d.store.Engine())
 }
 
 func EvalDyTSReverseScan(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+	d.slockcache.serveReverseScan(ctx, h, req, d.store.Engine())
 
 }
 
 func EvalDyTSEndTransaction(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
 	//removes all the read and write locks placed by the transaction
-	d.slockcache.serveEndTransaction(ctx, h, req)
+	d.slockcache.serveEndTransaction(ctx, h, req, d.store.Engine())
 }

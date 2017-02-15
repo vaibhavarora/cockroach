@@ -302,6 +302,8 @@ message EndTransactionRequest {
   optional InternalCommitTrigger internal_commit_trigger = 4;
   // List of intents written by the transaction.
   repeated Span intent_spans = 5 [(gogoproto.nullable) = false];
+  // List of keys read by the transaction.
+  repeated Span read_spans = 6 [(gogoproto.nullable) = false];
 }
 
 // An EndTransactionResponse is the return value from the

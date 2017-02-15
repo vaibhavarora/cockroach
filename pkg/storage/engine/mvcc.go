@@ -543,7 +543,6 @@ func MVCCGet(
 ) (*roachpb.Value, []roachpb.Intent, error) {
 	iter := engine.NewIterator(true)
 	defer iter.Close()
-
 	return mvccGetUsingIter(ctx, iter, key, timestamp, consistent, txn)
 }
 

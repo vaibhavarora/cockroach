@@ -550,7 +550,7 @@ func newReplica(rangeID roachpb.RangeID, store *Store) *Replica {
 		store:          store,
 		abortCache:     NewAbortCache(rangeID),
 	}
-	r.dynamicTimeStamper = NewDynamicTImeStamper()
+	r.dynamicTimeStamper = NewDynamicTImeStamper(store)
 	// Init rangeStr with the range ID.
 	r.rangeStr.store(0, &roachpb.RangeDescriptor{RangeID: rangeID})
 	// Add replica log tag - the value is rangeStr.String().
