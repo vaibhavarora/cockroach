@@ -61,7 +61,9 @@ func NewDynamicTImeStamper(store *Store) *DynanicTimeStamper {
 }
 
 //func (d *DynanicTimeStamper) applySoftLockCache(ctx context.Context, ba *roachpb.BatchRequest) {
-func (d *DynanicTimeStamper) processDynamicTimestamping(ctx context.Context, ba *roachpb.BatchRequest) (err error) {
+func (d *DynanicTimeStamper) processDynamicTimestamping(
+	ctx context.Context,
+	ba *roachpb.BatchRequest) (err error) {
 	if ba.Header.Txn == nil {
 		if log.V(2) {
 			log.Infof(ctx, "Non transactional request ")
@@ -86,49 +88,89 @@ func (d *DynanicTimeStamper) processDynamicTimestamping(ctx context.Context, ba 
 	return nil
 }
 
-func EvalDyTSGet(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSGet(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 	// Places read lock and returns already placed write locks
 	d.slockcache.serveGet(ctx, h, req)
 
 }
 
-func EvalDyTSPut(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSPut(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 	// places write lock and returns already placed read and write locks
 	d.slockcache.servePut(ctx, h, req)
 
 }
 
-func EvalDyTSConditionalPut(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSConditionalPut(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 	// places write lock and returns already placed read and write locks
 	d.slockcache.serveConditionalPut(ctx, h, req)
 }
 
-func EvalDyTSInitPut(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSInitPut(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 	d.slockcache.serveInitPut(ctx, h, req)
 }
 
-func EvalDyTSIncrement(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSIncrement(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 
 }
 
-func EvalDyTSDelete(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSDelete(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 	d.slockcache.serveDelete(ctx, h, req)
 }
 
-func EvalDyTSDeleteRange(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSDeleteRange(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 	d.slockcache.serveDeleteRange(ctx, h, req, d.store.Engine())
 }
 
-func EvalDyTSScan(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSScan(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 	d.slockcache.serveScan(ctx, h, req, d.store.Engine())
 }
 
-func EvalDyTSReverseScan(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSReverseScan(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 	d.slockcache.serveReverseScan(ctx, h, req, d.store.Engine())
 
 }
 
-func EvalDyTSEndTransaction(ctx context.Context, d *DynanicTimeStamper, h roachpb.Header, req roachpb.Request) {
+func EvalDyTSEndTransaction(
+	ctx context.Context,
+	d *DynanicTimeStamper,
+	h roachpb.Header,
+	req roachpb.Request) {
 	//removes all the read and write locks placed by the transaction
 	d.slockcache.serveEndTransaction(ctx, h, req, d.store.Engine())
 }
