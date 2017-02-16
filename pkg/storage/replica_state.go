@@ -153,8 +153,8 @@ func loadAppliedIndex(
 	ctx context.Context, reader engine.Reader, rangeID roachpb.RangeID,
 ) (uint64, uint64, error) {
 	var appliedIndex uint64
-	v, _, err := engine.MVCCGet(ctx, reader, keys.RaftAppliedIndexKey(rangeID),
-		hlc.ZeroTimestamp, true, nil)
+	v, _, _, err := engine.MVCCGet(ctx, reader, keys.RaftAppliedIndexKey(rangeID),
+		hlc.ZeroTimestamp, true, nil, nil, false)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -167,8 +167,8 @@ func loadAppliedIndex(
 	}
 	// TODO(tschottdorf): code duplication.
 	var leaseAppliedIndex uint64
-	v, _, err = engine.MVCCGet(ctx, reader, keys.LeaseAppliedIndexKey(rangeID),
-		hlc.ZeroTimestamp, true, nil)
+	v, _, _, err = engine.MVCCGet(ctx, reader, keys.LeaseAppliedIndexKey(rangeID),
+		hlc.ZeroTimestamp, true, nil, nil, false)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -374,8 +374,8 @@ func loadFrozenStatus(
 	ctx context.Context, reader engine.Reader, rangeID roachpb.RangeID,
 ) (storagebase.ReplicaState_FrozenEnum, error) {
 	var zero storagebase.ReplicaState_FrozenEnum
-	val, _, err := engine.MVCCGet(ctx, reader, keys.RangeFrozenStatusKey(rangeID),
-		hlc.ZeroTimestamp, true, nil)
+	val, _, _, err := engine.MVCCGet(ctx, reader, keys.RangeFrozenStatusKey(rangeID),
+		hlc.ZeroTimestamp, true, nil, nil, false)
 	if err != nil {
 		return zero, err
 	}
@@ -400,9 +400,9 @@ func loadLastIndex(
 	ctx context.Context, reader engine.Reader, rangeID roachpb.RangeID,
 ) (uint64, error) {
 	var lastIndex uint64
-	v, _, err := engine.MVCCGet(ctx, reader,
+	v, _, _, err := engine.MVCCGet(ctx, reader,
 		keys.RaftLastIndexKey(rangeID),
-		hlc.ZeroTimestamp, true /* consistent */, nil)
+		hlc.ZeroTimestamp, true /* consistent */, nil, nil, false)
 	if err != nil {
 		return 0, err
 	}

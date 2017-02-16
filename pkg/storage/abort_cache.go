@@ -107,7 +107,7 @@ func (sc *AbortCache) Get(
 func (sc *AbortCache) Iterate(
 	ctx context.Context, e engine.Reader, f func([]byte, roachpb.AbortCacheEntry),
 ) {
-	_, _ = engine.MVCCIterate(ctx, e, sc.min(), sc.max(), hlc.ZeroTimestamp,
+	_, _, _ = engine.MVCCIterate(ctx, e, sc.min(), sc.max(), hlc.ZeroTimestamp,
 		true /* consistent */, nil /* txn */, false, /* !reverse */
 		func(kv roachpb.KeyValue) (bool, error) {
 			var entry roachpb.AbortCacheEntry
@@ -119,7 +119,7 @@ func (sc *AbortCache) Iterate(
 			}
 			f(kv.Key, entry)
 			return false, nil
-		})
+		}, nil, false)
 }
 
 func copySeqCache(

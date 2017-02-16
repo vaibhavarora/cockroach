@@ -546,6 +546,8 @@ export interface roachpbBuilder {
 	InternalCommitTrigger: roachpb.InternalCommitTriggerBuilder;
 	Transaction: roachpb.TransactionBuilder;
 	Intent: roachpb.IntentBuilder;
+	ReadSoftLock: roachpb.ReadSoftLockBuilder;
+	WriteSoftLock: roachpb.WriteSoftLockBuilder;
 	Lease: roachpb.LeaseBuilder;
 	AbortCacheEntry: roachpb.AbortCacheEntryBuilder;
 	RaftTruncatedState: roachpb.RaftTruncatedStateBuilder;
@@ -1723,6 +1725,87 @@ export interface IntentBuilder {
 	decode(buffer: ArrayBuffer) : IntentMessage;
 	decode(buffer: ByteBuffer) : IntentMessage;
 	decode64(buffer: string) : IntentMessage;
+	
+}
+
+}
+
+
+declare module Proto2TypeScript.cockroach.roachpb {
+
+	export interface ReadSoftLock {
+
+		
+
+TransactionMeta?: storage.engine.enginepb.TxnMeta;
+		
+
+getTransactionMeta?() : storage.engine.enginepb.TxnMeta;
+		setTransactionMeta?(transactionMeta : storage.engine.enginepb.TxnMeta): void;
+		
+
+
+
+}
+
+	export interface ReadSoftLockMessage extends ReadSoftLock {
+	toArrayBuffer(): ArrayBuffer;
+	encode(): ByteBuffer;
+	encodeJSON(): string;
+	toBase64(): string;
+	toString(): string;
+}
+
+export interface ReadSoftLockBuilder {
+	new(data?: ReadSoftLock): ReadSoftLockMessage;
+	decode(buffer: ArrayBuffer) : ReadSoftLockMessage;
+	decode(buffer: ByteBuffer) : ReadSoftLockMessage;
+	decode64(buffer: string) : ReadSoftLockMessage;
+	
+}
+
+}
+
+
+declare module Proto2TypeScript.cockroach.roachpb {
+
+	export interface WriteSoftLock {
+
+		
+
+TransactionMeta?: storage.engine.enginepb.TxnMeta;
+		
+
+getTransactionMeta?() : storage.engine.enginepb.TxnMeta;
+		setTransactionMeta?(transactionMeta : storage.engine.enginepb.TxnMeta): void;
+		
+
+
+
+value?: Value;
+		
+
+getValue?() : Value;
+		setValue?(value : Value): void;
+		
+
+
+
+}
+
+	export interface WriteSoftLockMessage extends WriteSoftLock {
+	toArrayBuffer(): ArrayBuffer;
+	encode(): ByteBuffer;
+	encodeJSON(): string;
+	toBase64(): string;
+	toString(): string;
+}
+
+export interface WriteSoftLockBuilder {
+	new(data?: WriteSoftLock): WriteSoftLockMessage;
+	decode(buffer: ArrayBuffer) : WriteSoftLockMessage;
+	decode(buffer: ByteBuffer) : WriteSoftLockMessage;
+	decode64(buffer: string) : WriteSoftLockMessage;
 	
 }
 

@@ -525,7 +525,7 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 
 	var descs []roachpb.RangeDescriptor
 
-	if _, err := engine.MVCCIterate(context.Background(), db, start, end, hlc.MaxTimestamp,
+	if _, _, err := engine.MVCCIterate(context.Background(), db, start, end, hlc.MaxTimestamp,
 		false /* !consistent */, nil, /* txn */
 		false /* !reverse */, func(kv roachpb.KeyValue) (bool, error) {
 			var desc roachpb.RangeDescriptor
@@ -543,7 +543,7 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 				descs = append(descs, desc)
 			}
 			return desc.RangeID == rangeID, nil
-		}); err != nil {
+		}, nil, false); err != nil {
 		return err
 	}
 
@@ -611,7 +611,7 @@ func runDebugCheckStoreCmd(cmd *cobra.Command, args []string) error {
 		return replicaInfo[rangeID]
 	}
 
-	if _, err := engine.MVCCIterate(context.Background(), db, start, end, hlc.MaxTimestamp,
+	if _, _, err := engine.MVCCIterate(context.Background(), db, start, end, hlc.MaxTimestamp,
 		false /* !consistent */, nil, /* txn */
 		false /* !reverse */, func(kv roachpb.KeyValue) (bool, error) {
 			rangeID, _, suffix, detail, err := keys.DecodeRangeIDKey(kv.Key)
@@ -651,7 +651,7 @@ func runDebugCheckStoreCmd(cmd *cobra.Command, args []string) error {
 			}
 
 			return false, nil
-		}); err != nil {
+		}, nil, false); err != nil {
 		return err
 	}
 

@@ -25,10 +25,6 @@ import (
 
 	"golang.org/x/net/context"
 
-	"github.com/dustin/go-humanize"
-	"github.com/gogo/protobuf/proto"
-	"github.com/pkg/errors"
-
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
@@ -36,6 +32,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/dustin/go-humanize"
+	"github.com/gogo/protobuf/proto"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -455,7 +454,7 @@ func MVCCGetProto(
 	msg proto.Message,
 ) (bool, error) {
 	// TODO(tschottdorf) Consider returning skipped intents to the caller.
-	value, _, mvccGetErr := MVCCGet(ctx, engine, key, timestamp, consistent, txn)
+	value, _, _, mvccGetErr := MVCCGet(ctx, engine, key, timestamp, consistent, txn, nil, false)
 	found := value != nil
 	// If we found a result, parse it regardless of the error returned by MVCCGet.
 	if found && msg != nil {
@@ -540,10 +539,12 @@ func MVCCGet(
 	timestamp hlc.Timestamp,
 	consistent bool,
 	txn *roachpb.Transaction,
-) (*roachpb.Value, []roachpb.Intent, error) {
+	slcache *SoftLockCache,
+	softlock bool,
+) (*roachpb.Value, []roachpb.Intent, []roachpb.WriteSoftLock, error) {
 	iter := engine.NewIterator(true)
 	defer iter.Close()
-	return mvccGetUsingIter(ctx, iter, key, timestamp, consistent, txn)
+	return mvccGetUsingIter(ctx, iter, key, timestamp, consistent, txn, slcache, softlock)
 }
 
 func mvccGetUsingIter(
@@ -553,9 +554,11 @@ func mvccGetUsingIter(
 	timestamp hlc.Timestamp,
 	consistent bool,
 	txn *roachpb.Transaction,
-) (*roachpb.Value, []roachpb.Intent, error) {
+	slcache *SoftLockCache,
+	softlock bool,
+) (*roachpb.Value, []roachpb.Intent, []roachpb.WriteSoftLock, error) {
 	if len(key) == 0 {
-		return nil, nil, emptyKeyError()
+		return nil, nil, nil, emptyKeyError()
 	}
 
 	buf := newGetBuffer()
@@ -564,17 +567,17 @@ func mvccGetUsingIter(
 	metaKey := MakeMVCCMetadataKey(key)
 	ok, _, _, err := mvccGetMetadata(iter, metaKey, &buf.meta)
 	if !ok || err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	value, intents, _, err := mvccGetInternal(ctx, iter, metaKey,
-		timestamp, consistent, safeValue, txn, buf)
+	value, intents, _, wlks, err := mvccGetInternal(ctx, iter, metaKey,
+		timestamp, consistent, safeValue, txn, buf, slcache, softlock)
 	if value == &buf.value {
 		value = &roachpb.Value{}
 		*value = buf.value
 		buf.value.Reset()
 	}
-	return value, intents, err
+	return value, intents, wlks, err
 }
 
 // MVCCGetAsTxn constructs a temporary Transaction from the given txn
@@ -596,7 +599,8 @@ func MVCCGetAsTxn(
 		OrigTimestamp: txnMeta.Timestamp,
 		MaxTimestamp:  txnMeta.Timestamp,
 	}
-	return MVCCGet(ctx, engine, key, timestamp, true /* consistent */, txn)
+	v, i, _, e := MVCCGet(ctx, engine, key, timestamp, true /* consistent */, txn, nil, false)
+	return v, i, e
 }
 
 // mvccGetMetadata returns or reconstructs the meta key for the given key.
@@ -674,12 +678,14 @@ func mvccGetInternal(
 	allowedSafety valueSafety,
 	txn *roachpb.Transaction,
 	buf *getBuffer,
-) (*roachpb.Value, []roachpb.Intent, valueSafety, error) {
+	slcache *SoftLockCache,
+	softlock bool,
+) (*roachpb.Value, []roachpb.Intent, valueSafety, []roachpb.WriteSoftLock, error) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : mvccGetInternal: begin: metakey %v, timestamp %v, tnx %v", metaKey, timestamp, txn)
 	}
 	if !consistent && txn != nil {
-		return nil, nil, safeValue, errors.Errorf(
+		return nil, nil, safeValue, nil, errors.Errorf(
 			"cannot allow inconsistent reads within a transaction")
 	}
 
@@ -690,9 +696,9 @@ func mvccGetInternal(
 		value := &buf.value
 		*value = roachpb.Value{RawBytes: meta.RawBytes}
 		if err := value.Verify(metaKey.Key); err != nil {
-			return nil, nil, safeValue, err
+			return nil, nil, safeValue, nil, err
 		}
-		return value, nil, safeValue, nil
+		return value, nil, safeValue, nil, nil
 	}
 	var ignoredIntents []roachpb.Intent
 	if !consistent && meta.Txn != nil && !timestamp.Less(meta.Timestamp) {
@@ -709,7 +715,7 @@ func mvccGetInternal(
 	if !timestamp.Less(meta.Timestamp) && meta.Txn != nil && !ownIntent {
 		// Trying to read the last value, but it's another transaction's intent;
 		// the reader will have to act on this.
-		return nil, nil, safeValue, &roachpb.WriteIntentError{
+		return nil, nil, safeValue, nil, &roachpb.WriteIntentError{
 			Intents: []roachpb.Intent{{Span: roachpb.Span{Key: metaKey.Key}, Status: roachpb.PENDING, Txn: *meta.Txn}},
 		}
 	}
@@ -731,7 +737,7 @@ func mvccGetInternal(
 		// we're now reading. In this case, we skip the intent.
 		if ownIntent && txn.Epoch != meta.Txn.Epoch {
 			if txn.Epoch < meta.Txn.Epoch {
-				return nil, nil, safeValue, errors.Errorf(
+				return nil, nil, safeValue, nil, errors.Errorf(
 					"failed to read with epoch %d due to a write intent with epoch %d",
 					txn.Epoch, meta.Txn.Epoch)
 			}
@@ -748,7 +754,7 @@ func mvccGetInternal(
 			// absolute time if the writer had a fast clock.
 			// The reader should try again with a later timestamp than the
 			// one given below.
-			return nil, nil, safeValue, roachpb.NewReadWithinUncertaintyIntervalError(
+			return nil, nil, safeValue, nil, roachpb.NewReadWithinUncertaintyIntervalError(
 				timestamp, meta.Timestamp)
 		}
 
@@ -762,24 +768,24 @@ func mvccGetInternal(
 		// would apply to.
 		seekKey.Timestamp = timestamp
 		if seekKey.Timestamp == hlc.ZeroTimestamp {
-			return nil, ignoredIntents, safeValue, nil
+			return nil, ignoredIntents, safeValue, nil, nil
 		}
 	}
 
 	iter.Seek(seekKey)
 	if !iter.Valid() {
 		if err := iter.Error(); err != nil {
-			return nil, nil, safeValue, err
+			return nil, nil, safeValue, nil, err
 		}
-		return nil, ignoredIntents, safeValue, nil
+		return nil, ignoredIntents, safeValue, nil, nil
 	}
 
 	unsafeKey := iter.unsafeKey()
 	if !unsafeKey.Key.Equal(metaKey.Key) {
-		return nil, ignoredIntents, safeValue, nil
+		return nil, ignoredIntents, safeValue, nil, nil
 	}
 	if !unsafeKey.IsValue() {
-		return nil, nil, safeValue, errors.Errorf(
+		return nil, nil, safeValue, nil, errors.Errorf(
 			"expected scan to versioned value reading key %s; got %s %s",
 			metaKey.Key, unsafeKey, unsafeKey.Timestamp)
 	}
@@ -790,7 +796,7 @@ func mvccGetInternal(
 			// value, but there is another previous write with the same issues as in
 			// the second case, so the reader will have to come again with a higher
 			// read timestamp.
-			return nil, nil, safeValue, roachpb.NewReadWithinUncertaintyIntervalError(
+			return nil, nil, safeValue, nil, roachpb.NewReadWithinUncertaintyIntervalError(
 				timestamp, unsafeKey.Timestamp)
 		}
 		// Fifth case: There's no value in our future up to MaxTimestamp, and those
@@ -800,9 +806,13 @@ func mvccGetInternal(
 
 	if len(iter.unsafeValue()) == 0 {
 		// Value is deleted.
-		return nil, ignoredIntents, safeValue, nil
+		return nil, ignoredIntents, safeValue, nil, nil
 	}
-
+	var wslocks []roachpb.WriteSoftLock
+	if softlock {
+		// placing read soft
+		wslocks = slcache.processPlaceReadLockRequest(ctx, txn.TxnMeta, metaKey.Key)
+	}
 	value := &buf.value
 	if allowedSafety == unsafeValue {
 		value.RawBytes = iter.unsafeValue()
@@ -811,9 +821,9 @@ func mvccGetInternal(
 	}
 	value.Timestamp = unsafeKey.Timestamp
 	if err := value.Verify(metaKey.Key); err != nil {
-		return nil, nil, safeValue, err
+		return nil, nil, safeValue, nil, err
 	}
-	return value, ignoredIntents, allowedSafety, nil
+	return value, ignoredIntents, allowedSafety, wslocks, nil
 }
 
 // putBuffer holds pointer data needed by mvccPutInternal. Bundling
@@ -1024,8 +1034,8 @@ func mvccPutInternal(
 			getBuf := newGetBuffer()
 			defer getBuf.release()
 			getBuf.meta = buf.meta // initialize get metadata from what we've already read
-			if exVal, _, _, err = mvccGetInternal(
-				ctx, iter, metaKey, readTS, true /* consistent */, safeValue, txn, getBuf); err != nil {
+			if exVal, _, _, _, err = mvccGetInternal(
+				ctx, iter, metaKey, readTS, true /* consistent */, safeValue, txn, getBuf, nil, false); err != nil {
 				return nil, err
 			}
 		}
@@ -1419,7 +1429,7 @@ func MVCCDeleteRange(
 	// In order to detect the potential write intent by another
 	// concurrent transaction with a newer timestamp, we need
 	// to use the max timestamp for scan.
-	_, err := MVCCIterate(ctx, engine, key, endKey, hlc.MaxTimestamp, true, txn, false, f)
+	_, _, err := MVCCIterate(ctx, engine, key, endKey, hlc.MaxTimestamp, true, txn, false, f, nil, false)
 	iter.Close()
 	buf.release()
 	return keys, resumeSpan, num, err
@@ -1509,14 +1519,16 @@ func mvccScanInternal(
 	consistent bool,
 	txn *roachpb.Transaction,
 	reverse bool,
-) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, error) {
+	slcache *SoftLockCache,
+	softlock bool,
+) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, []roachpb.WriteSoftLock, error) {
 	var res []roachpb.KeyValue
 	if max == 0 {
-		return nil, &roachpb.Span{Key: key, EndKey: endKey}, nil, nil
+		return nil, &roachpb.Span{Key: key, EndKey: endKey}, nil, nil, nil
 	}
 
 	var resumeSpan *roachpb.Span
-	intents, err := MVCCIterate(ctx, engine, key, endKey, timestamp, consistent, txn, reverse,
+	intents, _, err := MVCCIterate(ctx, engine, key, endKey, timestamp, consistent, txn, reverse,
 		func(kv roachpb.KeyValue) (bool, error) {
 			if int64(len(res)) == max {
 				// Another key was found beyond the max limit.
@@ -1529,12 +1541,12 @@ func mvccScanInternal(
 			}
 			res = append(res, kv)
 			return false, nil
-		})
+		}, nil, false)
 
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return res, resumeSpan, intents, nil
+	return res, resumeSpan, intents, nil, nil
 }
 
 // MVCCScan scans the key range [start,end) key up to some maximum number of
@@ -1549,9 +1561,11 @@ func MVCCScan(
 	timestamp hlc.Timestamp,
 	consistent bool,
 	txn *roachpb.Transaction,
-) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, error) {
+	slcache *SoftLockCache,
+	softlock bool,
+) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, []roachpb.WriteSoftLock, error) {
 	return mvccScanInternal(ctx, engine, key, endKey, max, timestamp,
-		consistent, txn, false /* !reverse */)
+		consistent, txn, false /* !reverse */, nil, false)
 }
 
 // MVCCReverseScan scans the key range [start,end) key up to some maximum
@@ -1567,8 +1581,9 @@ func MVCCReverseScan(
 	consistent bool,
 	txn *roachpb.Transaction,
 ) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, error) {
-	return mvccScanInternal(ctx, engine, key, endKey, max, timestamp,
-		consistent, txn, true /* reverse */)
+	kv, s, i, _, e := mvccScanInternal(ctx, engine, key, endKey, max, timestamp,
+		consistent, txn, true /* reverse */, nil, false)
+	return kv, s, i, e
 }
 
 // MVCCIterate iterates over the key range [start,end). At each step of the
@@ -1585,12 +1600,14 @@ func MVCCIterate(
 	txn *roachpb.Transaction,
 	reverse bool,
 	f func(roachpb.KeyValue) (bool, error),
-) ([]roachpb.Intent, error) {
+	slcache *SoftLockCache,
+	softlock bool,
+) ([]roachpb.Intent, []roachpb.WriteSoftLock, error) {
 	if !consistent && txn != nil {
-		return nil, errors.Errorf("cannot allow inconsistent reads within a transaction")
+		return nil, nil, errors.Errorf("cannot allow inconsistent reads within a transaction")
 	}
 	if len(endKey) == 0 {
-		return nil, emptyKeyError()
+		return nil, nil, emptyKeyError()
 	}
 
 	buf := newGetBuffer()
@@ -1623,7 +1640,7 @@ func MVCCIterate(
 	if reverse {
 		iter.SeekReverse(encKey)
 		if !iter.Valid() {
-			return nil, iter.Error()
+			return nil, nil, iter.Error()
 		}
 
 		// If the key doesn't exist, the iterator is at the next key that does
@@ -1637,7 +1654,7 @@ func MVCCIterate(
 	}
 
 	if !iter.Valid() {
-		return nil, iter.Error()
+		return nil, nil, iter.Error()
 	}
 
 	// A slice to gather all encountered intents we skipped, in case of
@@ -1651,7 +1668,7 @@ func MVCCIterate(
 	for {
 		metaKey, err := getMeta(iter, encEndKey, &buf.meta)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// Exceeding the boundary.
 		if metaKey.Key == nil {
@@ -1661,8 +1678,8 @@ func MVCCIterate(
 		alloc, metaKey.Key = alloc.Copy(metaKey.Key, 1)
 
 		// Indicate that we're fine with an unsafe Value.RawBytes being returned.
-		value, newIntents, valueSafety, err := mvccGetInternal(
-			ctx, iter, metaKey, timestamp, consistent, unsafeValue, txn, buf)
+		value, newIntents, valueSafety, _, err := mvccGetInternal(
+			ctx, iter, metaKey, timestamp, consistent, unsafeValue, txn, buf, nil, false)
 		intents = append(intents, newIntents...)
 		if value != nil {
 			if valueSafety == unsafeValue {
@@ -1671,7 +1688,7 @@ func MVCCIterate(
 			}
 			done, err := f(roachpb.KeyValue{Key: metaKey.Key, Value: *value})
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if done {
 				break
@@ -1688,7 +1705,7 @@ func MVCCIterate(
 					wiErr.(*roachpb.WriteIntentError).Intents = append(wiErr.(*roachpb.WriteIntentError).Intents, tErr.Intents...)
 				}
 			default:
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
@@ -1731,12 +1748,12 @@ func MVCCIterate(
 
 		if !iter.Valid() {
 			if err := iter.Error(); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			break
 		}
 	}
-	return intents, wiErr
+	return intents, nil, wiErr
 }
 
 // MVCCResolveWriteIntent either commits or aborts (rolls back) an

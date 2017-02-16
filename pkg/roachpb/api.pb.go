@@ -91,6 +91,8 @@
 		InternalCommitTrigger
 		Transaction
 		Intent
+		ReadSoftLock
+		WriteSoftLock
 		Lease
 		AbortCacheEntry
 		NotLeaseHolderError

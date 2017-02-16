@@ -296,6 +296,17 @@ message Intent {
   optional TransactionStatus status = 3 [(gogoproto.nullable) = false];
 }
 
+//A Read Soft Lock placed on each read for Dynamic Time stamping
+message ReadSoftLock{
+  optional storage.engine.enginepb.TxnMeta TransactionMeta = 1 [(gogoproto.nullable) = false];
+}
+
+//A Write Lock placed on each write fir Dynamic Time stamping
+message WriteSoftLock{
+   optional storage.engine.enginepb.TxnMeta TransactionMeta = 1 [(gogoproto.nullable) = false];
+   optional Value value = 2 [(gogoproto.nullable) = false];
+}
+
 // Lease contains information about range leases including the
 // expiration and lease holder.
 message Lease {

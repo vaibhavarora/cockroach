@@ -221,7 +221,7 @@ func evalGet(
 	h := cArgs.Header
 	reply := resp.(*roachpb.GetResponse)
 
-	val, intents, err := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn)
+	val, intents, _, err := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, nil, false)
 	reply.Value = val
 	return intentsToEvalResult(intents, args), err
 }
@@ -358,8 +358,8 @@ func evalScan(
 	h := cArgs.Header
 	reply := resp.(*roachpb.ScanResponse)
 
-	rows, resumeSpan, intents, err := engine.MVCCScan(ctx, batch, args.Key, args.EndKey,
-		cArgs.MaxKeys, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn)
+	rows, resumeSpan, intents, _, err := engine.MVCCScan(ctx, batch, args.Key, args.EndKey,
+		cArgs.MaxKeys, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, nil, false)
 
 	reply.NumKeys = int64(len(rows))
 	reply.ResumeSpan = resumeSpan
@@ -994,9 +994,8 @@ func evalRangeLookup(
 		}
 
 		// Scan for descriptors.
-		kvs, _, intents, err = engine.MVCCScan(
-			ctx, batch, startKey, endKey, rangeCount, ts, consistent, txn,
-		)
+		kvs, _, intents, _, err = engine.MVCCScan(
+			ctx, batch, startKey, endKey, rangeCount, ts, consistent, txn, nil, false)
 		if err != nil {
 			// An error here is likely a WriteIntentError when reading consistently.
 			return EvalResult{}, err
@@ -1047,9 +1046,8 @@ func evalRangeLookup(
 				return EvalResult{}, err
 			}
 
-			kvs, _, intents, err = engine.MVCCScan(
-				ctx, batch, startKey, endKey, 1, ts, consistent, txn,
-			)
+			kvs, _, intents, _, err = engine.MVCCScan(
+				ctx, batch, startKey, endKey, 1, ts, consistent, txn, nil, false)
 			if err != nil {
 				return EvalResult{}, err
 			}

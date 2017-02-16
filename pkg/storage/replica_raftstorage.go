@@ -180,7 +180,7 @@ func iterateEntries(
 	hi uint64,
 	scanFunc func(roachpb.KeyValue) (bool, error),
 ) error {
-	_, err := engine.MVCCIterate(
+	_, _, err := engine.MVCCIterate(
 		ctx, e,
 		keys.RaftLogKey(rangeID, lo),
 		keys.RaftLogKey(rangeID, hi),
@@ -189,6 +189,8 @@ func iterateEntries(
 		nil,   /* txn */
 		false, /* !reverse */
 		scanFunc,
+		nil,
+		false,
 	)
 	return err
 }

@@ -44,7 +44,9 @@ func (r *Replica) executeDyTSCmd(
 	if _, ok := args.(*roachpb.NoopRequest); ok {
 		return EvalResult{}, nil
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In executeDyTSCmd")
+	}
 	// If a unittest filter was installed, check for an injected error; otherwise, continue.
 	if filter := r.store.cfg.TestingKnobs.TestingCommandFilter; filter != nil {
 		filterArgs := storagebase.FilterArgs{Ctx: ctx, CmdID: raftCmdID, Index: index,
@@ -100,8 +102,11 @@ func EvalDyTSGet(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
+
+	// check if the read is snapshot read
+
 	// Places read lock and returns already placed write locks
-	cArgs.Repl.slockcache.serveGet(ctx, cArgs.Header, cArgs.Args)
+	//cArgs.Repl.slockcache.serveGet(ctx, cArgs.Header, cArgs.Args)
 
 	return EvalResult{}, nil
 }
@@ -112,7 +117,7 @@ func EvalDyTSPut(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 	// places write lock and returns already placed read and write locks
-	cArgs.Repl.slockcache.servePut(ctx, cArgs.Header, cArgs.Args)
+	//cArgs.Repl.slockcache.servePut(ctx, cArgs.Header, cArgs.Args)
 
 	return EvalResult{}, nil
 }
@@ -123,7 +128,7 @@ func EvalDyTSConditionalPut(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 	// places write lock and returns already placed read and write locks
-	cArgs.Repl.slockcache.serveConditionalPut(ctx, cArgs.Header, cArgs.Args)
+	//cArgs.Repl.slockcache.serveConditionalPut(ctx, cArgs.Header, cArgs.Args)
 	return EvalResult{}, nil
 }
 
@@ -133,7 +138,7 @@ func EvalDyTSInitPut(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 
-	cArgs.Repl.slockcache.serveInitPut(ctx, cArgs.Header, cArgs.Args)
+	//cArgs.Repl.slockcache.serveInitPut(ctx, cArgs.Header, cArgs.Args)
 	return EvalResult{}, nil
 }
 
@@ -151,7 +156,7 @@ func EvalDyTSDelete(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 
-	cArgs.Repl.slockcache.serveDelete(ctx, cArgs.Header, cArgs.Args)
+	//cArgs.Repl.slockcache.serveDelete(ctx, cArgs.Header, cArgs.Args)
 	return EvalResult{}, nil
 }
 
@@ -161,7 +166,7 @@ func EvalDyTSDeleteRange(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 
-	cArgs.Repl.slockcache.serveDeleteRange(ctx, cArgs.Header, cArgs.Args, batch)
+	//cArgs.Repl.slockcache.serveDeleteRange(ctx, cArgs.Header, cArgs.Args, batch)
 	return EvalResult{}, nil
 }
 
@@ -170,7 +175,7 @@ func EvalDyTSScan(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
-	cArgs.Repl.slockcache.serveScan(ctx, cArgs.Header, cArgs.Args, batch)
+	//cArgs.Repl.slockcache.serveScan(ctx, cArgs.Header, cArgs.Args, batch)
 	return EvalResult{}, nil
 }
 
@@ -179,7 +184,7 @@ func EvalDyTSReverseScan(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
-	cArgs.Repl.slockcache.serveReverseScan(ctx, cArgs.Header, cArgs.Args, batch)
+	//cArgs.Repl.slockcache.serveReverseScan(ctx, cArgs.Header, cArgs.Args, batch)
 	return EvalResult{}, nil
 }
 
@@ -189,6 +194,6 @@ func EvalDyTSEndTransaction(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 	//removes all the read and write locks placed by the transaction
-	cArgs.Repl.slockcache.serveEndTransaction(ctx, cArgs.Header, cArgs.Args, batch)
+	//cArgs.Repl.slockcache.serveEndTransaction(ctx, cArgs.Header, cArgs.Args, batch)
 	return EvalResult{}, nil
 }

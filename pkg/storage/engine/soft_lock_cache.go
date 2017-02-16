@@ -1,13 +1,12 @@
-package storage
+package engine
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"golang.org/x/net/context"
-	"math"
+	//"math"
 	"reflect"
 	"unsafe"
 )
@@ -25,55 +24,40 @@ type SoftLockCache struct {
 type Key string
 
 type ReadSoftLockQueue struct {
-	Queue []ReadSoftLock
+	Queue []roachpb.ReadSoftLock
 }
 
 type WriteSoftLockQueue struct {
-	Queue []WriteSoftLock
-}
-
-type ReadSoftLock struct {
-	TransactionMeta enginepb.TxnMeta
-	key             roachpb.Key
-	request         roachpb.Request
-}
-
-type WriteSoftLock struct {
-	TransactionMeta enginepb.TxnMeta
-	key             roachpb.Key
-	value           roachpb.Value
-	request         roachpb.Request
+	Queue []roachpb.WriteSoftLock
 }
 
 func (s *SoftLockCache) processPlaceReadLockRequest(
 	ctx context.Context,
-	h roachpb.Header,
-	key roachpb.Key,
-	req roachpb.Request) []WriteSoftLock {
+	tmeta enginepb.TxnMeta,
+	key roachpb.Key) []roachpb.WriteSoftLock {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest")
 	}
-	readlk := ReadSoftLock{TransactionMeta: h.Txn.TxnMeta, key: key, request: req}
-	s.addToSoftReadLockCache(readlk)
+	readlk := roachpb.ReadSoftLock{TransactionMeta: tmeta}
+	s.addToSoftReadLockCache(readlk, key)
 	return s.getAllWriteSoftLocksOnKey(key)
 }
 
 func (s *SoftLockCache) processPlaceWriteLockRequest(
 	ctx context.Context,
-	h roachpb.Header,
+	tmeta enginepb.TxnMeta,
 	key roachpb.Key,
-	value roachpb.Value,
-	req roachpb.Request) ([]ReadSoftLock, []WriteSoftLock) {
+	value roachpb.Value) ([]roachpb.ReadSoftLock, []roachpb.WriteSoftLock) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In processPlaceWriteLockRequest")
 	}
-	writelk := WriteSoftLock{TransactionMeta: h.Txn.TxnMeta, key: key, value: value, request: req}
-	s.addToSoftWriteLockCache(writelk)
+	writelk := roachpb.WriteSoftLock{TransactionMeta: tmeta, Value: value}
+	s.addToSoftWriteLockCache(writelk, key)
 	rlks := s.getAllReadSoftLocksOnKey(key)
 	wlks := s.getAllWriteSoftLocksOnKey(key)
 	position := -1
 	for index, lock := range wlks {
-		if *lock.TransactionMeta.ID == *h.Txn.TxnMeta.ID {
+		if *lock.TransactionMeta.ID == *tmeta.ID {
 			position = index
 			if log.V(2) {
 				log.Infof(ctx, "Found my write lock", lock)
@@ -89,17 +73,7 @@ func (s *SoftLockCache) processPlaceWriteLockRequest(
 	return rlks, wlks
 }
 
-func (s *SoftLockCache) serveGet(
-	ctx context.Context,
-	h roachpb.Header,
-	req roachpb.Request) []WriteSoftLock {
-	if log.V(2) {
-		log.Infof(ctx, "Ravi : In serveGet")
-	}
-	arg := req.(*roachpb.GetRequest)
-	return s.processPlaceReadLockRequest(ctx, h, arg.Key, req)
-
-}
+/*
 
 func (s *SoftLockCache) servePut(
 	ctx context.Context,
@@ -177,7 +151,7 @@ func (s *SoftLockCache) serveDeleteRange(
 	ctx context.Context,
 	h roachpb.Header,
 	req roachpb.Request,
-	batch engine.ReadWriter) (rlks []ReadSoftLock, wlks []WriteSoftLock) {
+	batch ReadWriter) (rlks []ReadSoftLock, wlks []WriteSoftLock) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In  serveDeleteRange")
 	}
@@ -195,7 +169,7 @@ func (s *SoftLockCache) serveDeleteRange(
 func (s *SoftLockCache) getkeysusingIter(
 	ctx context.Context,
 	start, end roachpb.Key,
-	batch engine.ReadWriter,
+	batch ReadWriter,
 	h roachpb.Header,
 	reverse bool) (keys []roachpb.Key) {
 	maxKeys := int64(math.MaxInt64)
@@ -205,7 +179,7 @@ func (s *SoftLockCache) getkeysusingIter(
 		maxKeys = h.MaxSpanRequestKeys
 	}
 	var res []roachpb.Key
-	engine.MVCCIterate(ctx, batch, start, end, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, reverse,
+	MVCCIterate(ctx, batch, start, end, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, reverse,
 		func(kv roachpb.KeyValue) (bool, error) {
 			if int64(len(res)) == maxKeys {
 				// Another key was found beyond the max limit.
@@ -222,7 +196,7 @@ func (s *SoftLockCache) serveScan(
 	ctx context.Context,
 	h roachpb.Header,
 	req roachpb.Request,
-	batch engine.ReadWriter) []WriteSoftLock {
+	batch ReadWriter) []WriteSoftLock {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In serveScan")
 	}
@@ -245,7 +219,7 @@ func (s *SoftLockCache) serveReverseScan(
 	ctx context.Context,
 	h roachpb.Header,
 	req roachpb.Request,
-	batch engine.ReadWriter) []WriteSoftLock {
+	batch ReadWriter) []WriteSoftLock {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In serveReverseScan")
 	}
@@ -267,7 +241,7 @@ func (s *SoftLockCache) serveEndTransaction(
 	ctx context.Context,
 	h roachpb.Header,
 	req roachpb.Request,
-	batch engine.ReadWriter) (wlks []WriteSoftLock, extrenal_write_spans []roachpb.Span, external_read_span []roachpb.Span) {
+	batch ReadWriter) (wlks []WriteSoftLock, extrenal_write_spans []roachpb.Span, external_read_span []roachpb.Span) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In serveEndTransaction")
 	}
@@ -327,23 +301,23 @@ func (s *SoftLockCache) serveEndTransaction(
 	}
 	return wlks, external_read_span, extrenal_write_spans
 }
-
+*/
 func NewReadSoftLockQueue() *ReadSoftLockQueue {
 	r := &ReadSoftLockQueue{
-		Queue: make([]ReadSoftLock, 0),
+		Queue: make([]roachpb.ReadSoftLock, 0),
 	}
 	return r
 }
 
 func NewWriteSoftLockQueue() *WriteSoftLockQueue {
 	w := &WriteSoftLockQueue{
-		Queue: make([]WriteSoftLock, 0),
+		Queue: make([]roachpb.WriteSoftLock, 0),
 	}
 	return w
 }
 
-func (s *SoftLockCache) addToSoftReadLockCache(readlk ReadSoftLock) {
-	internalkey := ToInternalKey(readlk.key)
+func (s *SoftLockCache) addToSoftReadLockCache(readlk roachpb.ReadSoftLock, key roachpb.Key) {
+	internalkey := ToInternalKey(key)
 
 	s.ReadMu.Lock()
 	defer s.ReadMu.Unlock()
@@ -356,8 +330,8 @@ func (s *SoftLockCache) addToSoftReadLockCache(readlk ReadSoftLock) {
 
 }
 
-func (s *SoftLockCache) removeFromReadLockCache(readlk ReadSoftLock) {
-	internalkey := ToInternalKey(readlk.key)
+func (s *SoftLockCache) removeFromReadLockCache(readlk roachpb.ReadSoftLock, key roachpb.Key) {
+	internalkey := ToInternalKey(key)
 
 	s.ReadMu.Lock()
 	defer s.ReadMu.Unlock()
@@ -381,8 +355,8 @@ func (s *SoftLockCache) removeFromReadLockCache(readlk ReadSoftLock) {
 
 }
 
-func (s *SoftLockCache) addToSoftWriteLockCache(writelk WriteSoftLock) {
-	internalkey := ToInternalKey(writelk.key)
+func (s *SoftLockCache) addToSoftWriteLockCache(writelk roachpb.WriteSoftLock, key roachpb.Key) {
+	internalkey := ToInternalKey(key)
 
 	s.WriteMu.Lock()
 	defer s.WriteMu.Unlock()
@@ -395,8 +369,8 @@ func (s *SoftLockCache) addToSoftWriteLockCache(writelk WriteSoftLock) {
 
 }
 
-func (s *SoftLockCache) removeFromWriteLockCache(writelk WriteSoftLock) {
-	internalkey := ToInternalKey(writelk.key)
+func (s *SoftLockCache) removeFromWriteLockCache(writelk roachpb.WriteSoftLock, key roachpb.Key) {
+	internalkey := ToInternalKey(key)
 
 	s.WriteMu.Lock()
 	defer s.WriteMu.Unlock()
@@ -422,7 +396,7 @@ func (s *SoftLockCache) removeFromWriteLockCache(writelk WriteSoftLock) {
 
 func (s *SoftLockCache) getWriteSoftLock(
 	key roachpb.Key,
-	tmeta enginepb.TxnMeta) (writelk WriteSoftLock) {
+	tmeta enginepb.TxnMeta) (writelk roachpb.WriteSoftLock) {
 	internalkey := ToInternalKey(key)
 
 	s.WriteMu.Lock()
@@ -445,7 +419,7 @@ func (s *SoftLockCache) getWriteSoftLock(
 
 func (s *SoftLockCache) getReadSoftLock(
 	key roachpb.Key,
-	tmeta enginepb.TxnMeta) (readlk ReadSoftLock) {
+	tmeta enginepb.TxnMeta) (readlk roachpb.ReadSoftLock) {
 	internalkey := ToInternalKey(key)
 
 	s.ReadMu.Lock()
@@ -467,50 +441,50 @@ func (s *SoftLockCache) getReadSoftLock(
 }
 
 func (s *SoftLockCache) getAllReadSoftLocksOnKey(
-	key roachpb.Key) []ReadSoftLock {
+	key roachpb.Key) []roachpb.ReadSoftLock {
 	internalkey := ToInternalKey(key)
 
 	s.ReadMu.Lock()
 	defer s.ReadMu.Unlock()
 
-	var q []ReadSoftLock
+	var q []roachpb.ReadSoftLock
 	Q, ok := s.ReadMu.readSoftLockCache[internalkey]
 
 	if ok {
-		q = make([]ReadSoftLock, len(Q.Queue))
+		q = make([]roachpb.ReadSoftLock, len(Q.Queue))
 		copy(q, Q.Queue)
 	} else {
-		q = make([]ReadSoftLock, 0)
+		q = make([]roachpb.ReadSoftLock, 0)
 	}
 
 	return q
 }
 
 func (s *SoftLockCache) getAllWriteSoftLocksOnKey(
-	key roachpb.Key) []WriteSoftLock {
+	key roachpb.Key) []roachpb.WriteSoftLock {
 	internalkey := ToInternalKey(key)
 
 	s.WriteMu.Lock()
 	defer s.WriteMu.Unlock()
 
-	var q []WriteSoftLock
+	var q []roachpb.WriteSoftLock
 	Q, ok := s.WriteMu.writeSoftLockCache[internalkey]
 
 	if ok {
-		q = make([]WriteSoftLock, len(Q.Queue))
+		q = make([]roachpb.WriteSoftLock, len(Q.Queue))
 		copy(q, Q.Queue)
 	} else {
-		q = make([]WriteSoftLock, 0)
+		q = make([]roachpb.WriteSoftLock, 0)
 	}
 
 	return q
 }
 
-func (r *ReadSoftLockQueue) append(readlk ReadSoftLock) {
+func (r *ReadSoftLockQueue) append(readlk roachpb.ReadSoftLock) {
 	r.Queue = append(r.Queue, readlk)
 }
 
-func (w *WriteSoftLockQueue) append(writelk WriteSoftLock) {
+func (w *WriteSoftLockQueue) append(writelk roachpb.WriteSoftLock) {
 	w.Queue = append(w.Queue, writelk)
 }
 

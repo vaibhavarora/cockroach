@@ -298,7 +298,7 @@ type Replica struct {
 	// TODO(peter): evaluate runtime overhead of the timed mutex.
 	raftMu syncutil.TimedMutex
 
-	slockcache *SoftLockCache
+	slockcache *engine.SoftLockCache
 
 	cmdQMu struct {
 		// Protects all fields in the cmdQMu struct.
@@ -569,7 +569,7 @@ func newReplica(rangeID roachpb.RangeID, store *Store) *Replica {
 		RangeID:        rangeID,
 		store:          store,
 		abortCache:     NewAbortCache(rangeID),
-		slockcache:     NewSoftLockCache(),
+		slockcache:     engine.NewSoftLockCache(),
 	}
 	// Init rangeStr with the range ID.
 	r.rangeStr.store(0, &roachpb.RangeDescriptor{RangeID: rangeID})
@@ -4089,11 +4089,10 @@ func (r *Replica) executeBatch(
 		}
 		// Note that responses are populated even when an error is returned.
 		// TODO(tschottdorf): Change that. IIRC there is nontrivial use of it currently.
-		// Ravi :
 
 		reply := br.Responses[index].GetInner()
 		if ba.Txn != nil && consultsDyTSCommands(args) {
-			// call DyTSCommand
+			r.executeDyTSCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 		}
 		curResult, pErr := r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 
