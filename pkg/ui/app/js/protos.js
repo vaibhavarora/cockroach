@@ -989,43 +989,6 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                             ]
                         },
                         {
-                            "name": "ReadSoftLock",
-                            "fields": [
-                                {
-                                    "rule": "optional",
-                                    "type": "storage.engine.enginepb.TxnMeta",
-                                    "name": "TransactionMeta",
-                                    "id": 1,
-                                    "options": {
-                                        "(gogoproto.nullable)": false
-                                    }
-                                }
-                            ]
-                        },
-                        {
-                            "name": "WriteSoftLock",
-                            "fields": [
-                                {
-                                    "rule": "optional",
-                                    "type": "storage.engine.enginepb.TxnMeta",
-                                    "name": "TransactionMeta",
-                                    "id": 1,
-                                    "options": {
-                                        "(gogoproto.nullable)": false
-                                    }
-                                },
-                                {
-                                    "rule": "optional",
-                                    "type": "Value",
-                                    "name": "value",
-                                    "id": 2,
-                                    "options": {
-                                        "(gogoproto.nullable)": false
-                                    }
-                                }
-                            ]
-                        },
-                        {
                             "name": "Lease",
                             "options": {
                                 "(gogoproto.goproto_stringer)": false,

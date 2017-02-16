@@ -2054,9 +2054,7 @@ func (r *Replica) tryAddWriteCmd(
 		// commands which require this command to move its timestamp
 		// forward. Or, in the case of a transactional write, the txn
 		// timestamp and possible write-too-old bool.
-		if log.V(2) {
-			log.Infof(ctx, "Ravi : calling applyTimeStampCache")
-		}
+
 		// Placing soft locks
 		//r.dynamicTimeStamper.processDynamicTimestamping(ctx, &ba)
 

@@ -856,6 +856,17 @@ message BatchRequest {
   optional Header header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
   repeated RequestUnion requests = 2 [(gogoproto.nullable) = false];
 }
+//A Read Soft Lock placed on each read for Dynamic Time stamping
+message ReadSoftLock{
+  optional storage.engine.enginepb.TxnMeta TransactionMeta = 1 [(gogoproto.nullable) = false];
+  optional bool Reverse = 2 [(gogoproto.nullable) = false];
+}
+
+//A Write Lock placed on each write fir Dynamic Time stamping
+message WriteSoftLock{
+   optional storage.engine.enginepb.TxnMeta TransactionMeta = 1 [(gogoproto.nullable) = false];
+   optional RequestUnion Request = 2 [(gogoproto.nullable) = false];
+}
 
 // A BatchResponse contains one or more responses, one per request
 // corresponding to the requests in the matching BatchRequest. The

@@ -571,7 +571,7 @@ func mvccGetUsingIter(
 	}
 
 	value, intents, _, wlks, err := mvccGetInternal(ctx, iter, metaKey,
-		timestamp, consistent, safeValue, txn, buf, slcache, softlock)
+		timestamp, consistent, safeValue, txn, buf, slcache, softlock, false)
 	if value == &buf.value {
 		value = &roachpb.Value{}
 		*value = buf.value
@@ -680,6 +680,7 @@ func mvccGetInternal(
 	buf *getBuffer,
 	slcache *SoftLockCache,
 	softlock bool,
+	reverse bool,
 ) (*roachpb.Value, []roachpb.Intent, valueSafety, []roachpb.WriteSoftLock, error) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : mvccGetInternal: begin: metakey %v, timestamp %v, tnx %v", metaKey, timestamp, txn)
@@ -811,7 +812,7 @@ func mvccGetInternal(
 	var wslocks []roachpb.WriteSoftLock
 	if softlock {
 		// placing read soft
-		wslocks = slcache.processPlaceReadLockRequest(ctx, txn.TxnMeta, metaKey.Key)
+		wslocks = slcache.processPlaceReadLockRequest(ctx, txn.TxnMeta, metaKey.Key, reverse)
 	}
 	value := &buf.value
 	if allowedSafety == unsafeValue {
@@ -1035,7 +1036,7 @@ func mvccPutInternal(
 			defer getBuf.release()
 			getBuf.meta = buf.meta // initialize get metadata from what we've already read
 			if exVal, _, _, _, err = mvccGetInternal(
-				ctx, iter, metaKey, readTS, true /* consistent */, safeValue, txn, getBuf, nil, false); err != nil {
+				ctx, iter, metaKey, readTS, true /* consistent */, safeValue, txn, getBuf, nil, false, false); err != nil {
 				return nil, err
 			}
 		}
@@ -1541,7 +1542,7 @@ func mvccScanInternal(
 			}
 			res = append(res, kv)
 			return false, nil
-		}, nil, false)
+		}, slcache, softlock)
 
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -1565,7 +1566,7 @@ func MVCCScan(
 	softlock bool,
 ) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, []roachpb.WriteSoftLock, error) {
 	return mvccScanInternal(ctx, engine, key, endKey, max, timestamp,
-		consistent, txn, false /* !reverse */, nil, false)
+		consistent, txn, false /* !reverse */, slcache, softlock)
 }
 
 // MVCCReverseScan scans the key range [start,end) key up to some maximum
@@ -1580,10 +1581,12 @@ func MVCCReverseScan(
 	timestamp hlc.Timestamp,
 	consistent bool,
 	txn *roachpb.Transaction,
-) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, error) {
-	kv, s, i, _, e := mvccScanInternal(ctx, engine, key, endKey, max, timestamp,
-		consistent, txn, true /* reverse */, nil, false)
-	return kv, s, i, e
+	slcache *SoftLockCache,
+	softlock bool,
+) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, []roachpb.WriteSoftLock, error) {
+	return mvccScanInternal(ctx, engine, key, endKey, max, timestamp,
+		consistent, txn, true /* reverse */, slcache, softlock)
+
 }
 
 // MVCCIterate iterates over the key range [start,end). At each step of the
@@ -1660,6 +1663,7 @@ func MVCCIterate(
 	// A slice to gather all encountered intents we skipped, in case of
 	// inconsistent iteration.
 	var intents []roachpb.Intent
+	var wslocks []roachpb.WriteSoftLock
 	// Gathers up all the intents from WriteIntentErrors. We only get those if
 	// the scan is consistent.
 	var wiErr error
@@ -1678,9 +1682,10 @@ func MVCCIterate(
 		alloc, metaKey.Key = alloc.Copy(metaKey.Key, 1)
 
 		// Indicate that we're fine with an unsafe Value.RawBytes being returned.
-		value, newIntents, valueSafety, _, err := mvccGetInternal(
-			ctx, iter, metaKey, timestamp, consistent, unsafeValue, txn, buf, nil, false)
+		value, newIntents, valueSafety, newwslocks, err := mvccGetInternal(
+			ctx, iter, metaKey, timestamp, consistent, unsafeValue, txn, buf, slcache, softlock, reverse)
 		intents = append(intents, newIntents...)
+		wslocks = append(wslocks, newwslocks...)
 		if value != nil {
 			if valueSafety == unsafeValue {
 				// Copy the unsafe value into our allocation buffer.
@@ -1753,7 +1758,7 @@ func MVCCIterate(
 			break
 		}
 	}
-	return intents, nil, wiErr
+	return intents, wslocks, wiErr
 }
 
 // MVCCResolveWriteIntent either commits or aborts (rolls back) an
@@ -2009,6 +2014,17 @@ func mvccResolveWriteIntent(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : mvccResolveWriteIntent: end")
 	}
+	return nil
+}
+
+func MVCCPlaceWriteSoftLock(
+	ctx context.Context,
+	tmeta enginepb.TxnMeta,
+	key roachpb.Key,
+	req roachpb.RequestUnion,
+	slcache *SoftLockCache,
+) error {
+	slcache.processPlaceWriteLockRequest(ctx, tmeta, key, req)
 	return nil
 }
 

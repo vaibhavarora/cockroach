@@ -378,8 +378,8 @@ func evalReverseScan(
 	h := cArgs.Header
 	reply := resp.(*roachpb.ReverseScanResponse)
 
-	rows, resumeSpan, intents, err := engine.MVCCReverseScan(ctx, batch, args.Key, args.EndKey,
-		cArgs.MaxKeys, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn)
+	rows, resumeSpan, intents, _, err := engine.MVCCReverseScan(ctx, batch, args.Key, args.EndKey,
+		cArgs.MaxKeys, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, nil, false)
 
 	reply.NumKeys = int64(len(rows))
 	reply.ResumeSpan = resumeSpan
@@ -1060,8 +1060,8 @@ func evalRangeLookup(
 			return EvalResult{}, err
 		}
 		// Reverse scan for descriptors.
-		revKVs, _, revIntents, err := engine.MVCCReverseScan(
-			ctx, batch, startKey, endKey, rangeCount, ts, consistent, txn,
+		revKVs, _, revIntents, _, err := engine.MVCCReverseScan(
+			ctx, batch, startKey, endKey, rangeCount, ts, consistent, txn, nil, false,
 		)
 		if err != nil {
 			// An error here is likely a WriteIntentError when reading consistently.

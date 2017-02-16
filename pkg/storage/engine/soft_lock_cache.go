@@ -6,7 +6,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"golang.org/x/net/context"
-	//"math"
 	"reflect"
 	"unsafe"
 )
@@ -34,11 +33,12 @@ type WriteSoftLockQueue struct {
 func (s *SoftLockCache) processPlaceReadLockRequest(
 	ctx context.Context,
 	tmeta enginepb.TxnMeta,
-	key roachpb.Key) []roachpb.WriteSoftLock {
+	key roachpb.Key,
+	reverse bool) []roachpb.WriteSoftLock {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest")
 	}
-	readlk := roachpb.ReadSoftLock{TransactionMeta: tmeta}
+	readlk := roachpb.ReadSoftLock{TransactionMeta: tmeta, Reverse: reverse}
 	s.addToSoftReadLockCache(readlk, key)
 	return s.getAllWriteSoftLocksOnKey(key)
 }
@@ -47,11 +47,11 @@ func (s *SoftLockCache) processPlaceWriteLockRequest(
 	ctx context.Context,
 	tmeta enginepb.TxnMeta,
 	key roachpb.Key,
-	value roachpb.Value) ([]roachpb.ReadSoftLock, []roachpb.WriteSoftLock) {
+	req roachpb.RequestUnion) ([]roachpb.ReadSoftLock, []roachpb.WriteSoftLock) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In processPlaceWriteLockRequest")
 	}
-	writelk := roachpb.WriteSoftLock{TransactionMeta: tmeta, Value: value}
+	writelk := roachpb.WriteSoftLock{TransactionMeta: tmeta, Request: req}
 	s.addToSoftWriteLockCache(writelk, key)
 	rlks := s.getAllReadSoftLocksOnKey(key)
 	wlks := s.getAllWriteSoftLocksOnKey(key)
@@ -84,7 +84,7 @@ func (s *SoftLockCache) servePut(
 	}
 	arg := req.(*roachpb.PutRequest)
 
-	rlks, wlks := s.processPlaceWriteLockRequest(ctx, h, arg.Key, arg.Value, req)
+
 
 	return rlks, wlks
 }
@@ -166,31 +166,7 @@ func (s *SoftLockCache) serveDeleteRange(
 	return rlks, wlks
 }
 
-func (s *SoftLockCache) getkeysusingIter(
-	ctx context.Context,
-	start, end roachpb.Key,
-	batch ReadWriter,
-	h roachpb.Header,
-	reverse bool) (keys []roachpb.Key) {
-	maxKeys := int64(math.MaxInt64)
-	if h.MaxSpanRequestKeys != 0 {
-		// We have a batch of requests with a limit. We keep track of how many
-		// remaining keys we can touch.
-		maxKeys = h.MaxSpanRequestKeys
-	}
-	var res []roachpb.Key
-	MVCCIterate(ctx, batch, start, end, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, reverse,
-		func(kv roachpb.KeyValue) (bool, error) {
-			if int64(len(res)) == maxKeys {
-				// Another key was found beyond the max limit.
-				return true, nil
-			}
-			res = append(res, kv.Key)
-			return false, nil
-		})
 
-	return res
-}
 
 func (s *SoftLockCache) serveScan(
 	ctx context.Context,
