@@ -11,7 +11,7 @@ tnx_time_with_reties = []
 total = 0
 #file_name = "test"
 #file_name = "output"
-file_name = "concurency_without_crash"
+file_name = "concurrencynew"
 flag = 1
 
 def plot_Tnx_rate():
@@ -174,10 +174,10 @@ with open(file_name) as f:
 
 total = 250000
 take_average_of_all()
-#print trans_rate
-#plot_Tnx_rate()
+print concurrency
+plot_Tnx_rate()
 #plot_total_reties()
-plot_avg_read_time()
-plot_avg_write_time()
-plot_avg_time_wo_retries()
-plot_avg_time_with_retries()
+#plot_avg_read_time()
+#plot_avg_write_time()
+#plot_avg_time_wo_retries()
+#plot_avg_time_with_retries()
