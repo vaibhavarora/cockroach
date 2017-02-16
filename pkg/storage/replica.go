@@ -130,6 +130,26 @@ func consultsTimestampCache(r roachpb.Request) bool {
 	return consultsTimestampCacheMethods[m]
 }
 
+var consultsDyTSMethods = [...]bool{
+	roachpb.Put:            true,
+	roachpb.ConditionalPut: true,
+	roachpb.Increment:      true,
+	roachpb.Delete:         true,
+	roachpb.DeleteRange:    true,
+	roachpb.Get:            true,
+	roachpb.Scan:           true,
+	roachpb.ReverseScan:    true,
+	roachpb.EndTransaction: true,
+}
+
+func consultsDyTSCommands(r roachpb.Request) bool {
+	m := r.Method()
+	if m < 0 || m >= roachpb.Method(len(consultsDyTSMethods)) {
+		return false
+	}
+	return consultsDyTSMethods[m]
+}
+
 // updatesTimestampCacheMethods specifies the set of methods which if
 // successful will update the timestamp cache.
 var updatesTimestampCacheMethods = [...]bool{
@@ -278,7 +298,7 @@ type Replica struct {
 	// TODO(peter): evaluate runtime overhead of the timed mutex.
 	raftMu syncutil.TimedMutex
 
-	dynamicTimeStamper *DynanicTimeStamper
+	slockcache *SoftLockCache
 
 	cmdQMu struct {
 		// Protects all fields in the cmdQMu struct.
@@ -549,8 +569,8 @@ func newReplica(rangeID roachpb.RangeID, store *Store) *Replica {
 		RangeID:        rangeID,
 		store:          store,
 		abortCache:     NewAbortCache(rangeID),
+		slockcache:     NewSoftLockCache(),
 	}
-	r.dynamicTimeStamper = NewDynamicTImeStamper(store)
 	// Init rangeStr with the range ID.
 	r.rangeStr.store(0, &roachpb.RangeDescriptor{RangeID: rangeID})
 	// Add replica log tag - the value is rangeStr.String().
@@ -1843,7 +1863,7 @@ func (r *Replica) addReadOnlyCmd(
 		}
 	}()
 	// placing soft locks
-	r.dynamicTimeStamper.processDynamicTimestamping(ctx, &ba)
+	//r.dynamicTimeStamper.processDynamicTimestamping(ctx, &ba)
 	r.mu.Lock()
 	err := r.mu.destroyed
 	r.mu.Unlock()
@@ -2038,7 +2058,7 @@ func (r *Replica) tryAddWriteCmd(
 			log.Infof(ctx, "Ravi : calling applyTimeStampCache")
 		}
 		// Placing soft locks
-		r.dynamicTimeStamper.processDynamicTimestamping(ctx, &ba)
+		//r.dynamicTimeStamper.processDynamicTimestamping(ctx, &ba)
 
 		if bumped, pErr := r.applyTimestampCache(&ba); pErr != nil {
 			return nil, pErr, proposalNoRetry
@@ -4069,7 +4089,12 @@ func (r *Replica) executeBatch(
 		}
 		// Note that responses are populated even when an error is returned.
 		// TODO(tschottdorf): Change that. IIRC there is nontrivial use of it currently.
+		// Ravi :
+
 		reply := br.Responses[index].GetInner()
+		if ba.Txn != nil && consultsDyTSCommands(args) {
+			// call DyTSCommand
+		}
 		curResult, pErr := r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 
 		if err := result.MergeAndDestroy(curResult); err != nil {

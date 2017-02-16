@@ -3,40 +3,18 @@ package storage
 import (
 	//"fmt"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	//"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	//"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
 
-type DynanicTimeStamper struct {
-	slockcache *SoftLockCache
-	store      *Store
-}
-
-var consultsDyTSMethods = [...]bool{
-	roachpb.Put:            true,
-	roachpb.ConditionalPut: true,
-	roachpb.Increment:      true,
-	roachpb.Delete:         true,
-	roachpb.DeleteRange:    true,
-	roachpb.Get:            true,
-	roachpb.Scan:           true,
-	roachpb.ReverseScan:    true,
-	roachpb.EndTransaction: true,
-}
-
-func consultsDyTSCommands(r roachpb.Request) bool {
-	m := r.Method()
-	if m < 0 || m >= roachpb.Method(len(consultsDyTSMethods)) {
-		return false
-	}
-	return consultsDyTSMethods[m]
-}
-
 type DyTSCommand struct {
-	EvalDyTSCommand func(context.Context, *DynanicTimeStamper, roachpb.Header, roachpb.Request)
+	//EvalDyTSCommand func(context.Context, roachpb.Header, roachpb.Request)
+	EvalDyTSCommand func(context.Context, engine.ReadWriter, CommandArgs, roachpb.Response) (EvalResult, error)
 }
 
 var DyTSCommands = map[roachpb.Method]DyTSCommand{
@@ -52,125 +30,165 @@ var DyTSCommands = map[roachpb.Method]DyTSCommand{
 	roachpb.EndTransaction: {EvalDyTSCommand: EvalDyTSEndTransaction},
 }
 
-func NewDynamicTImeStamper(store *Store) *DynanicTimeStamper {
-	d := &DynanicTimeStamper{
-		slockcache: NewSoftLockCache(),
-		store:      store,
-	}
-	return d
-}
-
-//func (d *DynanicTimeStamper) applySoftLockCache(ctx context.Context, ba *roachpb.BatchRequest) {
-func (d *DynanicTimeStamper) processDynamicTimestamping(
+func (r *Replica) executeDyTSCmd(
 	ctx context.Context,
-	ba *roachpb.BatchRequest) (err error) {
-	if ba.Header.Txn == nil {
-		if log.V(2) {
-			log.Infof(ctx, "Non transactional request ")
-		}
-		return nil
+	raftCmdID storagebase.CmdIDKey,
+	index int,
+	batch engine.ReadWriter,
+	ms *enginepb.MVCCStats,
+	h roachpb.Header,
+	maxKeys int64,
+	args roachpb.Request,
+	reply roachpb.Response) (EvalResult, *roachpb.Error) {
+
+	if _, ok := args.(*roachpb.NoopRequest); ok {
+		return EvalResult{}, nil
 	}
 
-	for _, union := range ba.Requests {
-		args := union.GetInner()
-		if consultsDyTSCommands(args) {
-			if cmd, ok := DyTSCommands[args.Method()]; ok {
-				if log.V(2) {
-					log.Infof(ctx, "Ravi : In applySoftLockCache executing cmd %v , args %v", cmd, args.Method())
-				}
-				cmd.EvalDyTSCommand(ctx, d, ba.Header, args)
-			} else {
-				err = errors.Errorf("unrecognized command %s", args.Method())
-				return err
-			}
+	// If a unittest filter was installed, check for an injected error; otherwise, continue.
+	if filter := r.store.cfg.TestingKnobs.TestingCommandFilter; filter != nil {
+		filterArgs := storagebase.FilterArgs{Ctx: ctx, CmdID: raftCmdID, Index: index,
+			Sid: r.store.StoreID(), Req: args, Hdr: h}
+		if pErr := filter(filterArgs); pErr != nil {
+			log.Infof(ctx, "test injecting error: %s", pErr)
+			return EvalResult{}, pErr
 		}
 	}
-	return nil
+
+	var err error
+	var pd EvalResult
+
+	if cmd, ok := DyTSCommands[args.Method()]; ok {
+		cArgs := CommandArgs{
+			Repl:   r,
+			Header: h,
+			// Some commands mutate their arguments, so give each invocation
+			// its own copy (shallow to mimic earlier versions of this code
+			// in which args were passed by value instead of pointer).
+			Args:    args.ShallowCopy(),
+			MaxKeys: maxKeys,
+			Stats:   ms,
+		}
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : executing cmd %v with cArgs %v ", cmd, cArgs)
+		}
+		cmd.EvalDyTSCommand(ctx, batch, cArgs, reply)
+	} else {
+		err = errors.Errorf("unrecognized command %s", args.Method())
+	}
+
+	if log.V(2) {
+		log.Infof(ctx, "executed %s command %+v: %+v, err=%v", args.Method(), args, reply, err)
+	}
+
+	// Create a roachpb.Error by initializing txn from the request/response header.
+	var pErr *roachpb.Error
+	if err != nil {
+		txn := reply.Header().Txn
+		if txn == nil {
+			txn = h.Txn
+		}
+		pErr = roachpb.NewErrorWithTxn(err, txn)
+	}
+
+	return pd, pErr
+
 }
 
 func EvalDyTSGet(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
 	// Places read lock and returns already placed write locks
-	d.slockcache.serveGet(ctx, h, req)
+	cArgs.Repl.slockcache.serveGet(ctx, cArgs.Header, cArgs.Args)
 
+	return EvalResult{}, nil
 }
 
 func EvalDyTSPut(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
 	// places write lock and returns already placed read and write locks
-	d.slockcache.servePut(ctx, h, req)
+	cArgs.Repl.slockcache.servePut(ctx, cArgs.Header, cArgs.Args)
 
+	return EvalResult{}, nil
 }
 
 func EvalDyTSConditionalPut(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
 	// places write lock and returns already placed read and write locks
-	d.slockcache.serveConditionalPut(ctx, h, req)
+	cArgs.Repl.slockcache.serveConditionalPut(ctx, cArgs.Header, cArgs.Args)
+	return EvalResult{}, nil
 }
 
 func EvalDyTSInitPut(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
-	d.slockcache.serveInitPut(ctx, h, req)
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+
+	cArgs.Repl.slockcache.serveInitPut(ctx, cArgs.Header, cArgs.Args)
+	return EvalResult{}, nil
 }
 
 func EvalDyTSIncrement(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
-
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+	return EvalResult{}, nil
 }
 
 func EvalDyTSDelete(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
-	d.slockcache.serveDelete(ctx, h, req)
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+
+	cArgs.Repl.slockcache.serveDelete(ctx, cArgs.Header, cArgs.Args)
+	return EvalResult{}, nil
 }
 
 func EvalDyTSDeleteRange(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
-	d.slockcache.serveDeleteRange(ctx, h, req, d.store.Engine())
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+
+	cArgs.Repl.slockcache.serveDeleteRange(ctx, cArgs.Header, cArgs.Args, batch)
+	return EvalResult{}, nil
 }
 
 func EvalDyTSScan(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
-	d.slockcache.serveScan(ctx, h, req, d.store.Engine())
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+	cArgs.Repl.slockcache.serveScan(ctx, cArgs.Header, cArgs.Args, batch)
+	return EvalResult{}, nil
 }
 
 func EvalDyTSReverseScan(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
-	d.slockcache.serveReverseScan(ctx, h, req, d.store.Engine())
-
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+	cArgs.Repl.slockcache.serveReverseScan(ctx, cArgs.Header, cArgs.Args, batch)
+	return EvalResult{}, nil
 }
 
 func EvalDyTSEndTransaction(
 	ctx context.Context,
-	d *DynanicTimeStamper,
-	h roachpb.Header,
-	req roachpb.Request) {
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
 	//removes all the read and write locks placed by the transaction
-	d.slockcache.serveEndTransaction(ctx, h, req, d.store.Engine())
+	cArgs.Repl.slockcache.serveEndTransaction(ctx, cArgs.Header, cArgs.Args, batch)
+	return EvalResult{}, nil
 }
