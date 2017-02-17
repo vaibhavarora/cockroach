@@ -140,6 +140,7 @@ var consultsDyTSMethods = [...]bool{
 	roachpb.Scan:           true,
 	roachpb.ReverseScan:    true,
 	roachpb.EndTransaction: true,
+	roachpb.GetTxnRecord:   true,
 }
 
 func consultsDyTSCommands(r roachpb.Request) bool {

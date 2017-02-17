@@ -2023,9 +2023,47 @@ func MVCCPlaceWriteSoftLock(
 	key roachpb.Key,
 	req roachpb.RequestUnion,
 	slcache *SoftLockCache,
-) error {
-	slcache.processPlaceWriteLockRequest(ctx, tmeta, key, req)
-	return nil
+) ([]roachpb.ReadSoftLock, []roachpb.WriteSoftLock) {
+	return slcache.processPlaceWriteLockRequest(ctx, tmeta, key, req)
+
+}
+
+func MVCCPlaceReadSoftLock(
+	ctx context.Context,
+	tmeta enginepb.TxnMeta,
+	key roachpb.Key,
+	reverse bool,
+	slcache *SoftLockCache,
+) []roachpb.WriteSoftLock {
+	return slcache.processPlaceReadLockRequest(ctx, tmeta, key, reverse)
+
+}
+
+func MVCCgetKeysUsingIter(
+	ctx context.Context,
+	start, end roachpb.Key,
+	engine ReadWriter,
+	h roachpb.Header,
+	reverse bool) (keys []roachpb.Key) {
+
+	maxKeys := int64(math.MaxInt64)
+	if h.MaxSpanRequestKeys != 0 {
+		// We have a batch of requests with a limit. We keep track of how many
+		// remaining keys we can touch.
+		maxKeys = h.MaxSpanRequestKeys
+	}
+	var res []roachpb.Key
+	_, _, _ = MVCCIterate(ctx, engine, start, end, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, reverse,
+		func(kv roachpb.KeyValue) (bool, error) {
+			if int64(len(res)) == maxKeys {
+				// Another key was found beyond the max limit.
+				return true, nil
+			}
+			res = append(res, kv.Key)
+			return false, nil
+		}, nil, false)
+
+	return res
 }
 
 // IterAndBuf used to pass iterators and buffers between MVCC* calls, allowing

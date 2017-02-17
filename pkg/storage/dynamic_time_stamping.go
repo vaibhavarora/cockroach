@@ -2,15 +2,16 @@ package storage
 
 import (
 	//"fmt"
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
-	//"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
-	"math"
 )
 
 type DyTSCommand struct {
@@ -29,6 +30,7 @@ var DyTSCommands = map[roachpb.Method]DyTSCommand{
 	roachpb.Scan:           {EvalDyTSCommand: EvalDyTSScan},
 	roachpb.ReverseScan:    {EvalDyTSCommand: EvalDyTSReverseScan},
 	roachpb.EndTransaction: {EvalDyTSCommand: EvalDyTSEndTransaction},
+	roachpb.GetTxnRecord:   {EvalDyTSCommand: EvalDyTSGetTransactionRecord},
 }
 
 func (r *Replica) executeDyTSCmd(
@@ -116,9 +118,9 @@ func EvalDyTSGet(
 	// check if the read is snapshot read
 
 	// Update Transaction record with write locks
-	for each := range wslocks {
+	for _, each := range wslocks {
 		if log.V(2) {
-			log.Infof(ctx, "Write locks acqurired on Get %v", each)
+			log.Infof(ctx, "Write locks acqurired on EvalDyTSGet %v", each)
 		}
 	}
 	return EvalResult{}, err
@@ -131,12 +133,22 @@ func EvalDyTSPut(
 	resp roachpb.Response) (EvalResult, error) {
 	// places write lock and returns already placed read and write locks
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : evalPut: begin")
+		log.Infof(ctx, "Ravi : EvalDyTSPut: begin")
 	}
 	args := cArgs.Args.(*roachpb.PutRequest)
 	var req roachpb.RequestUnion
 	req.MustSetInner(args)
-	engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
+	rslocks, wslocks := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
+	for _, each := range wslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Write locks acqurired on EvalDyTSPut %v", each)
+		}
+	}
+	for _, each := range rslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Read locks acqurired on EvalDyTSPut %v", each)
+		}
+	}
 	return EvalResult{}, nil
 }
 
@@ -145,9 +157,27 @@ func EvalDyTSConditionalPut(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : EvalDyTSConditionalPut: begin")
+	}
+	args := cArgs.Args.(*roachpb.ConditionalPutRequest)
+	var req roachpb.RequestUnion
+	req.MustSetInner(args)
 	// places write lock and returns already placed read and write locks
-	//cArgs.Repl.slockcache.serveConditionalPut(ctx, cArgs.Header, cArgs.Args)
+	rslocks, wslocks := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
+	for _, each := range wslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Write locks acqurired on EvalDyTSConditionalPut %v", each)
+		}
+	}
+	for _, each := range rslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Read locks acqurired on EvalDyTSConditionalPut %v", each)
+		}
+	}
 	return EvalResult{}, nil
+
 }
 
 func EvalDyTSInitPut(
@@ -156,15 +186,58 @@ func EvalDyTSInitPut(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 
-	//cArgs.Repl.slockcache.serveInitPut(ctx, cArgs.Header, cArgs.Args)
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : EvalDyTSInitPut: begin")
+	}
+	args := cArgs.Args.(*roachpb.InitPutRequest)
+	var req roachpb.RequestUnion
+	req.MustSetInner(args)
+	// places write lock and returns already placed read and write locks
+	rslocks, wslocks := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
+	for _, each := range wslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Write locks acqurired on EvalDyTSInitPut %v", each)
+		}
+	}
+	for _, each := range rslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Read locks acqurired on EvalDyTSInitPut %v", each)
+		}
+	}
 	return EvalResult{}, nil
+
 }
 
+// Since this method reads the value an then writes it we place both read and write locks
 func EvalDyTSIncrement(
 	ctx context.Context,
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : EvalDyTSIncrement: begin")
+	}
+	args := cArgs.Args.(*roachpb.IncrementRequest)
+	// Place read lock
+	wslocks := engine.MVCCPlaceReadSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, false, cArgs.Repl.slockcache)
+	//Place write lock
+	var req roachpb.RequestUnion
+	req.MustSetInner(args)
+	// places write lock and returns already placed read and write locks
+	rslocks, wslockstmp := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
+	wslocks = append(wslocks, wslockstmp...)
+	for _, each := range wslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Write locks acqurired on EvalDyTSIncrement %v", each)
+		}
+	}
+	for _, each := range rslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Read locks acqurired on EvalDyTSIncrement %v", each)
+		}
+	}
+
 	return EvalResult{}, nil
 }
 
@@ -174,7 +247,25 @@ func EvalDyTSDelete(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 
-	//cArgs.Repl.slockcache.serveDelete(ctx, cArgs.Header, cArgs.Args)
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : EvalDyTSDelete: begin")
+	}
+	args := cArgs.Args.(*roachpb.InitPutRequest)
+	var req roachpb.RequestUnion
+	req.MustSetInner(args)
+	// places write lock and returns already placed read and write locks
+	rslocks, wslocks := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
+	for _, each := range wslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Write locks acqurired on EvalDyTSDelete %v", each)
+		}
+	}
+	for _, each := range rslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Read locks acqurired on EvalDyTSDelete %v", each)
+		}
+	}
+
 	return EvalResult{}, nil
 }
 
@@ -184,7 +275,24 @@ func EvalDyTSDeleteRange(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 
-	//cArgs.Repl.slockcache.serveDeleteRange(ctx, cArgs.Header, cArgs.Args, batch)
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : EvalDyTSDelete: begin")
+	}
+	args := cArgs.Args.(*roachpb.InitPutRequest)
+	var req roachpb.RequestUnion
+	req.MustSetInner(args)
+
+	keys := engine.MVCCgetKeysUsingIter(ctx, args.Key, args.EndKey, batch, cArgs.Header, false)
+
+	var wslocks []roachpb.WriteSoftLock
+	var rslocks []roachpb.ReadSoftLock
+
+	for _, eachkey := range keys {
+		rslockstmp, wslockstmp := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, eachkey, req, cArgs.Repl.slockcache)
+		wslocks = append(wslocks, wslockstmp...)
+		rslocks = append(rslocks, rslockstmp...)
+	}
+
 	return EvalResult{}, nil
 }
 
@@ -207,7 +315,7 @@ func EvalDyTSScan(
 	reply.ResumeSpan = resumeSpan
 	reply.Rows = rows
 
-	for each := range wslocks {
+	for _, each := range wslocks {
 		if log.V(2) {
 			log.Infof(ctx, "Write locks acqurired on Scan %v", each)
 		}
@@ -234,7 +342,7 @@ func EvalDyTSReverseScan(
 	reply.ResumeSpan = resumeSpan
 	reply.Rows = rows
 
-	for each := range wslocks {
+	for _, each := range wslocks {
 		if log.V(2) {
 			log.Infof(ctx, "Write locks acqurired on Scan %v", each)
 		}
@@ -249,32 +357,63 @@ func EvalDyTSEndTransaction(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 	//removes all the read and write locks placed by the transaction
-	//cArgs.Repl.slockcache.serveEndTransaction(ctx, cArgs.Header, cArgs.Args, batch)
+
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSEndTransaction")
+	}
 	return EvalResult{}, nil
 }
 
-func getkeysusingIter(
-	ctx context.Context,
-	start, end roachpb.Key,
-	batch engine.ReadWriter,
-	h roachpb.Header,
-	reverse bool) (keys []roachpb.Key) {
-	maxKeys := int64(math.MaxInt64)
-	if h.MaxSpanRequestKeys != 0 {
-		// We have a batch of requests with a limit. We keep track of how many
-		// remaining keys we can touch.
-		maxKeys = h.MaxSpanRequestKeys
-	}
-	var res []roachpb.Key
-	_, _, _ = engine.MVCCIterate(ctx, batch, start, end, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, reverse,
-		func(kv roachpb.KeyValue) (bool, error) {
-			if int64(len(res)) == maxKeys {
-				// Another key was found beyond the max limit.
-				return true, nil
-			}
-			res = append(res, kv.Key)
-			return false, nil
-		}, nil, false)
+func DyTSgetTransactionrecord(ctx context.Context, getTnxReq roachpb.Request, store *Store) roachpb.Transaction {
+	/*getTnxReq := &roachpb.GetTransactionRecordRequest{
+		Span: roachpb.Span{
+			Key: cArgs.Header.Txn.Key,
+		},
+	}*/
 
-	return res
+	b := &client.Batch{}
+	b.AddRawRequest(getTnxReq)
+
+	if err := store.db.Run(ctx, b); err != nil {
+		_ = b.MustPErr()
+	}
+
+	var r roachpb.GetTransactionRecordResponse
+	br := b.RawResponse()
+	for _, res := range br.Responses {
+		r := res.GetInner().(*roachpb.GetTransactionRecordResponse)
+		if log.V(2) {
+			log.Infof(ctx, "recieved tnx record : %v", r.TxnRecord)
+		}
+	}
+
+	return r.TxnRecord
+}
+
+func EvalDyTSGetTransactionRecord(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSGetTransactionRecord")
+	}
+	//args := cArgs.Args.(*roachpb.ReverseScanRequest)
+	h := cArgs.Header
+	reply := resp.(*roachpb.GetTransactionRecordResponse)
+
+	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
+
+	var existingTxn roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &existingTxn,
+	); err != nil {
+		return EvalResult{}, err
+	} else if !ok {
+		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
+	}
+	reply.Txn = &existingTxn
+
+	return EvalResult{}, nil
 }

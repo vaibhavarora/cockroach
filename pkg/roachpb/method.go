@@ -123,4 +123,6 @@ const (
 	// ChangeFrozen freezes or unfreezes all Ranges with StartKey in a given
 	// key span.
 	ChangeFrozen
+	// Gets the Transaction record of the given Transaction
+	GetTxnRecord
 )

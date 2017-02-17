@@ -233,6 +233,19 @@ message ReverseScanResponse {
   repeated KeyValue rows = 2 [(gogoproto.nullable) = false];
 }
 
+//A GetTransactionRecordRequest request to get the Transaction record taged to the key specified in span
+message GetTransactionRecordRequest{
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  
+}
+
+//A GetTransactionRecordResponse is a response that has Transaction record
+message GetTransactionRecordResponse {
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional Transaction txn_record = 2 [(gogoproto.nullable) = false];
+}
+
+
 // A CheckConsistencyRequest is the argument to the CheckConsistency() method.
 // It specifies the start and end keys for a span of ranges to which a
 // consistency check should be applied. A consistency check on a range involves
@@ -743,6 +756,7 @@ message RequestUnion {
   optional ChangeFrozenRequest change_frozen = 27;
   optional TransferLeaseRequest transfer_lease = 28;
   optional LeaseInfoRequest lease_info = 30;
+  optional GetTransactionRecordRequest get_txn_record = 31;
 }
 
 // A ResponseUnion contains exactly one of the optional responses.
@@ -785,6 +799,7 @@ message ResponseUnion {
   optional ChangeFrozenResponse change_frozen = 27;
   reserved 28; // TransferLease and RequestLease both use RequestLeaseResponse
   optional LeaseInfoResponse lease_info = 30;
+  optional GetTransactionRecordResponse get_txn_record = 31;
 }
 
 // A Header is attached to a BatchRequest, encapsulating routing and auxiliary
