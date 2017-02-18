@@ -174,10 +174,10 @@ with open(file_name) as f:
 
 total = 250000
 take_average_of_all()
-print concurrency
+#print concurrency
 plot_Tnx_rate()
-#plot_total_reties()
-#plot_avg_read_time()
-#plot_avg_write_time()
-#plot_avg_time_wo_retries()
-#plot_avg_time_with_retries()
+plot_total_reties()
+plot_avg_read_time()
+plot_avg_write_time()
+plot_avg_time_wo_retries()
+plot_avg_time_with_retries()

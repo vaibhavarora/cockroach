@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-concurrency = 200
+concurrency = 100
 contention_range = range(50,100,10)
 trans_rate = []
 retries = []
@@ -10,7 +10,6 @@ avg_write = []
 tnx_time_wo_reties = []
 tnx_time_with_reties = []
 total = 0
-file_name = "contention_with_stops"
 #file_name = "contention_output"
 flag = 1
 
@@ -177,9 +176,9 @@ with open(file_name) as f:
 total = 250000
 take_average_of_all()
 #print trans_rate
-#plot_Tnx_rate()
-#plot_total_reties()
-#plot_avg_read_time()
+plot_Tnx_rate()
+plot_total_reties()
+plot_avg_read_time()
 plot_avg_write_time()
-#plot_avg_time_wo_retries()
-#plot_avg_time_with_retries()
+plot_avg_time_wo_retries()
+plot_avg_time_with_retries()
