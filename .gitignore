@@ -21,3 +21,5 @@ artifacts
 *.test*
 # Various `sed -i~` invocations in our scripts.
 *~
+node*
+*.sh

@@ -405,41 +405,7 @@ func (ds *DistSender) sendRPC(
 	var reply *roachpb.BatchResponse
 	var err error
 	if ba.HasValidInconsistentMethods() && ba.ReadConsistency != roachpb.CONSISTENT {
-		// Create a quorum (including local node and excluding lease holder)
-		total := len(replicas)
-		quorum := total/2 + 1
-		quorumReplicas := make(ReplicaSlice, len(replicas))
-		copy(quorumReplicas, replicas)
-
-		localIndex := -1
-		var localReplica *ReplicaInfo
-		nodeDesc := ds.getNodeDescriptor()
-		if nodeDesc != nil {
-			localIndex = quorumReplicas.FindReplicaByNodeID(nodeDesc.NodeID)
-			if localIndex != -1 {
-				localReplica = &quorumReplicas[localIndex]
-				quorumReplicas.MoveToFront(localIndex)
-				quorumReplicas = quorumReplicas[1:]
-			}
-		}
-
-		leaseHolderIndex := -1
-		if leaseHolder, ok := ds.leaseHolderCache.Lookup(ctx, rangeID); ok {
-			leaseHolderIndex = quorumReplicas.FindReplica(leaseHolder.StoreID)
-			if leaseHolderIndex != -1 {
-				quorumReplicas.MoveToFront(leaseHolderIndex)
-				quorumReplicas = quorumReplicas[1:]
-			}
-		}
-
-		shuffle.Shuffle(quorumReplicas)
-		if localReplica != nil {
-			if len(quorumReplicas) > quorum-1 {
-				quorumReplicas = quorumReplicas[:quorum-1]
-			}
-			quorumReplicas = append(quorumReplicas, *localReplica)
-		}
-
+		quorumReplicas := createQuorumReplicas(ds, ctx, rangeID, replicas)
 		reply, err = ds.sendToAllReplicas(ctx, rpcOpts, rangeID, quorumReplicas, ba, ds.rpcContext)
 	}
 
@@ -451,6 +417,75 @@ func (ds *DistSender) sendRPC(
 		return nil, err
 	}
 	return reply, nil
+}
+
+func createQuorumReplicas(ds *DistSender, ctx context.Context, rangeID roachpb.RangeID,
+	replicas ReplicaSlice) ReplicaSlice {
+	// Create a quorum (including local node and excluding lease holder)
+	total := len(replicas)
+	quorum := total/2 + 1
+	quorumReplicas := make(ReplicaSlice, len(replicas))
+	copy(quorumReplicas, replicas)
+
+	localIndex := -1
+	var localReplica *ReplicaInfo
+	nodeDesc := ds.getNodeDescriptor()
+	if nodeDesc != nil {
+		localIndex = quorumReplicas.FindReplicaByNodeID(nodeDesc.NodeID)
+		if localIndex != -1 {
+			localReplica = &quorumReplicas[localIndex]
+			quorumReplicas.MoveToFront(localIndex)
+			quorumReplicas = quorumReplicas[1:]
+		}
+	}
+
+	leaseHolderIndex := -1
+	if leaseHolder, ok := ds.leaseHolderCache.Lookup(ctx, rangeID); ok {
+		leaseHolderIndex = quorumReplicas.FindReplica(leaseHolder.StoreID)
+		if leaseHolderIndex != -1 {
+			quorumReplicas.MoveToFront(leaseHolderIndex)
+			quorumReplicas = quorumReplicas[1:]
+		}
+	}
+
+	shuffle.Shuffle(quorumReplicas)
+	if localReplica != nil {
+		if len(quorumReplicas) > quorum-1 {
+			quorumReplicas = quorumReplicas[:quorum-1]
+		}
+		quorumReplicas = append(quorumReplicas, *localReplica)
+	}
+	return quorumReplicas
+}
+
+func isReplyValueNil(ba *roachpb.BatchRequest, br *roachpb.BatchResponse) bool {
+	for i := range ba.Requests {
+		requ := ba.Requests[i].GetInner()
+		switch requ.Method() {
+		case roachpb.Get:
+			res := br.Responses[i].GetValue().(*roachpb.GetResponse)
+			if res.Value != nil && res.Value.RawBytes == nil {
+				return true
+			}
+
+		case roachpb.Scan:
+			res := br.Responses[i].GetValue().(*roachpb.ScanResponse)
+			for _, row := range res.Rows {
+				if row.Value.RawBytes == nil {
+					return true
+				}
+			}
+
+		case roachpb.ReverseScan:
+			res := br.Responses[i].GetValue().(*roachpb.ReverseScanResponse)
+			for _, row := range res.Rows {
+				if row.Value.RawBytes == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // CountRanges returns the number of ranges that encompass the given key span.
@@ -1162,10 +1197,8 @@ func selectLatestValues(request roachpb.BatchRequest, reply1 *roachpb.BatchRespo
 				getResponse2 := reply2.Responses[i].GetValue().(*roachpb.GetResponse)
 				toAppend := reply2.Responses[i]
 
-				if getResponse2.Value != nil && getResponse1.Value != nil {
-					if getResponse2.Value.Timestamp.Less(getResponse1.Value.Timestamp) {
-						toAppend = reply1.Responses[i]
-					}
+				if getResponse2.Value.Timestamp.Less(getResponse1.Value.Timestamp) {
+					toAppend = reply1.Responses[i]
 				}
 				response.Responses = append(response.Responses, toAppend)
 

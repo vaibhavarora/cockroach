@@ -1854,6 +1854,10 @@ func (r *Replica) addReadOnlyCmd(
 		pErr = r.checkIfTxnAborted(ctx, r.store.Engine(), *ba.Txn)
 	}
 	if intents := result.Local.detachIntents(); len(intents) > 0 {
+		if ba.HasValidInconsistentMethods() && ba.ReadConsistency != roachpb.CONSISTENT {
+			updateResponseWithIntentTimestamp(ba, br, intents)
+		}
+
 		log.Eventf(ctx, "submitting %d intents to asynchronous processing", len(intents))
 		r.store.intentResolver.processIntentsAsync(r, intents)
 	}
@@ -1863,6 +1867,80 @@ func (r *Replica) addReadOnlyCmd(
 		log.Event(ctx, "read completed")
 	}
 	return br, pErr
+}
+
+func updateResponseWithIntentTimestamp(ba roachpb.BatchRequest, br *roachpb.BatchResponse,
+	intents []intentsWithArg) {
+
+	tsToSpanMap := make(map[hlc.Timestamp]roachpb.Span)
+	for _, item := range intents {
+		for _, intent := range item.intents {
+			tsToSpanMap[intent.Txn.Timestamp] = intent.Span
+		}
+	}
+
+	for i := range ba.Requests {
+		request := ba.Requests[i].GetInner()
+
+		switch request.Method() {
+		case roachpb.Get:
+			getRequest := ba.Requests[i].GetValue().(*roachpb.GetRequest)
+			getResponse := br.Responses[i].GetValue().(*roachpb.GetResponse)
+			for ts, span := range tsToSpanMap {
+				if getRequest.Span.Overlaps(span) && getResponse.Value.Timestamp.Less(ts) {
+					// If the span overlaps and intent has a newer timestamp
+					getResponse.Value.RawBytes = nil
+					getResponse.Value.Timestamp = ts
+				}
+			}
+
+		case roachpb.Scan:
+			scanRequest := ba.Requests[i].GetValue().(*roachpb.ScanRequest)
+			scanResponse := br.Responses[i].GetValue().(*roachpb.ScanResponse)
+			for ts, span := range tsToSpanMap {
+				if scanRequest.Span.Overlaps(span) {
+					hasNewerTs := false
+					for _, row := range scanResponse.Rows {
+						if row.Value.Timestamp.Less(ts) {
+							hasNewerTs = true
+							break
+						}
+					}
+
+					if hasNewerTs {
+						// If the span overlaps and intent has a newer timestamp
+						for _, row := range scanResponse.Rows {
+							row.Value.RawBytes = nil
+							row.Value.Timestamp = ts
+						}
+					}
+				}
+			}
+
+		case roachpb.ReverseScan:
+			reverseScanRequest := ba.Requests[i].GetValue().(*roachpb.ReverseScanRequest)
+			reverseScanResponse := br.Responses[i].GetValue().(*roachpb.ReverseScanResponse)
+			for ts, span := range tsToSpanMap {
+				if reverseScanRequest.Span.Overlaps(span) {
+					hasNewerTs := false
+					for _, row := range reverseScanResponse.Rows {
+						if row.Value.Timestamp.Less(ts) {
+							hasNewerTs = true
+							break
+						}
+					}
+
+					if hasNewerTs {
+						// If the span overlaps and intent has a newer timestamp
+						for _, row := range reverseScanResponse.Rows {
+							row.Value.RawBytes = nil
+							row.Value.Timestamp = ts
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 // TODO(tschottdorf): temporary assertion for #5725, which saw batches with
