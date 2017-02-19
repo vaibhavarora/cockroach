@@ -467,6 +467,7 @@ func (*ComputeChecksumRequest) Method() Method { return ComputeChecksum }
 // Method implements the Request interface.
 func (*DeprecatedVerifyChecksumRequest) Method() Method { return DeprecatedVerifyChecksum }
 
+// Method implements the Request interface.
 func (*GetTransactionRecordRequest) Method() Method { return GetTxnRecord }
 
 // ShallowCopy implements the Request interface.

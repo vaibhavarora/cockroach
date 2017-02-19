@@ -140,7 +140,9 @@ var consultsDyTSMethods = [...]bool{
 	roachpb.Scan:           true,
 	roachpb.ReverseScan:    true,
 	roachpb.EndTransaction: true,
-	roachpb.GetTxnRecord:   true,
+}
+var consultsDyTSValidatorMethods = [...]bool{
+	roachpb.GetTxnRecord: true,
 }
 
 func consultsDyTSCommands(r roachpb.Request) bool {
@@ -149,6 +151,14 @@ func consultsDyTSCommands(r roachpb.Request) bool {
 		return false
 	}
 	return consultsDyTSMethods[m]
+}
+
+func consultsDyTSValidatorCommands(r roachpb.Request) bool {
+	m := r.Method()
+	if m < 0 || m >= roachpb.Method(len(consultsDyTSValidatorMethods)) {
+		return false
+	}
+	return consultsDyTSValidatorMethods[m]
 }
 
 // updatesTimestampCacheMethods specifies the set of methods which if
@@ -4090,11 +4100,17 @@ func (r *Replica) executeBatch(
 		// TODO(tschottdorf): Change that. IIRC there is nontrivial use of it currently.
 
 		reply := br.Responses[index].GetInner()
-		if ba.Txn != nil && consultsDyTSCommands(args) {
-			r.executeDyTSCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
+		var curResult EvalResult
+		var pErr *roachpb.Error
+		if ba.Txn != nil && consultsDyTSValidatorCommands(args) {
+			curResult, pErr = r.executeDyTSValidatorCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
+		} else {
+			//shadowing for now
+			if ba.Txn != nil && consultsDyTSCommands(args) {
+				curResult, pErr = r.executeDyTSCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
+			}
+			curResult, pErr = r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 		}
-		curResult, pErr := r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
-
 		if err := result.MergeAndDestroy(curResult); err != nil {
 			// TODO(tschottdorf): see whether we really need to pass nontrivial
 			// EvalResult up on error and if so, formalize that.

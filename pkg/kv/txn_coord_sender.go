@@ -967,7 +967,7 @@ func (tc *TxnCoordSender) updateState(
 			txnMeta.Readkeys = rkeys
 			// Ravi : work around for passing through read only transaction
 			//} else if len(keys) >= 0 {
-		} else if len(wkeys) > 0 {
+		} else if len(wkeys) > 0 || len(rkeys) > 0 {
 			if !newTxn.Writing {
 				panic("txn with intents marked as non-writing")
 			}

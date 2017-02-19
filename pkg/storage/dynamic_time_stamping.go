@@ -1,8 +1,7 @@
 package storage
 
 import (
-	//"fmt"
-	//"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"fmt"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
@@ -30,7 +29,6 @@ var DyTSCommands = map[roachpb.Method]DyTSCommand{
 	roachpb.Scan:           {EvalDyTSCommand: EvalDyTSScan},
 	roachpb.ReverseScan:    {EvalDyTSCommand: EvalDyTSReverseScan},
 	roachpb.EndTransaction: {EvalDyTSCommand: EvalDyTSEndTransaction},
-	roachpb.GetTxnRecord:   {EvalDyTSCommand: EvalDyTSGetTransactionRecord},
 }
 
 func (r *Replica) executeDyTSCmd(
@@ -75,7 +73,7 @@ func (r *Replica) executeDyTSCmd(
 			Stats:   ms,
 		}
 		if log.V(2) {
-			log.Infof(ctx, "Ravi : executing cmd %v with cArgs %v ", cmd, cArgs)
+			log.Infof(ctx, "Ravi : executing cmd %v with cArgs %v ", args.Method(), cArgs)
 		}
 		pd, err = cmd.EvalDyTSCommand(ctx, batch, cArgs, reply)
 	} else {
@@ -123,6 +121,13 @@ func EvalDyTSGet(
 			log.Infof(ctx, "Write locks acqurired on EvalDyTSGet %v", each)
 		}
 	}
+
+	tnxRecord, _ := fetchTransactionrecord(ctx, batch, cArgs.Header, cArgs.Repl.store)
+
+	if log.V(2) {
+		log.Infof(ctx, "EvalDyTSGet : Recieved transaction record %v", tnxRecord)
+	}
+
 	return EvalResult{}, err
 }
 
@@ -250,7 +255,7 @@ func EvalDyTSDelete(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : EvalDyTSDelete: begin")
 	}
-	args := cArgs.Args.(*roachpb.InitPutRequest)
+	args := cArgs.Args.(*roachpb.DeleteRequest)
 	var req roachpb.RequestUnion
 	req.MustSetInner(args)
 	// places write lock and returns already placed read and write locks
@@ -278,7 +283,7 @@ func EvalDyTSDeleteRange(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : EvalDyTSDelete: begin")
 	}
-	args := cArgs.Args.(*roachpb.InitPutRequest)
+	args := cArgs.Args.(*roachpb.DeleteRangeRequest)
 	var req roachpb.RequestUnion
 	req.MustSetInner(args)
 
@@ -361,23 +366,14 @@ func EvalDyTSEndTransaction(
 	if log.V(2) {
 		log.Infof(ctx, "In EvalDyTSEndTransaction")
 	}
-	return EvalResult{}, nil
-}
 
-func EvalDyTSGetTransactionRecord(
-	ctx context.Context,
-	batch engine.ReadWriter,
-	cArgs CommandArgs,
-	resp roachpb.Response) (EvalResult, error) {
+	//r := cArgs.Repl
+	args := cArgs.Args.(*roachpb.EndTransactionRequest)
+	//h := cArgs.Header
+	//ms := cArgs.Stats
+	reply := resp.(*roachpb.EndTransactionResponse)
 
-	if log.V(2) {
-		log.Infof(ctx, "In EvalDyTSGetTransactionRecord")
-	}
-	//args := cArgs.Args.(*roachpb.ReverseScanRequest)
-	h := cArgs.Header
-	reply := resp.(*roachpb.GetTransactionRecordResponse)
-
-	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
+	key := keys.TransactionKey(cArgs.Header.Txn.Key, *cArgs.Header.Txn.ID)
 
 	var existingTxn roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
@@ -388,6 +384,30 @@ func EvalDyTSGetTransactionRecord(
 		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
 	}
 	reply.Txn = &existingTxn
+
+	switch reply.Txn.Status {
+	case roachpb.COMMITTED:
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :evalEndTransaction : case commited")
+		}
+		return EvalResult{}, roachpb.NewTransactionStatusError("already committed")
+
+	case roachpb.ABORTED:
+		if !args.Commit {
+
+		}
+	case roachpb.PENDING:
+		if args.Commit {
+			reply.Txn.Status = roachpb.COMMITTED
+		} else {
+			reply.Txn.Status = roachpb.ABORTED
+		}
+
+	default:
+		return EvalResult{}, roachpb.NewTransactionStatusError(
+			fmt.Sprintf("bad txn status: %s", reply.Txn),
+		)
+	}
 
 	return EvalResult{}, nil
 }
