@@ -1854,7 +1854,7 @@ func (r *Replica) addReadOnlyCmd(
 		pErr = r.checkIfTxnAborted(ctx, r.store.Engine(), *ba.Txn)
 	}
 	if intents := result.Local.detachIntents(); len(intents) > 0 {
-		if ba.HasOnlyGetOrScan() && roachpb.GetReadType() == roachpb.StronglyConsistentQuorumReadType {
+		if roachpb.GetReadType() == roachpb.StronglyConsistentQuorumReadType && ba.HasOnlyGetOrScan() {
 			if log.V(2) {
 				log.Info(ctx, "conflicting intents found, updating value with nil")
 			}

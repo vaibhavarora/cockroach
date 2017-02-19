@@ -403,7 +403,7 @@ func (ds *DistSender) sendRPC(
 	defer tracing.AnnotateTrace()
 
 	var customReplicas ReplicaSlice
-	if ba.HasOnlyGetOrScan() && ba.ReadConsistency != roachpb.CONSISTENT {
+	if roachpb.GetReadType() != roachpb.DefaultReadType && ba.HasOnlyGetOrScan() {
 		switch roachpb.GetReadType() {
 		case roachpb.LocalReadType:
 			// The first element will be local
@@ -424,7 +424,7 @@ func (ds *DistSender) sendRPC(
 		}
 		reply, err = ds.sendToAllReplicas(ctx, rpcOpts, rangeID, customReplicas, ba, ds.rpcContext)
 
-		if ba.HasOnlyGetOrScan() && roachpb.GetReadType() == roachpb.StronglyConsistentQuorumReadType {
+		if roachpb.GetReadType() == roachpb.StronglyConsistentQuorumReadType && ba.HasOnlyGetOrScan() {
 			if reply != nil && responseContainsNilValues(ba, reply) {
 				if log.V(2) {
 					log.Info(ctx, "Received BatchResponse with nil RawBytes. Should retry.")
