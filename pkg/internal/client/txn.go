@@ -27,15 +27,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/caller"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
-
-// Make ReadConsistency as INCONSISTENT by default for all read-only operations
-var enableInconsistentReads = envutil.EnvOrDefaultBool("COCKROACH_INCONSISTENT_READS", true)
 
 // Txn is an in-progress distributed database transaction. A Txn is not safe for
 // concurrent use by multiple goroutines.
@@ -311,16 +307,17 @@ func (txn *Txn) Run(b *Batch) error {
 	tracing.AnnotateTrace()
 	defer tracing.AnnotateTrace()
 
-	if err := b.prepare(); err != nil {
-		return err
-	}
-
-	if enableInconsistentReads && b.hasValidInconsistentMethods() {
+	// If the Batch has only read methods, then enforce INCONSISTENT reads for custom logic
+	if roachpb.GetReadType() != roachpb.DefaultReadType && b.hasOnlyGetOrScan() {
 		if log.V(2) {
-			log.Info(txn.Context, "modifying header to enforce INCONSISTENT reads")
+			log.Info(txn.Context, "modifying header to enforce INCONSISTENT read and skipping txn")
 		}
 		b.Header.ReadConsistency = roachpb.INCONSISTENT
 		return txn.db.Run(txn.Context, b)
+	}
+
+	if err := b.prepare(); err != nil {
+		return err
 	}
 	return sendAndFill(txn.send, b)
 }

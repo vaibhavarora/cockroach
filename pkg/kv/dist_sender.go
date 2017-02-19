@@ -402,14 +402,37 @@ func (ds *DistSender) sendRPC(
 	tracing.AnnotateTrace()
 	defer tracing.AnnotateTrace()
 
-	var reply *roachpb.BatchResponse
-	var err error
-	if ba.HasValidInconsistentMethods() && ba.ReadConsistency != roachpb.CONSISTENT {
-		quorumReplicas := createQuorumReplicas(ds, ctx, rangeID, replicas)
-		reply, err = ds.sendToAllReplicas(ctx, rpcOpts, rangeID, quorumReplicas, ba, ds.rpcContext)
+	var customReplicas ReplicaSlice
+	if ba.HasOnlyGetOrScan() && ba.ReadConsistency != roachpb.CONSISTENT {
+		switch roachpb.GetReadType() {
+		case roachpb.LocalReadType:
+			// The first element will be local
+			customReplicas = replicas[:1]
+
+		case roachpb.QuorumReadType:
+			fallthrough
+		case roachpb.StronglyConsistentQuorumReadType:
+			customReplicas = createQuorumReplicas(ds, ctx, rangeID, replicas)
+		}
 	}
 
-	if reply == nil && err == nil {
+	var reply *roachpb.BatchResponse
+	var err error
+	if customReplicas != nil {
+		if log.V(2) {
+			log.Infof(ctx, "sending to custom replicas: %+v\n", customReplicas)
+		}
+		reply, err = ds.sendToAllReplicas(ctx, rpcOpts, rangeID, customReplicas, ba, ds.rpcContext)
+
+		if ba.HasOnlyGetOrScan() && roachpb.GetReadType() == roachpb.StronglyConsistentQuorumReadType {
+			if reply != nil && responseContainsNilValues(ba, reply) {
+				if log.V(2) {
+					log.Info(ctx, "Received BatchResponse with nil RawBytes. Should retry.")
+				}
+				return nil, roachpb.SendError{Message: "detected conflicting writeIntent"}
+			}
+		}
+	} else {
 		reply, err = ds.sendToReplicas(ctx, rpcOpts, rangeID, replicas, ba, ds.rpcContext)
 	}
 
@@ -417,6 +440,37 @@ func (ds *DistSender) sendRPC(
 		return nil, err
 	}
 	return reply, nil
+}
+
+// checks if the BatchResponse contains nil RawBytes
+func responseContainsNilValues(ba roachpb.BatchRequest, br *roachpb.BatchResponse) bool {
+	for i := range ba.Requests {
+		request := ba.Requests[i].GetInner()
+		switch request.Method() {
+		case roachpb.Get:
+			getResponse := br.Responses[i].GetValue().(*roachpb.GetResponse)
+			if getResponse.Value.RawBytes == nil {
+				return true
+			}
+
+		case roachpb.Scan:
+			scanResponse := br.Responses[i].GetValue().(*roachpb.ScanResponse)
+			for _, row := range scanResponse.Rows {
+				if row.Value.RawBytes == nil {
+					return true
+				}
+			}
+
+		case roachpb.ReverseScan:
+			reverseScanResponse := br.Responses[i].GetValue().(*roachpb.ReverseScanResponse)
+			for _, row := range reverseScanResponse.Rows {
+				if row.Value.RawBytes == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func createQuorumReplicas(ds *DistSender, ctx context.Context, rangeID roachpb.RangeID,
@@ -547,15 +601,6 @@ func (ds *DistSender) sendSingleRange(
 				replicas.MoveToFront(i)
 			}
 		}
-	} else {
-		// This is an INCONSISTENT read. Restrict this to the local replica only.
-		// TODO(gitanuj): What if nodeDescriptor is nil?
-		// var nodeDesc = ds.getNodeDescriptor()
-		// if nodeDesc == nil {
-		// 	replicas = []ReplicaInfo{}
-		// } else if len(replicas) > 0 {
-		// 	replicas = []ReplicaInfo{replicas[0]}
-		// }
 	}
 
 	// TODO(tschottdorf): should serialize the trace here, not higher up.
@@ -1175,14 +1220,17 @@ func fillSkippedResponses(ba roachpb.BatchRequest, br *roachpb.BatchResponse, ne
 	}
 }
 
-func selectLatestValues(request roachpb.BatchRequest, reply1 *roachpb.BatchResponse,
+// returns the reply with latest timestamp, always takes BatchResponse_Header from reply2
+func selectLatestValues(ctx context.Context, request roachpb.BatchRequest, reply1 *roachpb.BatchResponse,
 	reply2 *roachpb.BatchResponse) *roachpb.BatchResponse {
 	if reply1 == nil {
 		return reply2
 	}
 
-	if reply1 != nil && reply2 != nil {
+	if reply2 != nil {
 		if len(request.Requests) != len(reply1.Responses) || len(request.Requests) != len(reply2.Responses) {
+			// Ideally this should never happen
+			log.Error(ctx, "the length of Requests and Responses is different")
 			return nil
 		}
 
@@ -1197,7 +1245,8 @@ func selectLatestValues(request roachpb.BatchRequest, reply1 *roachpb.BatchRespo
 				getResponse2 := reply2.Responses[i].GetValue().(*roachpb.GetResponse)
 				toAppend := reply2.Responses[i]
 
-				if getResponse2.Value.Timestamp.Less(getResponse1.Value.Timestamp) {
+				if getResponse2.Value.Timestamp.Less(getResponse1.Value.Timestamp) ||
+					(getResponse2.Value.Timestamp.Equal(getResponse1.Value.Timestamp) && getResponse2.Value.RawBytes == nil) {
 					toAppend = reply1.Responses[i]
 				}
 				response.Responses = append(response.Responses, toAppend)
@@ -1210,13 +1259,16 @@ func selectLatestValues(request roachpb.BatchRequest, reply1 *roachpb.BatchRespo
 				}
 
 				if len(scanResponse1.Rows) != len(scanResponse2.Rows) {
+					// Ideally this should never happen
+					log.Error(ctx, "the length of Rows is different for scanResponses")
 					return nil
 				}
 
 				for j, row1 := range scanResponse1.Rows {
 					row2 := scanResponse2.Rows[j]
 					toAppend := row2
-					if row2.Value.Timestamp.Less(row1.Value.Timestamp) {
+					if row2.Value.Timestamp.Less(row1.Value.Timestamp) ||
+						(row2.Value.Timestamp.Equal(row1.Value.Timestamp) && row2.Value.RawBytes == nil) {
 						toAppend = row1
 					}
 					scanResponse.Rows = append(scanResponse.Rows, toAppend)
@@ -1234,13 +1286,16 @@ func selectLatestValues(request roachpb.BatchRequest, reply1 *roachpb.BatchRespo
 				}
 
 				if len(reverseScanResponse1.Rows) != len(reverseScanResponse2.Rows) {
+					// Ideally this should never happen
+					log.Error(ctx, "the length of Rows is different for reverseScanResponses")
 					return nil
 				}
 
 				for j, row1 := range reverseScanResponse1.Rows {
 					row2 := reverseScanResponse2.Rows[j]
 					toAppend := row2
-					if row2.Value.Timestamp.Less(row1.Value.Timestamp) {
+					if row2.Value.Timestamp.Less(row1.Value.Timestamp) ||
+						(row2.Value.Timestamp.Equal(row1.Value.Timestamp) && row2.Value.RawBytes == nil) {
 						toAppend = row1
 					}
 					reverseScanResponse.Rows = append(reverseScanResponse.Rows, toAppend)
@@ -1311,9 +1366,8 @@ func (ds *DistSender) sendToAllReplicas(
 				}
 
 				if call.Reply.Error == nil {
-					latestResponse = selectLatestValues(args, latestResponse, call.Reply)
+					latestResponse = selectLatestValues(ctx, args, latestResponse, call.Reply)
 				} else {
-					ds.handlePerReplicaError(ctx, transport, rangeID, call.Reply.Error)
 					log.ErrEventf(ctx, "application error: %s", call.Reply.Error)
 					err = call.Reply.Error.GoError()
 					return nil, err

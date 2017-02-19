@@ -601,7 +601,7 @@ func (b *Batch) adminTransferLease(key interface{}, target roachpb.StoreID) {
 	b.initResult(1, 0, notRaw, nil)
 }
 
-func (b *Batch) hasValidInconsistentMethods() bool {
+func (b *Batch) hasOnlyGetOrScan() bool {
 	for _, ru := range b.reqs {
 		req := ru.GetInner()
 		if req.Method() != roachpb.Get && req.Method() != roachpb.Scan &&

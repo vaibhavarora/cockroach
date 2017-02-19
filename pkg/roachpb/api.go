@@ -20,8 +20,26 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/gogo/protobuf/proto"
+)
+
+func GetReadType() int {
+	return envutil.EnvOrDefaultInt("COCKROACH_READ_TYPE", DefaultReadType)
+}
+
+const (
+	// DefaultReadType is the default read behavior
+	DefaultReadType = 0
+	// LocalReadType forces reads from local replica
+	LocalReadType = 1
+	// QuorumReadType uses a quorum of replicas to read and returns the value
+	// with latest timestamp
+	QuorumReadType = 2
+	// StronglyConsistentQuorumReadType is like QuorumReadType but fails if
+	// there are any conflicting intents
+	StronglyConsistentQuorumReadType = 3
 )
 
 // UserPriority is a custom type for transaction's user priority.

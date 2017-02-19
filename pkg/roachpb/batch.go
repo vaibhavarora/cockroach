@@ -112,7 +112,7 @@ func (ba *BatchRequest) IsReadOnly() bool {
 	return len(ba.Requests) > 0 && !ba.hasFlag(isWrite|isAdmin)
 }
 
-func (ba *BatchRequest) HasValidInconsistentMethods() bool {
+func (ba *BatchRequest) HasOnlyGetOrScan() bool {
 	for _, ru := range ba.Requests {
 		req := ru.GetInner()
 		if req.Method() != Get && req.Method() != Scan &&
