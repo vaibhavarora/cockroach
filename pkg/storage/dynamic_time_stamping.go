@@ -474,6 +474,8 @@ func EvalDyTSEndTransaction(
 		}
 		return EvalResult{}, roachpb.NewTransactionStatusError("already Aborted")
 	case roachpb.PENDING:
+		// remove all the soft locks of the transaction locally
+		//
 		if args.Commit {
 			reply.Txn.Status = roachpb.COMMITTED
 		} else {
@@ -485,6 +487,6 @@ func EvalDyTSEndTransaction(
 			fmt.Sprintf("bad txn status: %s", reply.Txn),
 		)
 	}
-	return EvalResult{}, engine.MVCCPutProto(ctx, batch, ms, key, hlc.ZeroTimestamp, nil /* txn */, txn)
-
+	//	return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, reply.Txn)
+	return EvalResult{}, nil
 }
