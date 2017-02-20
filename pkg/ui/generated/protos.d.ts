@@ -1654,6 +1654,24 @@ getDynamicTimestampUpperBound?() : util.hlc.Timestamp;
 
 
 
+commit_before_them?: storage.engine.enginepb.TxnMeta[];
+		
+
+getCommitBeforeThem?() : storage.engine.enginepb.TxnMeta[];
+		setCommitBeforeThem?(commitBeforeThem : storage.engine.enginepb.TxnMeta[]): void;
+		
+
+
+
+commit_after_them?: storage.engine.enginepb.TxnMeta[];
+		
+
+getCommitAfterThem?() : storage.engine.enginepb.TxnMeta[];
+		setCommitAfterThem?(commitAfterThem : storage.engine.enginepb.TxnMeta[]): void;
+		
+
+
+
 }
 
 	export interface TransactionMessage extends Transaction {

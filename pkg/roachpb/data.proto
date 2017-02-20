@@ -287,6 +287,10 @@ message Transaction {
   optional util.hlc.Timestamp dynamic_timestamp_lower_bound = 14 [(gogoproto.nullable) = false];
   // Upper bound in time for the transaction to commit
   optional util.hlc.Timestamp dynamic_timestamp_upper_bound = 15 [(gogoproto.nullable) = false];
+  // Tnxs before which the transaction has to commit
+  repeated storage.engine.enginepb.TxnMeta commit_before_them = 16 [(gogoproto.nullable) = false];
+  // Tnxs after which the transaction has to commit
+  repeated storage.engine.enginepb.TxnMeta commit_after_them = 17 [(gogoproto.nullable) = false];
 }
 
 // A Intent is a Span together with a Transaction metadata and its status.

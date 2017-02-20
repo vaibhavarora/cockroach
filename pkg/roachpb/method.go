@@ -125,4 +125,6 @@ const (
 	ChangeFrozen
 	// Gets the Transaction record of the given Transaction
 	GetTxnRecord
+	// Updates the Transaction record
+	UpdateTxnRecord
 )

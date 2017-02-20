@@ -1335,6 +1335,30 @@ class Transaction : public ::google::protobuf::MessageLite /* @@protoc_insertion
   ::cockroach::util::hlc::Timestamp* release_dynamic_timestamp_upper_bound();
   void set_allocated_dynamic_timestamp_upper_bound(::cockroach::util::hlc::Timestamp* dynamic_timestamp_upper_bound);
 
+  // repeated .cockroach.storage.engine.enginepb.TxnMeta commit_before_them = 16;
+  int commit_before_them_size() const;
+  void clear_commit_before_them();
+  static const int kCommitBeforeThemFieldNumber = 16;
+  const ::cockroach::storage::engine::enginepb::TxnMeta& commit_before_them(int index) const;
+  ::cockroach::storage::engine::enginepb::TxnMeta* mutable_commit_before_them(int index);
+  ::cockroach::storage::engine::enginepb::TxnMeta* add_commit_before_them();
+  ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >*
+      mutable_commit_before_them();
+  const ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >&
+      commit_before_them() const;
+
+  // repeated .cockroach.storage.engine.enginepb.TxnMeta commit_after_them = 17;
+  int commit_after_them_size() const;
+  void clear_commit_after_them();
+  static const int kCommitAfterThemFieldNumber = 17;
+  const ::cockroach::storage::engine::enginepb::TxnMeta& commit_after_them(int index) const;
+  ::cockroach::storage::engine::enginepb::TxnMeta* mutable_commit_after_them(int index);
+  ::cockroach::storage::engine::enginepb::TxnMeta* add_commit_after_them();
+  ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >*
+      mutable_commit_after_them();
+  const ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >&
+      commit_after_them() const;
+
   // @@protoc_insertion_point(class_scope:cockroach.roachpb.Transaction)
  private:
   inline void set_has_meta();
@@ -1377,6 +1401,8 @@ class Transaction : public ::google::protobuf::MessageLite /* @@protoc_insertion
       ::google::protobuf::internal::WireFormatLite::TYPE_MESSAGE,
       0 > observed_timestamps_;
   ::google::protobuf::RepeatedPtrField< ::cockroach::roachpb::Span > intents_;
+  ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta > commit_before_them_;
+  ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta > commit_after_them_;
   ::google::protobuf::internal::ArenaStringPtr name_;
   ::cockroach::storage::engine::enginepb::TxnMeta* meta_;
   ::cockroach::util::hlc::Timestamp* last_heartbeat_;
@@ -3295,6 +3321,66 @@ inline void Transaction::set_allocated_dynamic_timestamp_upper_bound(::cockroach
     clear_has_dynamic_timestamp_upper_bound();
   }
   // @@protoc_insertion_point(field_set_allocated:cockroach.roachpb.Transaction.dynamic_timestamp_upper_bound)
+}
+
+// repeated .cockroach.storage.engine.enginepb.TxnMeta commit_before_them = 16;
+inline int Transaction::commit_before_them_size() const {
+  return commit_before_them_.size();
+}
+inline void Transaction::clear_commit_before_them() {
+  commit_before_them_.Clear();
+}
+inline const ::cockroach::storage::engine::enginepb::TxnMeta& Transaction::commit_before_them(int index) const {
+  // @@protoc_insertion_point(field_get:cockroach.roachpb.Transaction.commit_before_them)
+  return commit_before_them_.Get(index);
+}
+inline ::cockroach::storage::engine::enginepb::TxnMeta* Transaction::mutable_commit_before_them(int index) {
+  // @@protoc_insertion_point(field_mutable:cockroach.roachpb.Transaction.commit_before_them)
+  return commit_before_them_.Mutable(index);
+}
+inline ::cockroach::storage::engine::enginepb::TxnMeta* Transaction::add_commit_before_them() {
+  // @@protoc_insertion_point(field_add:cockroach.roachpb.Transaction.commit_before_them)
+  return commit_before_them_.Add();
+}
+inline ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >*
+Transaction::mutable_commit_before_them() {
+  // @@protoc_insertion_point(field_mutable_list:cockroach.roachpb.Transaction.commit_before_them)
+  return &commit_before_them_;
+}
+inline const ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >&
+Transaction::commit_before_them() const {
+  // @@protoc_insertion_point(field_list:cockroach.roachpb.Transaction.commit_before_them)
+  return commit_before_them_;
+}
+
+// repeated .cockroach.storage.engine.enginepb.TxnMeta commit_after_them = 17;
+inline int Transaction::commit_after_them_size() const {
+  return commit_after_them_.size();
+}
+inline void Transaction::clear_commit_after_them() {
+  commit_after_them_.Clear();
+}
+inline const ::cockroach::storage::engine::enginepb::TxnMeta& Transaction::commit_after_them(int index) const {
+  // @@protoc_insertion_point(field_get:cockroach.roachpb.Transaction.commit_after_them)
+  return commit_after_them_.Get(index);
+}
+inline ::cockroach::storage::engine::enginepb::TxnMeta* Transaction::mutable_commit_after_them(int index) {
+  // @@protoc_insertion_point(field_mutable:cockroach.roachpb.Transaction.commit_after_them)
+  return commit_after_them_.Mutable(index);
+}
+inline ::cockroach::storage::engine::enginepb::TxnMeta* Transaction::add_commit_after_them() {
+  // @@protoc_insertion_point(field_add:cockroach.roachpb.Transaction.commit_after_them)
+  return commit_after_them_.Add();
+}
+inline ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >*
+Transaction::mutable_commit_after_them() {
+  // @@protoc_insertion_point(field_mutable_list:cockroach.roachpb.Transaction.commit_after_them)
+  return &commit_after_them_;
+}
+inline const ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >&
+Transaction::commit_after_them() const {
+  // @@protoc_insertion_point(field_list:cockroach.roachpb.Transaction.commit_after_them)
+  return commit_after_them_;
 }
 
 inline const Transaction* Transaction::internal_default_instance() {

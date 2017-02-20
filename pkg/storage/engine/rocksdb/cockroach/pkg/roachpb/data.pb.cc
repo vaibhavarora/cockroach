@@ -3748,6 +3748,8 @@ const int Transaction::kRetryOnPushFieldNumber;
 const int Transaction::kIntentsFieldNumber;
 const int Transaction::kDynamicTimestampLowerBoundFieldNumber;
 const int Transaction::kDynamicTimestampUpperBoundFieldNumber;
+const int Transaction::kCommitBeforeThemFieldNumber;
+const int Transaction::kCommitAfterThemFieldNumber;
 #endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 
 Transaction::Transaction()
@@ -3885,6 +3887,8 @@ void Transaction::Clear() {
 
   observed_timestamps_.Clear();
   intents_.Clear();
+  commit_before_them_.Clear();
+  commit_after_them_.Clear();
   _has_bits_.Clear();
   _unknown_fields_.ClearToEmptyNoArena(
       &::google::protobuf::internal::GetEmptyStringAlreadyInited());
@@ -3901,7 +3905,7 @@ bool Transaction::MergePartialFromCodedStream(
       &unknown_fields_string, false);
   // @@protoc_insertion_point(parse_start:cockroach.roachpb.Transaction)
   for (;;) {
-    ::std::pair< ::google::protobuf::uint32, bool> p = input->ReadTagWithCutoff(127);
+    ::std::pair< ::google::protobuf::uint32, bool> p = input->ReadTagWithCutoff(16383);
     tag = p.first;
     if (!p.second) goto handle_unusual;
     switch (::google::protobuf::internal::WireFormatLite::GetTagFieldNumber(tag)) {
@@ -4097,6 +4101,39 @@ bool Transaction::MergePartialFromCodedStream(
         } else {
           goto handle_unusual;
         }
+        if (input->ExpectTag(130)) goto parse_commit_before_them;
+        break;
+      }
+
+      // repeated .cockroach.storage.engine.enginepb.TxnMeta commit_before_them = 16;
+      case 16: {
+        if (tag == 130) {
+         parse_commit_before_them:
+          DO_(input->IncrementRecursionDepth());
+         parse_loop_commit_before_them:
+          DO_(::google::protobuf::internal::WireFormatLite::ReadMessageNoVirtualNoRecursionDepth(
+                input, add_commit_before_them()));
+        } else {
+          goto handle_unusual;
+        }
+        if (input->ExpectTag(130)) goto parse_loop_commit_before_them;
+        if (input->ExpectTag(138)) goto parse_loop_commit_after_them;
+        input->UnsafeDecrementRecursionDepth();
+        break;
+      }
+
+      // repeated .cockroach.storage.engine.enginepb.TxnMeta commit_after_them = 17;
+      case 17: {
+        if (tag == 138) {
+          DO_(input->IncrementRecursionDepth());
+         parse_loop_commit_after_them:
+          DO_(::google::protobuf::internal::WireFormatLite::ReadMessageNoVirtualNoRecursionDepth(
+                input, add_commit_after_them()));
+        } else {
+          goto handle_unusual;
+        }
+        if (input->ExpectTag(138)) goto parse_loop_commit_after_them;
+        input->UnsafeDecrementRecursionDepth();
         if (input->ExpectAtEnd()) goto success;
         break;
       }
@@ -4234,6 +4271,18 @@ void Transaction::SerializeWithCachedSizes(
       15, *this->dynamic_timestamp_upper_bound_, output);
   }
 
+  // repeated .cockroach.storage.engine.enginepb.TxnMeta commit_before_them = 16;
+  for (unsigned int i = 0, n = this->commit_before_them_size(); i < n; i++) {
+    ::google::protobuf::internal::WireFormatLite::WriteMessage(
+      16, this->commit_before_them(i), output);
+  }
+
+  // repeated .cockroach.storage.engine.enginepb.TxnMeta commit_after_them = 17;
+  for (unsigned int i = 0, n = this->commit_after_them_size(); i < n; i++) {
+    ::google::protobuf::internal::WireFormatLite::WriteMessage(
+      17, this->commit_after_them(i), output);
+  }
+
   output->WriteRaw(unknown_fields().data(),
                    static_cast<int>(unknown_fields().size()));
   // @@protoc_insertion_point(serialize_end:cockroach.roachpb.Transaction)
@@ -4342,6 +4391,28 @@ size_t Transaction::ByteSizeLong() const {
     }
   }
 
+  // repeated .cockroach.storage.engine.enginepb.TxnMeta commit_before_them = 16;
+  {
+    unsigned int count = this->commit_before_them_size();
+    total_size += 2UL * count;
+    for (unsigned int i = 0; i < count; i++) {
+      total_size +=
+        ::google::protobuf::internal::WireFormatLite::MessageSizeNoVirtual(
+          this->commit_before_them(i));
+    }
+  }
+
+  // repeated .cockroach.storage.engine.enginepb.TxnMeta commit_after_them = 17;
+  {
+    unsigned int count = this->commit_after_them_size();
+    total_size += 2UL * count;
+    for (unsigned int i = 0; i < count; i++) {
+      total_size +=
+        ::google::protobuf::internal::WireFormatLite::MessageSizeNoVirtual(
+          this->commit_after_them(i));
+    }
+  }
+
   total_size += unknown_fields().size();
 
   int cached_size = ::google::protobuf::internal::ToCachedSize(total_size);
@@ -4369,6 +4440,8 @@ void Transaction::UnsafeMergeFrom(const Transaction& from) {
   GOOGLE_DCHECK(&from != this);
   observed_timestamps_.MergeFrom(from.observed_timestamps_);
   intents_.MergeFrom(from.intents_);
+  commit_before_them_.MergeFrom(from.commit_before_them_);
+  commit_after_them_.MergeFrom(from.commit_after_them_);
   if (from._has_bits_[0 / 32] & (0xffu << (0 % 32))) {
     if (from.has_meta()) {
       mutable_meta()->::cockroach::storage::engine::enginepb::TxnMeta::MergeFrom(from.meta());
@@ -4442,6 +4515,8 @@ void Transaction::InternalSwap(Transaction* other) {
   intents_.UnsafeArenaSwap(&other->intents_);
   std::swap(dynamic_timestamp_lower_bound_, other->dynamic_timestamp_lower_bound_);
   std::swap(dynamic_timestamp_upper_bound_, other->dynamic_timestamp_upper_bound_);
+  commit_before_them_.UnsafeArenaSwap(&other->commit_before_them_);
+  commit_after_them_.UnsafeArenaSwap(&other->commit_after_them_);
   std::swap(_has_bits_[0], other->_has_bits_[0]);
   _unknown_fields_.Swap(&other->_unknown_fields_);
   std::swap(_cached_size_, other->_cached_size_);
@@ -4921,6 +4996,66 @@ void Transaction::set_allocated_dynamic_timestamp_upper_bound(::cockroach::util:
     clear_has_dynamic_timestamp_upper_bound();
   }
   // @@protoc_insertion_point(field_set_allocated:cockroach.roachpb.Transaction.dynamic_timestamp_upper_bound)
+}
+
+// repeated .cockroach.storage.engine.enginepb.TxnMeta commit_before_them = 16;
+int Transaction::commit_before_them_size() const {
+  return commit_before_them_.size();
+}
+void Transaction::clear_commit_before_them() {
+  commit_before_them_.Clear();
+}
+const ::cockroach::storage::engine::enginepb::TxnMeta& Transaction::commit_before_them(int index) const {
+  // @@protoc_insertion_point(field_get:cockroach.roachpb.Transaction.commit_before_them)
+  return commit_before_them_.Get(index);
+}
+::cockroach::storage::engine::enginepb::TxnMeta* Transaction::mutable_commit_before_them(int index) {
+  // @@protoc_insertion_point(field_mutable:cockroach.roachpb.Transaction.commit_before_them)
+  return commit_before_them_.Mutable(index);
+}
+::cockroach::storage::engine::enginepb::TxnMeta* Transaction::add_commit_before_them() {
+  // @@protoc_insertion_point(field_add:cockroach.roachpb.Transaction.commit_before_them)
+  return commit_before_them_.Add();
+}
+::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >*
+Transaction::mutable_commit_before_them() {
+  // @@protoc_insertion_point(field_mutable_list:cockroach.roachpb.Transaction.commit_before_them)
+  return &commit_before_them_;
+}
+const ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >&
+Transaction::commit_before_them() const {
+  // @@protoc_insertion_point(field_list:cockroach.roachpb.Transaction.commit_before_them)
+  return commit_before_them_;
+}
+
+// repeated .cockroach.storage.engine.enginepb.TxnMeta commit_after_them = 17;
+int Transaction::commit_after_them_size() const {
+  return commit_after_them_.size();
+}
+void Transaction::clear_commit_after_them() {
+  commit_after_them_.Clear();
+}
+const ::cockroach::storage::engine::enginepb::TxnMeta& Transaction::commit_after_them(int index) const {
+  // @@protoc_insertion_point(field_get:cockroach.roachpb.Transaction.commit_after_them)
+  return commit_after_them_.Get(index);
+}
+::cockroach::storage::engine::enginepb::TxnMeta* Transaction::mutable_commit_after_them(int index) {
+  // @@protoc_insertion_point(field_mutable:cockroach.roachpb.Transaction.commit_after_them)
+  return commit_after_them_.Mutable(index);
+}
+::cockroach::storage::engine::enginepb::TxnMeta* Transaction::add_commit_after_them() {
+  // @@protoc_insertion_point(field_add:cockroach.roachpb.Transaction.commit_after_them)
+  return commit_after_them_.Add();
+}
+::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >*
+Transaction::mutable_commit_after_them() {
+  // @@protoc_insertion_point(field_mutable_list:cockroach.roachpb.Transaction.commit_after_them)
+  return &commit_after_them_;
+}
+const ::google::protobuf::RepeatedPtrField< ::cockroach::storage::engine::enginepb::TxnMeta >&
+Transaction::commit_after_them() const {
+  // @@protoc_insertion_point(field_list:cockroach.roachpb.Transaction.commit_after_them)
+  return commit_after_them_;
 }
 
 inline const Transaction* Transaction::internal_default_instance() {

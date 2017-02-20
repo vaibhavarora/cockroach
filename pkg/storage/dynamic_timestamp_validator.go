@@ -19,7 +19,8 @@ type DyTSValidatorCommand struct {
 }
 
 var DyTSValidatorCommands = map[roachpb.Method]DyTSValidatorCommand{
-	roachpb.GetTxnRecord: {EvalDyTSValidatorCommand: EvalDyTSGetTransactionRecord},
+	roachpb.GetTxnRecord:    {EvalDyTSValidatorCommand: EvalDyTSGetTransactionRecord},
+	roachpb.UpdateTxnRecord: {EvalDyTSValidatorCommand: EvalDyTSUpdateTransactionRecord},
 }
 
 func (r *Replica) executeDyTSValidatorCmd(
@@ -98,11 +99,10 @@ func EvalDyTSGetTransactionRecord(
 	if log.V(2) {
 		log.Infof(ctx, "In EvalDyTSGetTransactionRecord")
 	}
-	//args := cArgs.Args.(*roachpb.ReverseScanRequest)
-	h := cArgs.Header
+
 	reply := resp.(*roachpb.GetTransactionRecordResponse)
 
-	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
+	key := keys.TransactionKey(cArgs.Header.Txn.Key, *cArgs.Header.Txn.ID)
 
 	var existingTxn roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
@@ -117,13 +117,48 @@ func EvalDyTSGetTransactionRecord(
 	return EvalResult{}, nil
 }
 
+func EvalDyTSUpdateTransactionRecord(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSUpdateTransactionRecord")
+	}
+	args := cArgs.Args.(*roachpb.UpdateTransactionRecordRequest)
+	key := keys.TransactionKey(cArgs.Header.Txn.Key, *cArgs.Header.Txn.ID)
+	txnrecord := args.TxnRecord
+
+	var txnRecord roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
+	); err != nil {
+		return EvalResult{}, err
+	} else if !ok {
+		if log.V(2) {
+			log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : coudnt find transaction record in this range")
+		}
+		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
+	} else if ok {
+		if log.V(2) {
+			log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : found transaction record in this range")
+		}
+		return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnrecord)
+	}
+
+	return EvalResult{}, nil
+}
+
 func fetchTransactionrecord(
 	ctx context.Context,
 	batch engine.ReadWriter,
-	h roachpb.Header,
-	store *Store) (roachpb.Transaction, error) {
+	cArgs CommandArgs) (roachpb.Transaction, error) {
 
-	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : fetchTransactionrecord")
+	}
+	key := keys.TransactionKey(cArgs.Header.Txn.Key, *cArgs.Header.Txn.ID)
 
 	var txnRecord roachpb.Transaction
 
@@ -137,16 +172,16 @@ func fetchTransactionrecord(
 		}
 		getTnxReq := &roachpb.GetTransactionRecordRequest{
 			Span: roachpb.Span{
-				Key: h.Txn.Key,
+				Key: cArgs.Header.Txn.Key,
 			},
 		}
 
 		b := &client.Batch{}
-		b.Header = h
+		b.Header = cArgs.Header
 		b.Header.Timestamp = hlc.ZeroTimestamp
 		b.AddRawRequest(getTnxReq)
 
-		if err := store.db.Run(ctx, b); err != nil {
+		if err := cArgs.Repl.store.db.Run(ctx, b); err != nil {
 			_ = b.MustPErr()
 		}
 
@@ -155,14 +190,126 @@ func fetchTransactionrecord(
 		for _, res := range br.Responses {
 			r := res.GetInner().(*roachpb.GetTransactionRecordResponse)
 			if log.V(2) {
-				log.Infof(ctx, "recieved tnx record : %v", r.TxnRecord)
+				log.Infof(ctx, "fetchTransactionrecord : recieved tnx record : %v", r.TxnRecord)
 			}
 		}
 		txnRecord = r.TxnRecord
 	} else if ok {
 		if log.V(2) {
-			log.Infof(ctx, "fetchTransactionrecord : found transaction record in same range")
+			log.Infof(ctx, "fetchTransactionrecord : found transaction record in same range %v ", txnRecord)
 		}
 	}
 	return txnRecord, nil
+}
+
+func updateTransactionrecord(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	tnx roachpb.Transaction) error {
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : updateTransactionrecord")
+	}
+	key := keys.TransactionKey(cArgs.Header.Txn.Key, *cArgs.Header.Txn.ID)
+	var txnRecord roachpb.Transaction
+
+	txnRecord = tnx.Clone()
+
+	var txnRecordtmp roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecordtmp,
+	); err != nil {
+		return err
+	} else if !ok {
+		if log.V(2) {
+			log.Infof(ctx, "updateTransactionrecord : Couldnt find transaction record in same range, going for RPC")
+		}
+		updateTnxReq := &roachpb.UpdateTransactionRecordRequest{
+			Span: roachpb.Span{
+				Key: cArgs.Header.Txn.Key,
+			},
+			TxnRecord: txnRecord,
+		}
+
+		b := &client.Batch{}
+		b.Header = cArgs.Header
+		b.Header.Timestamp = hlc.ZeroTimestamp
+		b.AddRawRequest(updateTnxReq)
+
+		if err := cArgs.Repl.store.db.Run(ctx, b); err != nil {
+			_ = b.MustPErr()
+		}
+
+		br := b.RawResponse()
+		for _, res := range br.Responses {
+			r := res.GetInner().(*roachpb.UpdateTransactionRecordResponse)
+			if log.V(2) {
+				log.Infof(ctx, "updateTransactionrecord recieved response : %v", r)
+			}
+		}
+	} else if ok {
+		if log.V(2) {
+			log.Infof(ctx, "updateTransactionrecord : found transaction record in same range %v ", txnRecord)
+		}
+		return engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+	}
+
+	return nil
+}
+
+func pushSoftLocksOnReadToTnxRecord(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	wslocks []roachpb.WriteSoftLock) error {
+
+	// get Transaction record
+	if txnrecord, err := fetchTransactionrecord(ctx, batch, cArgs); err != nil {
+		panic("failed to get transaction")
+	} else {
+		// Modify its Lower bound based on last committed write time stamp
+
+		// Place txns of all the write locks
+		for _, lock := range wslocks {
+			txnrecord.CommitBeforeThem = append(txnrecord.CommitBeforeThem, lock.TransactionMeta)
+		}
+
+		// Update transaction
+		if err := updateTransactionrecord(ctx, batch, cArgs, txnrecord); err != nil {
+			panic("failed to update transaction")
+		}
+	}
+
+	return nil
+}
+
+func pushSoftLocksOnWriteToTnxRecord(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	rslocks []roachpb.ReadSoftLock,
+	wslocks []roachpb.WriteSoftLock) error {
+
+	// get Transaction record
+	if txnrecord, err := fetchTransactionrecord(ctx, batch, cArgs); err != nil {
+		panic("failed to get transaction")
+	} else {
+		// Modify its Lower bound based on last committed raed time stamp
+
+		// Place txns of all the write locks
+		for _, lock := range wslocks {
+			txnrecord.CommitAfterThem = append(txnrecord.CommitAfterThem, lock.TransactionMeta)
+		}
+		// Place txns of all the read locks
+		for _, lock := range rslocks {
+			txnrecord.CommitAfterThem = append(txnrecord.CommitAfterThem, lock.TransactionMeta)
+		}
+		// Update transaction
+		if err := updateTransactionrecord(ctx, batch, cArgs, txnrecord); err != nil {
+			panic("failed to update transaction")
+		}
+	}
+
+	return nil
 }

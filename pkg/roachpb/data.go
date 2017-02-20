@@ -683,6 +683,8 @@ func NewTransaction(
 		MaxTimestamp:               now.Add(maxOffset, 0),
 		DynamicTimestampLowerBound: hlc.ZeroTimestamp,
 		DynamicTimestampUpperBound: hlc.MaxTimestamp,
+		CommitBeforeThem:           make([]enginepb.TxnMeta, 0),
+		CommitAfterThem:            make([]enginepb.TxnMeta, 0),
 	}
 }
 

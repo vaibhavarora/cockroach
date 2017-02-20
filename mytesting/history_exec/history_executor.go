@@ -14,7 +14,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-var history = flag.String("history", "b2 r2(y) r2(y) c2", "history to execute.")
+var history = flag.String("history", "b1 b2 w2(x) r1(x) c2 c1", "history to execute.")
 
 func read(key int, tx *sql.Tx) int {
 
@@ -68,7 +68,7 @@ func execute_history(history string, db *sql.DB) {
 	var tx1 *sql.Tx
 	var tx2 *sql.Tx
 	x := 1
-	y := 2
+	y := 800
 
 	for _, element := range h {
 
@@ -82,6 +82,18 @@ func execute_history(history string, db *sql.DB) {
 		case element == "r1(x)":
 			fmt.Println("tnx1 reading x")
 			_ = read(x, tx1)
+		case element == "r1(y)":
+			fmt.Println("tnx1 reading y")
+			_ = read(y, tx1)
+		case element == "r2(x)":
+			fmt.Println("tnx2 reading x")
+			_ = read(x, tx2)
+		case element == "w1(x)":
+			fmt.Println("tnx1 writing x")
+			write(x, 102, tx1)
+		case element == "w1(y)":
+			fmt.Println("tnx1 writing y")
+			write(y, 102, tx1)
 		case element == "w2(x)":
 			fmt.Println("tnx2 writing x")
 			write(x, 102, tx2)

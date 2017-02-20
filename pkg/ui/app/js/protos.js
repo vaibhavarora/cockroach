@@ -952,6 +952,24 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                                     "options": {
                                         "(gogoproto.nullable)": false
                                     }
+                                },
+                                {
+                                    "rule": "repeated",
+                                    "type": "storage.engine.enginepb.TxnMeta",
+                                    "name": "commit_before_them",
+                                    "id": 16,
+                                    "options": {
+                                        "(gogoproto.nullable)": false
+                                    }
+                                },
+                                {
+                                    "rule": "repeated",
+                                    "type": "storage.engine.enginepb.TxnMeta",
+                                    "name": "commit_after_them",
+                                    "id": 17,
+                                    "options": {
+                                        "(gogoproto.nullable)": false
+                                    }
                                 }
                             ]
                         },

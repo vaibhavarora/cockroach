@@ -40,7 +40,7 @@ const systemAccountID = 0
 const initialBalance = 1000
 
 var maxTransfer = flag.Int("max-transfer", 100, "Maximum amount to transfer in one transaction.")
-var numTransfers = flag.Int("num-transfers", 10000, "Number of transfers (0 to continue indefinitely).")
+var numTransfers = flag.Int("num-transfers", 5000, "Number of transfers (0 to continue indefinitely).")
 var numAccounts = flag.Int("num-accounts", 10000, "Number of accounts.")
 var concurrency = flag.Int("concurrency", 16, "Number of concurrent actors moving money.")
 var contention = flag.String("contention", "low", "Contention model {low | high}.")

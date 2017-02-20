@@ -234,7 +234,7 @@ message ReverseScanResponse {
 }
 
 //A GetTransactionRecordRequest request to get the Transaction record taged to the key specified in span
-message GetTransactionRecordRequest{
+message GetTransactionRecordRequest {
   optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
   
 }
@@ -245,6 +245,16 @@ message GetTransactionRecordResponse {
   optional Transaction txn_record = 2 [(gogoproto.nullable) = false];
 }
 
+// A UpdateTranasactionRequest updates the Transaction record 
+message UpdateTransactionRecordRequest {
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional Transaction txn_record = 2 [(gogoproto.nullable) = false];
+}
+
+// Response for UpdateTranasactionRequest
+message UpdateTransactionRecordResponse {
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
 
 // A CheckConsistencyRequest is the argument to the CheckConsistency() method.
 // It specifies the start and end keys for a span of ranges to which a
@@ -757,6 +767,7 @@ message RequestUnion {
   optional TransferLeaseRequest transfer_lease = 28;
   optional LeaseInfoRequest lease_info = 30;
   optional GetTransactionRecordRequest get_txn_record = 31;
+  optional UpdateTransactionRecordRequest update_txn_record = 32;
 }
 
 // A ResponseUnion contains exactly one of the optional responses.
@@ -800,6 +811,7 @@ message ResponseUnion {
   reserved 28; // TransferLease and RequestLease both use RequestLeaseResponse
   optional LeaseInfoResponse lease_info = 30;
   optional GetTransactionRecordResponse get_txn_record = 31;
+  optional UpdateTransactionRecordResponse update_txn_record = 32;
 }
 
 // A Header is attached to a BatchRequest, encapsulating routing and auxiliary
