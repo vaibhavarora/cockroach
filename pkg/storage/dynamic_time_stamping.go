@@ -444,7 +444,7 @@ func EvalDyTSEndTransaction(
 	}
 
 	//r := cArgs.Repl
-	args := cArgs.Args.(*roachpb.EndTransactionRequest)
+	//	args := cArgs.Args.(*roachpb.EndTransactionRequest)
 	//h := cArgs.Header
 	//ms := cArgs.Stats
 	reply := resp.(*roachpb.EndTransactionResponse)
@@ -475,12 +475,8 @@ func EvalDyTSEndTransaction(
 		return EvalResult{}, roachpb.NewTransactionStatusError("already Aborted")
 	case roachpb.PENDING:
 		// remove all the soft locks of the transaction locally
-		//
-		if args.Commit {
-			reply.Txn.Status = roachpb.COMMITTED
-		} else {
-			reply.Txn.Status = roachpb.ABORTED
-		}
+
+		validateTimeStamp(ctx, batch, cArgs, reply.Txn)
 
 	default:
 		return EvalResult{}, roachpb.NewTransactionStatusError(
