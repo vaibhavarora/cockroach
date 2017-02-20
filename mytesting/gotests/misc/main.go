@@ -4,11 +4,14 @@ import (
 	"fmt"
 )
 
-func modify(d []int) {
-	d = append(d, 1)
+type s struct{
+    a []int
 }
+
 func main() {
-	var c []int
-	modify(c)
-	fmt.Println(c)
+    
+    var sample s
+    for i,each := range sample.a{
+        fmt.Println(i,each)
+    }
 }
