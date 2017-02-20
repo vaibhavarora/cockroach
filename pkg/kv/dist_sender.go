@@ -404,15 +404,14 @@ func (ds *DistSender) sendRPC(
 	defer tracing.AnnotateTrace()
 
 	var customReplicas ReplicaSlice
-	if !tossCoin(len(replicas)) {
-		if roachpb.GetReadType() != roachpb.DefaultReadType && ba.HasOnlyGetOrScan() &&
-			ba.ReadConsistency == roachpb.INCONSISTENT {
-			switch roachpb.GetReadType() {
-			case roachpb.LocalReadType:
-				// The first element will be local
-				customReplicas = replicas[:1]
+	if roachpb.GetReadType() != roachpb.DefaultReadType && ba.HasOnlyGetOrScan() {
+		switch roachpb.GetReadType() {
+		case roachpb.LocalReadType:
+			// The first element will be local
+			customReplicas = replicas[:1]
 
-			case roachpb.QuorumReadType, roachpb.StronglyConsistentQuorumReadType:
+		case roachpb.QuorumReadType, roachpb.StronglyConsistentQuorumReadType:
+			if !tossCoin(len(replicas)) {
 				customReplicas = createQuorumReplicas(ds, ctx, rangeID, replicas)
 			}
 		}
@@ -481,30 +480,20 @@ func responseContainsNilValues(ba roachpb.BatchRequest, br *roachpb.BatchRespons
 	return false
 }
 
-func getLocalReplica(ds *DistSender, replicas ReplicaSlice) (int, *ReplicaInfo) {
-	localIndex := -1
-	var localReplica *ReplicaInfo
+func getLocalReplicaIndex(ds *DistSender, replicas ReplicaSlice) int {
 	nodeDesc := ds.getNodeDescriptor()
 	if nodeDesc != nil {
-		localIndex = replicas.FindReplicaByNodeID(nodeDesc.NodeID)
-		if localIndex != -1 {
-			localReplica = &replicas[localIndex]
-		}
+		return replicas.FindReplicaByNodeID(nodeDesc.NodeID)
 	}
-	return localIndex, localReplica
+	return -1
 }
 
-func getLeaseHolderReplica(ctx context.Context, ds *DistSender, rangeID roachpb.RangeID,
-	replicas ReplicaSlice) (int, *ReplicaInfo) {
-	leaseHolderIndex := -1
-	var leaseHolderReplica *ReplicaInfo
+func getLeaseHolderReplicaIndex(ctx context.Context, ds *DistSender, rangeID roachpb.RangeID,
+	replicas ReplicaSlice) int {
 	if leaseHolder, ok := ds.leaseHolderCache.Lookup(ctx, rangeID); ok {
-		leaseHolderIndex = replicas.FindReplica(leaseHolder.StoreID)
-		if leaseHolderIndex != -1 {
-			leaseHolderReplica = &replicas[leaseHolderIndex]
-		}
+		return replicas.FindReplica(leaseHolder.StoreID)
 	}
-	return leaseHolderIndex, leaseHolderReplica
+	return -1
 }
 
 // Creates a quorum replica slice acc to following rules:
@@ -517,14 +506,14 @@ func createQuorumReplicas(ds *DistSender, ctx context.Context, rangeID roachpb.R
 	quorumReplicas := make(ReplicaSlice, len(replicas))
 	copy(quorumReplicas, replicas)
 
-	localIndex, localReplica := getLocalReplica(ds, quorumReplicas)
+	localIndex := getLocalReplicaIndex(ds, quorumReplicas)
 	if localIndex == -1 {
 		return nil
 	}
 	quorumReplicas.MoveToFront(localIndex)
 	quorumReplicas = quorumReplicas[1:]
 
-	leaseHolderIndex, _ := getLeaseHolderReplica(ctx, ds, rangeID, quorumReplicas)
+	leaseHolderIndex := getLeaseHolderReplicaIndex(ctx, ds, rangeID, quorumReplicas)
 	if leaseHolderIndex == -1 {
 		return nil
 	}
@@ -537,7 +526,7 @@ func createQuorumReplicas(ds *DistSender, ctx context.Context, rangeID roachpb.R
 
 	shuffle.Shuffle(quorumReplicas)
 	quorumReplicas = quorumReplicas[:total/2]
-	quorumReplicas = append(quorumReplicas, *localReplica)
+	quorumReplicas = append(quorumReplicas, replicas[localIndex])
 	return quorumReplicas
 }
 
@@ -656,9 +645,9 @@ func (ds *DistSender) sendSingleRange(
 func (ds *DistSender) initAndVerifyBatch(
 	ctx context.Context, ba *roachpb.BatchRequest,
 ) *roachpb.Error {
-	// In the event that timestamp isn't set and read consistency isn't
-	// required, set the timestamp using the local clock.
-	if ba.ReadConsistency == roachpb.INCONSISTENT && ba.Timestamp.Equal(hlc.ZeroTimestamp) {
+	// In the event that timestamp isn't set and txn is nil,
+	// set the timestamp using the local clock.
+	if ba.Txn == nil && ba.Timestamp.Equal(hlc.ZeroTimestamp) {
 		ba.Timestamp = ds.clock.Now()
 	}
 
@@ -1361,6 +1350,10 @@ func (ds *DistSender) sendToAllReplicas(
 			fmt.Sprintf("insufficient replicas (%d) to satisfy send request",
 				len(replicas)))
 	}
+
+	// Enforce INCONSISTENT reads
+	args.ReadConsistency = roachpb.INCONSISTENT
+	args.Header.ReadConsistency = roachpb.INCONSISTENT
 
 	done := make(chan BatchCall, len(replicas))
 
