@@ -314,7 +314,7 @@ func (ds *DistSender) RangeLookup(
 	})
 	replicas := NewReplicaSlice(ds.gossip, desc)
 	shuffle.Shuffle(replicas)
-	br, err := ds.sendRPC(ctx, desc.RangeID, replicas, ba)
+	br, err := ds.sendRPC(ctx, desc.RangeID, replicas, ba, true)
 	if err != nil {
 		return nil, nil, roachpb.NewError(err)
 	}
@@ -377,7 +377,7 @@ func (ds *DistSender) getNodeDescriptor() *roachpb.NodeDescriptor {
 // The replicas are assumed to be ordered by preference, with closer
 // ones (i.e. expected lowest latency) first.
 func (ds *DistSender) sendRPC(
-	ctx context.Context, rangeID roachpb.RangeID, replicas ReplicaSlice, ba roachpb.BatchRequest,
+	ctx context.Context, rangeID roachpb.RangeID, replicas ReplicaSlice, ba roachpb.BatchRequest, firstAttempt bool,
 ) (*roachpb.BatchResponse, error) {
 	if len(replicas) == 0 {
 		return nil, roachpb.NewSendError(
@@ -411,7 +411,7 @@ func (ds *DistSender) sendRPC(
 			customReplicas = replicas[:1]
 
 		case roachpb.QuorumReadType, roachpb.StronglyConsistentQuorumReadType:
-			if !tossCoin(len(replicas)) {
+			if firstAttempt && !tossCoin(len(replicas)) {
 				customReplicas = createQuorumReplicas(ds, ctx, rangeID, replicas)
 			}
 		}
@@ -601,7 +601,7 @@ func (ds *DistSender) getDescriptor(
 
 // sendSingleRange gathers and rearranges the replicas, and makes an RPC call.
 func (ds *DistSender) sendSingleRange(
-	ctx context.Context, ba roachpb.BatchRequest, desc *roachpb.RangeDescriptor,
+	ctx context.Context, ba roachpb.BatchRequest, desc *roachpb.RangeDescriptor, firstAttempt bool,
 ) (*roachpb.BatchResponse, *roachpb.Error) {
 	// Try to send the call.
 	replicas := NewReplicaSlice(ds.gossip, desc)
@@ -622,7 +622,7 @@ func (ds *DistSender) sendSingleRange(
 	}
 
 	// TODO(tschottdorf): should serialize the trace here, not higher up.
-	br, err := ds.sendRPC(ctx, desc.RangeID, replicas, ba)
+	br, err := ds.sendRPC(ctx, desc.RangeID, replicas, ba, firstAttempt)
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
@@ -1074,7 +1074,8 @@ func (ds *DistSender) sendPartialBatch(
 			}
 		}
 
-		reply, pErr = ds.sendSingleRange(ctx, truncBA, desc)
+		firstAttempt := r.CurrentAttempt() == 1
+		reply, pErr = ds.sendSingleRange(ctx, truncBA, desc, firstAttempt)
 
 		// If sending succeeded, return immediately.
 		if pErr == nil {
