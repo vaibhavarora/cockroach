@@ -142,7 +142,6 @@ var consultsDyTSMethods = [...]bool{
 	roachpb.EndTransaction: true,
 }
 var consultsDyTSValidatorMethods = [...]bool{
-	roachpb.GetTxnRecord:    true,
 	roachpb.UpdateTxnRecord: true,
 }
 

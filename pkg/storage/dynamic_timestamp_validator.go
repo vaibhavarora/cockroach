@@ -19,7 +19,6 @@ type DyTSValidatorCommand struct {
 }
 
 var DyTSValidatorCommands = map[roachpb.Method]DyTSValidatorCommand{
-	roachpb.GetTxnRecord:    {EvalDyTSValidatorCommand: EvalDyTSGetTransactionRecord},
 	roachpb.UpdateTxnRecord: {EvalDyTSValidatorCommand: EvalDyTSUpdateTransactionRecord},
 }
 
@@ -90,6 +89,7 @@ func (r *Replica) executeDyTSValidatorCmd(
 
 }
 
+/*
 func EvalDyTSGetTransactionRecord(
 	ctx context.Context,
 	batch engine.ReadWriter,
@@ -117,6 +117,7 @@ func EvalDyTSGetTransactionRecord(
 	return EvalResult{}, nil
 }
 
+*/
 func EvalDyTSUpdateTransactionRecord(
 	ctx context.Context,
 	batch engine.ReadWriter,
@@ -151,6 +152,7 @@ func EvalDyTSUpdateTransactionRecord(
 	return EvalResult{}, nil
 }
 
+/*
 func fetchTransactionrecord(
 	ctx context.Context,
 	batch engine.ReadWriter,
@@ -255,7 +257,7 @@ func fetchTransactionrecordv2(
 	}
 	return txnRecord, nil
 }
-
+*/
 func updateTransactionrecord(
 	ctx context.Context,
 	batch engine.ReadWriter,
@@ -382,24 +384,24 @@ func pushSoftLocksOnReadToTnxRecord(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	wslocks []roachpb.WriteSoftLock) error {
+	/*
+		// get Transaction record
+		if txnrecord, err := fetchTransactionrecord(ctx, batch, cArgs); err != nil {
+			panic("failed to get transaction")
+		} else {
+			// Modify its Lower bound based on last committed write time stamp
 
-	// get Transaction record
-	if txnrecord, err := fetchTransactionrecord(ctx, batch, cArgs); err != nil {
-		panic("failed to get transaction")
-	} else {
-		// Modify its Lower bound based on last committed write time stamp
+			// Place txns of all the write locks
+			for _, lock := range wslocks {
+				txnrecord.CommitBeforeThem = append(txnrecord.CommitBeforeThem, lock.TransactionMeta)
+			}
 
-		// Place txns of all the write locks
-		for _, lock := range wslocks {
-			txnrecord.CommitBeforeThem = append(txnrecord.CommitBeforeThem, lock.TransactionMeta)
+			// Update transaction
+			if err := updateTransactionrecord(ctx, batch, cArgs, txnrecord); err != nil {
+				panic("failed to update transaction")
+			}
 		}
-
-		// Update transaction
-		if err := updateTransactionrecord(ctx, batch, cArgs, txnrecord); err != nil {
-			panic("failed to update transaction")
-		}
-	}
-
+	*/
 	return nil
 }
 
@@ -410,26 +412,26 @@ func pushSoftLocksOnWriteToTnxRecord(
 	rslocks []roachpb.ReadSoftLock,
 	wslocks []roachpb.WriteSoftLock) error {
 
-	// get Transaction record
-	if txnrecord, err := fetchTransactionrecord(ctx, batch, cArgs); err != nil {
-		panic("failed to get transaction")
-	} else {
-		// Modify its Lower bound based on last committed raed time stamp
+	/*	// get Transaction record
+		if txnrecord, err := fetchTransactionrecord(ctx, batch, cArgs); err != nil {
+			panic("failed to get transaction")
+		} else {
+			// Modify its Lower bound based on last committed raed time stamp
 
-		// Place txns of all the write locks
-		for _, lock := range wslocks {
-			txnrecord.CommitAfterThem = append(txnrecord.CommitAfterThem, lock.TransactionMeta)
+			// Place txns of all the write locks
+			for _, lock := range wslocks {
+				txnrecord.CommitAfterThem = append(txnrecord.CommitAfterThem, lock.TransactionMeta)
+			}
+			// Place txns of all the read locks
+			for _, lock := range rslocks {
+				txnrecord.CommitAfterThem = append(txnrecord.CommitAfterThem, lock.TransactionMeta)
+			}
+			// Update transaction
+			if err := updateTransactionrecord(ctx, batch, cArgs, txnrecord); err != nil {
+				panic("failed to update transaction")
+			}
 		}
-		// Place txns of all the read locks
-		for _, lock := range rslocks {
-			txnrecord.CommitAfterThem = append(txnrecord.CommitAfterThem, lock.TransactionMeta)
-		}
-		// Update transaction
-		if err := updateTransactionrecord(ctx, batch, cArgs, txnrecord); err != nil {
-			panic("failed to update transaction")
-		}
-	}
-
+	*/
 	return nil
 }
 
@@ -438,21 +440,21 @@ func manageCommitBeforeQueue(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	mytnxRecord *roachpb.Transaction) {
+	/*
+		for _, tnx := range mytnxRecord.CommitBeforeThem {
+			tnxrcd, _ := fetchTransactionrecordv2(ctx, batch, cArgs, tnx)
+			switch tnxrcd.Status {
+			case roachpb.COMMITTED:
+				ts := tnxrcd.DynamicTimestampLowerBound.Prev()
+				mytnxRecord.DynamicTimestampUpperBound.Backward(ts)
+				// trigger resolveSoftLock
+			case roachpb.PENDING:
+				ts := tnxrcd.DynamicTimestampLowerBound.Prev()
+				mytnxRecord.DynamicTimestampUpperBound.Backward(ts)
+			}
+			updateTransactionrecordv2(ctx, batch, cArgs, tnx, tnxrcd)
 
-	for _, tnx := range mytnxRecord.CommitBeforeThem {
-		tnxrcd, _ := fetchTransactionrecordv2(ctx, batch, cArgs, tnx)
-		switch tnxrcd.Status {
-		case roachpb.COMMITTED:
-			ts := tnxrcd.DynamicTimestampLowerBound.Prev()
-			mytnxRecord.DynamicTimestampUpperBound.Backward(ts)
-			// trigger resolveSoftLock
-		case roachpb.PENDING:
-			ts := tnxrcd.DynamicTimestampLowerBound.Prev()
-			mytnxRecord.DynamicTimestampUpperBound.Backward(ts)
-		}
-		updateTransactionrecordv2(ctx, batch, cArgs, tnx, tnxrcd)
-
-	}
+		}*/
 }
 
 func manageCommitAfterQueue(
@@ -460,20 +462,20 @@ func manageCommitAfterQueue(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	mytnxRecord *roachpb.Transaction) {
-
-	for _, tnx := range mytnxRecord.CommitAfterThem {
-		tnxrcd, _ := fetchTransactionrecordv2(ctx, batch, cArgs, tnx)
-		switch tnxrcd.Status {
-		case roachpb.COMMITTED:
-			ts := tnxrcd.DynamicTimestampUpperBound.Next()
-			mytnxRecord.DynamicTimestampLowerBound.Forward(ts)
-			// trigger resolveSoftLock
-		case roachpb.PENDING:
-			ts := mytnxRecord.DynamicTimestampLowerBound.Prev()
-			tnxrcd.DynamicTimestampUpperBound.Backward(ts)
-		}
-		updateTransactionrecordv2(ctx, batch, cArgs, tnx, tnxrcd)
-	}
+	/*
+		for _, tnx := range mytnxRecord.CommitAfterThem {
+			tnxrcd, _ := fetchTransactionrecordv2(ctx, batch, cArgs, tnx)
+			switch tnxrcd.Status {
+			case roachpb.COMMITTED:
+				ts := tnxrcd.DynamicTimestampUpperBound.Next()
+				mytnxRecord.DynamicTimestampLowerBound.Forward(ts)
+				// trigger resolveSoftLock
+			case roachpb.PENDING:
+				ts := mytnxRecord.DynamicTimestampLowerBound.Prev()
+				tnxrcd.DynamicTimestampUpperBound.Backward(ts)
+			}
+			updateTransactionrecordv2(ctx, batch, cArgs, tnx, tnxrcd)
+		}*/
 
 }
 

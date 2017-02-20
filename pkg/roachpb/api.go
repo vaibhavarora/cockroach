@@ -468,9 +468,6 @@ func (*ComputeChecksumRequest) Method() Method { return ComputeChecksum }
 func (*DeprecatedVerifyChecksumRequest) Method() Method { return DeprecatedVerifyChecksum }
 
 // Method implements the Request interface.
-func (*GetTransactionRecordRequest) Method() Method { return GetTxnRecord }
-
-// Method implements the Request interface.
 func (*UpdateTransactionRecordRequest) Method() Method { return UpdateTxnRecord }
 
 // ShallowCopy implements the Request interface.
@@ -650,11 +647,6 @@ func (ccr *ComputeChecksumRequest) ShallowCopy() Request {
 // ShallowCopy implements the Request interface.
 func (dvcr *DeprecatedVerifyChecksumRequest) ShallowCopy() Request {
 	shallowCopy := *dvcr
-	return &shallowCopy
-}
-
-func (gtr *GetTransactionRecordRequest) ShallowCopy() Request {
-	shallowCopy := *gtr
 	return &shallowCopy
 }
 
@@ -847,7 +839,6 @@ func (*ResolveIntentRequest) flags() int           { return isWrite }
 func (*ResolveIntentRangeRequest) flags() int      { return isWrite | isRange }
 func (*NoopRequest) flags() int                    { return isRead } // slightly special
 func (*TruncateLogRequest) flags() int             { return isWrite | isNonKV }
-func (*GetTransactionRecordRequest) flags() int    { return isRead | isTxn }
 func (*UpdateTransactionRecordRequest) flags() int { return isWrite | isTxn }
 
 // MergeRequests are considered "non KV" because they do not need to be gated

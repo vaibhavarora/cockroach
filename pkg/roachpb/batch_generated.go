@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-type reqCounts [32]int32
+type reqCounts [31]int32
 
 // getReqCounts returns the number of times each
 // request type appears in the batch.
@@ -75,10 +75,8 @@ func (ba *BatchRequest) getReqCounts() reqCounts {
 			counts[28]++
 		case r.LeaseInfo != nil:
 			counts[29]++
-		case r.GetTxnRecord != nil:
-			counts[30]++
 		case r.UpdateTxnRecord != nil:
-			counts[31]++
+			counts[30]++
 		default:
 			panic(fmt.Sprintf("unsupported request: %+v", r))
 		}
@@ -117,7 +115,6 @@ var requestNames = []string{
 	"ChangeFrozen",
 	"TransferLease",
 	"LeaseInfo",
-	"GetTxnRecord",
 	"UpdateTxnRecord",
 }
 
@@ -178,8 +175,7 @@ func (ba *BatchRequest) CreateReply() *BatchResponse {
 	var buf27 []ChangeFrozenResponse
 	var buf28 []RequestLeaseResponse
 	var buf29 []LeaseInfoResponse
-	var buf30 []GetTransactionRecordResponse
-	var buf31 []UpdateTransactionRecordResponse
+	var buf30 []UpdateTransactionRecordResponse
 
 	for i, r := range ba.Requests {
 		switch {
@@ -363,18 +359,12 @@ func (ba *BatchRequest) CreateReply() *BatchResponse {
 			}
 			br.Responses[i].LeaseInfo = &buf29[0]
 			buf29 = buf29[1:]
-		case r.GetTxnRecord != nil:
-			if buf30 == nil {
-				buf30 = make([]GetTransactionRecordResponse, counts[30])
-			}
-			br.Responses[i].GetTxnRecord = &buf30[0]
-			buf30 = buf30[1:]
 		case r.UpdateTxnRecord != nil:
-			if buf31 == nil {
-				buf31 = make([]UpdateTransactionRecordResponse, counts[31])
+			if buf30 == nil {
+				buf30 = make([]UpdateTransactionRecordResponse, counts[30])
 			}
-			br.Responses[i].UpdateTxnRecord = &buf31[0]
-			buf31 = buf31[1:]
+			br.Responses[i].UpdateTxnRecord = &buf30[0]
+			buf30 = buf30[1:]
 		default:
 			panic(fmt.Sprintf("unsupported request: %+v", r))
 		}
