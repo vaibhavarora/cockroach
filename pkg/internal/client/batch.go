@@ -601,13 +601,15 @@ func (b *Batch) adminTransferLease(key interface{}, target roachpb.StoreID) {
 	b.initResult(1, 0, notRaw, nil)
 }
 
+// hasOnlyGetOrScan returns true if it has a single Get/Scan/ReverseScan request
 func (b *Batch) hasOnlyGetOrScan() bool {
-	for _, ru := range b.reqs {
-		req := ru.GetInner()
-		if req.Method() != roachpb.Get && req.Method() != roachpb.Scan &&
-			req.Method() != roachpb.ReverseScan {
-			return false
-		}
+	if len(b.reqs) != 1 {
+		return false
+	}
+	req := b.reqs[0].GetInner()
+	if req.Method() != roachpb.Get && req.Method() != roachpb.Scan &&
+		req.Method() != roachpb.ReverseScan {
+		return false
 	}
 	return true
 }

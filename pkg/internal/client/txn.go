@@ -307,7 +307,8 @@ func (txn *Txn) Run(b *Batch) error {
 	tracing.AnnotateTrace()
 	defer tracing.AnnotateTrace()
 
-	// If the Batch has only read methods, then enforce INCONSISTENT reads for custom logic
+	// If the Batch has only single read request, then enforce INCONSISTENT reads and skip
+	// creating an implicit transaction
 	if roachpb.GetReadType() != roachpb.DefaultReadType && b.hasOnlyGetOrScan() {
 		if log.V(2) {
 			log.Info(txn.Context, "modifying header to enforce INCONSISTENT read and skipping txn")

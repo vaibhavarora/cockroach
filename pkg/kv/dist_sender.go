@@ -18,6 +18,7 @@ package kv
 
 import (
 	"fmt"
+	"math/rand"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -403,16 +404,17 @@ func (ds *DistSender) sendRPC(
 	defer tracing.AnnotateTrace()
 
 	var customReplicas ReplicaSlice
-	if roachpb.GetReadType() != roachpb.DefaultReadType && ba.HasOnlyGetOrScan() {
-		switch roachpb.GetReadType() {
-		case roachpb.LocalReadType:
-			// The first element will be local
-			customReplicas = replicas[:1]
+	if !tossCoin(len(replicas)) {
+		if roachpb.GetReadType() != roachpb.DefaultReadType && ba.HasOnlyGetOrScan() &&
+			ba.ReadConsistency == roachpb.INCONSISTENT {
+			switch roachpb.GetReadType() {
+			case roachpb.LocalReadType:
+				// The first element will be local
+				customReplicas = replicas[:1]
 
-		case roachpb.QuorumReadType:
-			fallthrough
-		case roachpb.StronglyConsistentQuorumReadType:
-			customReplicas = createQuorumReplicas(ds, ctx, rangeID, replicas)
+			case roachpb.QuorumReadType, roachpb.StronglyConsistentQuorumReadType:
+				customReplicas = createQuorumReplicas(ds, ctx, rangeID, replicas)
+			}
 		}
 	}
 
@@ -424,12 +426,12 @@ func (ds *DistSender) sendRPC(
 		}
 		reply, err = ds.sendToAllReplicas(ctx, rpcOpts, rangeID, customReplicas, ba, ds.rpcContext)
 
-		if roachpb.GetReadType() == roachpb.StronglyConsistentQuorumReadType && ba.HasOnlyGetOrScan() {
+		if roachpb.GetReadType() == roachpb.StronglyConsistentQuorumReadType {
 			if reply != nil && responseContainsNilValues(ba, reply) {
 				if log.V(2) {
 					log.Info(ctx, "Received BatchResponse with nil RawBytes. Should retry.")
 				}
-				return nil, roachpb.SendError{Message: "detected conflicting writeIntent"}
+				return nil, roachpb.NewSendError("detected conflicting writeIntent")
 			}
 		}
 	} else {
@@ -440,6 +442,12 @@ func (ds *DistSender) sendRPC(
 		return nil, err
 	}
 	return reply, nil
+}
+
+// tossCoin returns true by probability of 1/total
+func tossCoin(total int) bool {
+	rand.Seed(time.Now().UnixNano())
+	return rand.Intn(total) == 0
 }
 
 // checks if the BatchResponse contains nil RawBytes
@@ -473,42 +481,63 @@ func responseContainsNilValues(ba roachpb.BatchRequest, br *roachpb.BatchRespons
 	return false
 }
 
-func createQuorumReplicas(ds *DistSender, ctx context.Context, rangeID roachpb.RangeID,
-	replicas ReplicaSlice) ReplicaSlice {
-	// Create a quorum (including local node and excluding lease holder)
-	total := len(replicas)
-	quorum := total/2 + 1
-	quorumReplicas := make(ReplicaSlice, len(replicas))
-	copy(quorumReplicas, replicas)
-
+func getLocalReplica(ds *DistSender, replicas ReplicaSlice) (int, *ReplicaInfo) {
 	localIndex := -1
 	var localReplica *ReplicaInfo
 	nodeDesc := ds.getNodeDescriptor()
 	if nodeDesc != nil {
-		localIndex = quorumReplicas.FindReplicaByNodeID(nodeDesc.NodeID)
+		localIndex = replicas.FindReplicaByNodeID(nodeDesc.NodeID)
 		if localIndex != -1 {
-			localReplica = &quorumReplicas[localIndex]
-			quorumReplicas.MoveToFront(localIndex)
-			quorumReplicas = quorumReplicas[1:]
+			localReplica = &replicas[localIndex]
 		}
 	}
+	return localIndex, localReplica
+}
 
+func getLeaseHolderReplica(ctx context.Context, ds *DistSender, rangeID roachpb.RangeID,
+	replicas ReplicaSlice) (int, *ReplicaInfo) {
 	leaseHolderIndex := -1
+	var leaseHolderReplica *ReplicaInfo
 	if leaseHolder, ok := ds.leaseHolderCache.Lookup(ctx, rangeID); ok {
-		leaseHolderIndex = quorumReplicas.FindReplica(leaseHolder.StoreID)
+		leaseHolderIndex = replicas.FindReplica(leaseHolder.StoreID)
 		if leaseHolderIndex != -1 {
-			quorumReplicas.MoveToFront(leaseHolderIndex)
-			quorumReplicas = quorumReplicas[1:]
+			leaseHolderReplica = &replicas[leaseHolderIndex]
 		}
+	}
+	return leaseHolderIndex, leaseHolderReplica
+}
+
+// Creates a quorum replica slice acc to following rules:
+// 1. Returns nil if unable to resolve local or lease holder replicas
+// 2. Returns nil if local and lease holder replicas are same
+// 3. Return a slice which includes local and excludes lease holder replica
+func createQuorumReplicas(ds *DistSender, ctx context.Context, rangeID roachpb.RangeID,
+	replicas ReplicaSlice) ReplicaSlice {
+	total := len(replicas)
+	quorumReplicas := make(ReplicaSlice, len(replicas))
+	copy(quorumReplicas, replicas)
+
+	localIndex, localReplica := getLocalReplica(ds, quorumReplicas)
+	if localIndex == -1 {
+		return nil
+	}
+	quorumReplicas.MoveToFront(localIndex)
+	quorumReplicas = quorumReplicas[1:]
+
+	leaseHolderIndex, _ := getLeaseHolderReplica(ctx, ds, rangeID, quorumReplicas)
+	if leaseHolderIndex == -1 {
+		return nil
+	}
+	quorumReplicas.MoveToFront(leaseHolderIndex)
+	quorumReplicas = quorumReplicas[1:]
+
+	if len(quorumReplicas) < total/2 {
+		return nil
 	}
 
 	shuffle.Shuffle(quorumReplicas)
-	if localReplica != nil {
-		if len(quorumReplicas) > quorum-1 {
-			quorumReplicas = quorumReplicas[:quorum-1]
-		}
-		quorumReplicas = append(quorumReplicas, *localReplica)
-	}
+	quorumReplicas = quorumReplicas[:total/2]
+	quorumReplicas = append(quorumReplicas, *localReplica)
 	return quorumReplicas
 }
 
@@ -1245,9 +1274,12 @@ func selectLatestValues(ctx context.Context, request roachpb.BatchRequest, reply
 				getResponse2 := reply2.Responses[i].GetValue().(*roachpb.GetResponse)
 				toAppend := reply2.Responses[i]
 
-				if getResponse2.Value.Timestamp.Less(getResponse1.Value.Timestamp) ||
-					(getResponse2.Value.Timestamp.Equal(getResponse1.Value.Timestamp) && getResponse2.Value.RawBytes == nil) {
-					toAppend = reply1.Responses[i]
+				// For some unknown reason Value can be nil here
+				if getResponse1.Value != nil && getResponse2.Value != nil {
+					if getResponse2.Value.Timestamp.Less(getResponse1.Value.Timestamp) ||
+						(getResponse2.Value.Timestamp.Equal(getResponse1.Value.Timestamp) && getResponse2.Value.RawBytes == nil) {
+						toAppend = reply1.Responses[i]
+					}
 				}
 				response.Responses = append(response.Responses, toAppend)
 

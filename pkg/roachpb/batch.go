@@ -112,13 +112,15 @@ func (ba *BatchRequest) IsReadOnly() bool {
 	return len(ba.Requests) > 0 && !ba.hasFlag(isWrite|isAdmin)
 }
 
+// HasOnlyGetOrScan returns true if it has a single Get/Scan/ReverseScan request
 func (ba *BatchRequest) HasOnlyGetOrScan() bool {
-	for _, ru := range ba.Requests {
-		req := ru.GetInner()
-		if req.Method() != Get && req.Method() != Scan &&
-			req.Method() != ReverseScan {
-			return false
-		}
+	if len(ba.Requests) != 1 {
+		return false
+	}
+	req := ba.Requests[0].GetInner()
+	if req.Method() != Get && req.Method() != Scan &&
+		req.Method() != ReverseScan {
+		return false
 	}
 	return true
 }
