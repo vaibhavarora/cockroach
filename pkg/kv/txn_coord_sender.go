@@ -314,7 +314,7 @@ func (tc *TxnCoordSender) Send(
 		var hasET bool
 		{
 			if log.V(2) {
-				log.Infof(ctx, "Ravi : TCS 11")
+				log.Infof(ctx, "Ravi : TCS 11 , batch request %v", ba)
 			}
 
 			var rArgs roachpb.Request
@@ -517,7 +517,8 @@ func (tc *TxnCoordSender) maybeRejectClientLocked(
 		// transaction session so that we can definitively return the right
 		// error between these possible errors. Or update the code to make an
 		// educated guess based on the incoming transaction timestamp.
-		return roachpb.NewError(errNoState)
+		//return roachpb.NewError(errNoState)
+		return nil
 	case txnMeta.txn.Status == roachpb.ABORTED:
 		txn := txnMeta.txn.Clone()
 		tc.cleanupTxnLocked(ctx, txn)

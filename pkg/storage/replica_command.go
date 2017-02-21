@@ -494,18 +494,6 @@ func evalEndTransaction(
 	ms := cArgs.Stats
 	reply := resp.(*roachpb.EndTransactionResponse)
 
-	// Read only transactions
-	if len(args.IntentSpans) == 0 {
-		var pd EvalResult
-		if reply.Txn.Status == roachpb.COMMITTED {
-			var err error
-			if pd, err = r.runCommitTrigger(ctx, batch.(engine.Batch), ms, *args, reply.Txn); err != nil {
-				return EvalResult{}, NewReplicaCorruptionError(err)
-			}
-		}
-		return pd, nil
-	}
-
 	if err := verifyTransaction(h, args); err != nil {
 		return EvalResult{}, err
 	}

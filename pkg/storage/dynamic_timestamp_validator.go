@@ -107,7 +107,7 @@ func EvalDyTSUpdateTransactionRecord(
 	}
 	args := cArgs.Args.(*roachpb.UpdateTransactionRecordRequest)
 
-	key := keys.TransactionKey(cArgs.Header.Txn.Key, *cArgs.Header.Txn.ID)
+	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
 
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
@@ -153,6 +153,7 @@ func updateTransactionrecord(
 		Span: roachpb.Span{
 			Key: cArgs.Header.Txn.Key,
 		},
+		Tmeta:            cArgs.Header.Txn.TxnMeta,
 		LowerBound:       rArgs.lowerbound,
 		UpperBound:       rArgs.upperbound,
 		CommitAfterThem:  rArgs.commitAQ,
@@ -160,8 +161,11 @@ func updateTransactionrecord(
 	}
 
 	b := &client.Batch{}
-	b.Header = cArgs.Header
-	b.Header.Timestamp = hlc.ZeroTimestamp
+	//b.Header = cArgs.Header
+	//b.Header.Timestamp = hlc.ZeroTimestamp
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : updateTnxReq %v", updateTnxReq)
+	}
 	b.AddRawRequest(updateTnxReq)
 
 	if err := cArgs.Repl.store.db.Run(ctx, b); err != nil {
@@ -190,6 +194,10 @@ func pushSoftLocksOnReadToTnxRecord(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	wslocks []roachpb.WriteSoftLock) error {
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :pushSoftLocksOnReadToTnxRecord ")
+	}
 
 	var rARgs RpcArgs
 	// Modify its Lower bound based on last committed write time stamp

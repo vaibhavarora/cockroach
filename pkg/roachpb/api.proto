@@ -238,10 +238,11 @@ message ReverseScanResponse {
 // A UpdateTranasactionRequest updates the Transaction record 
 message UpdateTransactionRecordRequest {
   optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
-  optional util.hlc.Timestamp LowerBound = 2 [(gogoproto.nullable) = false];
-  optional util.hlc.Timestamp UpperBound = 3 [(gogoproto.nullable) = false];
-  repeated storage.engine.enginepb.TxnMeta commitAfterThem  = 4 [(gogoproto.nullable) = false];
-  repeated storage.engine.enginepb.TxnMeta commitBeforeThem  = 5 [(gogoproto.nullable) = false];
+  optional storage.engine.enginepb.TxnMeta tmeta = 2 [(gogoproto.nullable) = false];
+  optional util.hlc.Timestamp LowerBound = 3 [(gogoproto.nullable) = false];
+  optional util.hlc.Timestamp UpperBound = 4 [(gogoproto.nullable) = false];
+  repeated storage.engine.enginepb.TxnMeta commitAfterThem  = 5 [(gogoproto.nullable) = false];
+  repeated storage.engine.enginepb.TxnMeta commitBeforeThem  = 6 [(gogoproto.nullable) = false];
 }
 
 // Response for UpdateTranasactionRequest

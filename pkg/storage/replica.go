@@ -1871,6 +1871,9 @@ func (r *Replica) addReadOnlyCmd(
 	defer func() {
 		if endCmds != nil {
 			endCmds.done(br, pErr, proposalNoRetry)
+			if log.V(2) {
+				log.Infof(ctx, "Out of command queue")
+			}
 		}
 	}()
 	// placing soft locks
@@ -2013,6 +2016,10 @@ func (r *Replica) tryAddWriteCmd(
 ) (br *roachpb.BatchResponse, pErr *roachpb.Error, retry proposalRetryReason) {
 	startTime := timeutil.Now()
 	isNonKV := ba.IsNonKV()
+	if log.V(2) {
+		log.Infof(ctx, "tryAddWriteCmd ba %v ", ba)
+	}
+
 	var endCmds *endCmds
 	if !isNonKV {
 		// Add the write to the command queue to gate subsequent overlapping
@@ -2022,6 +2029,9 @@ func (r *Replica) tryAddWriteCmd(
 		// been run to successful completion.
 		log.Event(ctx, "command queue")
 		var err error
+		if log.V(2) {
+			log.Infof(ctx, "adding to command queue ba %v ", ba)
+		}
 		endCmds, err = r.beginCmds(ctx, &ba)
 		if err != nil {
 			return nil, roachpb.NewError(err), proposalNoRetry
@@ -2061,6 +2071,9 @@ func (r *Replica) tryAddWriteCmd(
 	}
 
 	if !isNonKV {
+		if log.V(2) {
+			log.Infof(ctx, "applyTimestampCache ba %v ", ba)
+		}
 		// Examine the read and write timestamp caches for preceding
 		// commands which require this command to move its timestamp
 		// forward. Or, in the case of a transactional write, the txn
@@ -2102,6 +2115,9 @@ func (r *Replica) tryAddWriteCmd(
 	}
 
 	log.Event(ctx, "raft")
+	if log.V(2) {
+		log.Infof(ctx, "Raft downstream")
+	}
 
 	ch, tryAbandon, err := r.propose(ctx, lease, ba, endCmds)
 	if err != nil {
@@ -2176,6 +2192,10 @@ func (r *Replica) tryAddWriteCmd(
 func (r *Replica) requestToProposal(
 	ctx context.Context, idKey storagebase.CmdIDKey, ba roachpb.BatchRequest, endCmds *endCmds,
 ) (*ProposalData, *roachpb.Error) {
+
+	if log.V(2) {
+		log.Infof(ctx, "requestToProposal, ba %v", ba)
+	}
 	proposal := &ProposalData{
 		ctx:     ctx,
 		idKey:   idKey,
@@ -2219,6 +2239,9 @@ func (r *Replica) evaluateProposal(
 	// Note that we don't hold any locks at this point. This is important
 	// since evaluating a proposal is expensive (at least under proposer-
 	// evaluated KV).
+	if log.V(2) {
+		log.Infof(ctx, "evaluateProposal, ba %v", ba)
+	}
 	var result EvalResult
 
 	if ba.Timestamp == hlc.ZeroTimestamp {
@@ -2309,6 +2332,9 @@ func (r *Replica) propose(
 	ctx context.Context, lease *roachpb.Lease, ba roachpb.BatchRequest, endCmds *endCmds,
 ) (chan proposalResult, func() bool, error) {
 	r.mu.Lock()
+	if log.V(2) {
+		log.Infof(ctx, "Propose function ba %v", ba)
+	}
 	if err := r.mu.destroyed; err != nil {
 		r.mu.Unlock()
 		return nil, nil, err
@@ -3755,6 +3781,9 @@ func (r *Replica) applyRaftCommandInBatch(
 	// Check whether this txn has been aborted. Only applies to transactional
 	// requests which write intents (for example HeartbeatTxn does not get
 	// hindered by this).
+	if log.V(2) {
+		log.Infof(ctx, "applyRaftCommandInBatch, ba %v", ba)
+	}
 	if ba.Txn != nil && ba.IsTransactionWrite() {
 		r.assert5725(ba)
 		// TODO(tschottdorf): confusing and potentially incorrect use of
@@ -4102,12 +4131,16 @@ func (r *Replica) executeBatch(
 		reply := br.Responses[index].GetInner()
 		var curResult EvalResult
 		var pErr *roachpb.Error
-		if ba.Txn != nil && consultsDyTSValidatorCommands(args) {
+		if consultsDyTSValidatorCommands(args) {
 			curResult, pErr = r.executeDyTSValidatorCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 		} else {
 			//shadowing for now
+
 			if ba.Txn != nil && consultsDyTSCommands(args) {
 				curResult, pErr = r.executeDyTSCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
+			}
+			if log.V(2) {
+				log.Infof(ctx, "Ravi :before replica command : reply %v", reply)
 			}
 			curResult, pErr = r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 		}
