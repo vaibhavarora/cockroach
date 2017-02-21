@@ -29,6 +29,21 @@ func GetReadType() int {
 	return envutil.EnvOrDefaultInt("COCKROACH_READ_TYPE", DefaultReadType)
 }
 
+func GetReadTypeString() string {
+	switch GetReadType() {
+	case DefaultReadType:
+		return "default"
+	case LocalReadType:
+		return "local"
+	case QuorumReadType:
+		return "quorum"
+	case StronglyConsistentQuorumReadType:
+		return "strongly consistent quorum"
+	default:
+		return "unknown"
+	}
+}
+
 const (
 	// DefaultReadType is the default read behavior
 	DefaultReadType = 0

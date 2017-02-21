@@ -41,6 +41,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
@@ -410,6 +411,7 @@ func runStart(_ *cobra.Command, args []string) error {
 			}
 			fmt.Fprintf(tw, "clusterID:\t%s\n", s.ClusterID())
 			fmt.Fprintf(tw, "nodeID:\t%d\n", nodeID)
+			fmt.Fprintf(tw, "readType:\t%s\n", roachpb.GetReadTypeString())
 			return tw.Flush()
 		}(); err != nil {
 			errChan <- err
