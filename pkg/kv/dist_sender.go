@@ -1385,8 +1385,16 @@ func (ds *DistSender) sendToAllReplicas(
 	}
 
 	var latestResponse *roachpb.BatchResponse
+	slowTimer := time.After(base.SlowRequestThreshold)
 	for {
 		select {
+		case <-slowTimer:
+			slowTimer = nil
+			log.Warningf(ctx, "sendToAllReplicas have been waiting %s sending RPC for batch: %s",
+				base.SlowRequestThreshold, args.Summary())
+			ds.metrics.SlowRequestsCount.Inc(1)
+			defer ds.metrics.SlowRequestsCount.Dec(1)
+
 		case call := <-done:
 			pending--
 			err := call.Err
@@ -1484,7 +1492,7 @@ func (ds *DistSender) sendToReplicas(
 
 		case <-slowTimer:
 			slowTimer = nil
-			log.Warningf(ctx, "have been waiting %s sending RPC for batch: %s",
+			log.Warningf(ctx, "sendToReplicas have been waiting %s sending RPC for batch: %s",
 				base.SlowRequestThreshold, args.Summary())
 			ds.metrics.SlowRequestsCount.Inc(1)
 			defer ds.metrics.SlowRequestsCount.Dec(1)
