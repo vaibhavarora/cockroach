@@ -65,6 +65,8 @@ type Batch struct {
 	rowsBuf       []KeyValue
 	rowsStaticBuf [8]KeyValue
 	rowsStaticIdx int
+	// Set when Batch created for client statements
+	ClientBatch bool
 }
 
 // RawResponse returns the BatchResponse which was the result of a successful
@@ -601,8 +603,8 @@ func (b *Batch) adminTransferLease(key interface{}, target roachpb.StoreID) {
 	b.initResult(1, 0, notRaw, nil)
 }
 
-// hasOnlyGetOrScan returns true if it has a single Get/Scan/ReverseScan request
-func (b *Batch) hasOnlyGetOrScan() bool {
+// hasSingleGetOrScan returns true if it has a single Get/Scan/ReverseScan request
+func (b *Batch) hasSingleGetOrScan() bool {
 	if len(b.reqs) != 1 {
 		return false
 	}

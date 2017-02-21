@@ -404,7 +404,7 @@ func (ds *DistSender) sendRPC(
 	defer tracing.AnnotateTrace()
 
 	var customReplicas ReplicaSlice
-	if roachpb.GetReadType() != roachpb.DefaultReadType && ba.HasOnlyGetOrScan() {
+	if roachpb.GetReadType() != roachpb.DefaultReadType && ba.Txn == nil && ba.HasSingleGetOrScan() {
 		switch roachpb.GetReadType() {
 		case roachpb.LocalReadType:
 			// The first element will be local
@@ -1346,6 +1346,10 @@ func (ds *DistSender) sendToAllReplicas(
 	args roachpb.BatchRequest,
 	rpcContext *rpc.Context,
 ) (*roachpb.BatchResponse, error) {
+	if args.Txn != nil {
+		panic("sendToAllReplicas only works for requests without txns")
+	}
+
 	if len(replicas) < 1 {
 		return nil, roachpb.NewSendError(
 			fmt.Sprintf("insufficient replicas (%d) to satisfy send request",

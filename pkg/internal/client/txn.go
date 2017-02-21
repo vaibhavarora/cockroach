@@ -309,7 +309,7 @@ func (txn *Txn) Run(b *Batch) error {
 
 	// If the Batch has only single read request, skip creating an implicit transaction
 	// (this is done to support INCONSISTENT reads down the stack)
-	if roachpb.GetReadType() != roachpb.DefaultReadType && b.hasOnlyGetOrScan() {
+	if roachpb.GetReadType() != roachpb.DefaultReadType && b.ClientBatch && b.hasSingleGetOrScan() {
 		if log.V(2) {
 			log.Info(txn.Context, "skipping implicit txn")
 		}
