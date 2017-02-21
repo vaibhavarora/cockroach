@@ -1871,8 +1871,10 @@ func (r *Replica) addReadOnlyCmd(
 	defer func() {
 		if endCmds != nil {
 			endCmds.done(br, pErr, proposalNoRetry)
-			if log.V(2) {
-				log.Infof(ctx, "Out of command queue")
+			if pErr == nil {
+				if log.V(2) {
+					log.Infof(ctx, "Out of command queue")
+				}
 			}
 		}
 	}()
