@@ -141,8 +141,13 @@ var consultsDyTSMethods = [...]bool{
 	roachpb.ReverseScan:    true,
 	roachpb.EndTransaction: true,
 }
+
 var consultsDyTSValidatorMethods = [...]bool{
 	roachpb.UpdateTxnRecord: true,
+}
+
+var consultsBlockMethods = [...]bool{
+	roachpb.Scan: true,
 }
 
 func consultsDyTSCommands(r roachpb.Request) bool {
@@ -159,6 +164,22 @@ func consultsDyTSValidatorCommands(r roachpb.Request) bool {
 		return false
 	}
 	return consultsDyTSValidatorMethods[m]
+}
+
+func consultsDyTSValidationRequests(r roachpb.Request) bool {
+	m := r.Method()
+	if m < 0 || m >= roachpb.Method(len(consultsDyTSMethods)) {
+		return false
+	}
+	return consultsDyTSMethods[m]
+}
+
+func consultsBlockCommands(r roachpb.Request) bool {
+	m := r.Method()
+	if m < 0 || m >= roachpb.Method(len(consultsBlockMethods)) {
+		return false
+	}
+	return consultsBlockMethods[m]
 }
 
 // updatesTimestampCacheMethods specifies the set of methods which if
@@ -1846,7 +1867,7 @@ func (r *Replica) addReadOnlyCmd(
 			return nil, pErr
 		}
 	}
-
+	var result EvalResult
 	var endCmds *endCmds
 
 	if !ba.IsNonKV() {
@@ -1871,10 +1892,11 @@ func (r *Replica) addReadOnlyCmd(
 	defer func() {
 		if endCmds != nil {
 			endCmds.done(br, pErr, proposalNoRetry)
+			if log.V(2) {
+				log.Infof(ctx, "Out of command queue pErr %v", pErr)
+			}
 			if pErr == nil {
-				if log.V(2) {
-					log.Infof(ctx, "Out of command queue")
-				}
+				r.submitValidationProcessing(ctx, ba, result)
 			}
 		}
 	}()
@@ -1890,7 +1912,7 @@ func (r *Replica) addReadOnlyCmd(
 	// Execute read-only batch command. It checks for matching key range; note
 	// that holding readMu throughout is important to avoid reads from the
 	// "wrong" key range being served after the range has been split.
-	var result EvalResult
+
 	br, result, pErr = r.executeBatch(ctx, storagebase.CmdIDKey(""), r.store.Engine(), nil, ba)
 
 	if pErr == nil && ba.Txn != nil {
@@ -1913,6 +1935,20 @@ func (r *Replica) addReadOnlyCmd(
 		log.Infof(ctx, "Ravi : read completed")
 	}
 	return br, pErr
+}
+
+func (r *Replica) submitValidationProcessing(
+	ctx context.Context,
+	ba roachpb.BatchRequest,
+	result EvalResult) error {
+
+	for _, union := range ba.Requests {
+		args := union.GetInner()
+		if ba.Txn != nil && consultsDyTSValidationRequests(args) {
+			return r.ApplyDyTSValidation(ctx, args, ba.Header, result)
+		}
+	}
+	return nil
 }
 
 // TODO(tschottdorf): temporary assertion for #5725, which saw batches with
@@ -4144,7 +4180,10 @@ func (r *Replica) executeBatch(
 			if log.V(2) {
 				log.Infof(ctx, "Ravi :before replica command : reply %v", reply)
 			}
-			curResult, pErr = r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
+			if !consultsBlockCommands(args) {
+				curResult, pErr = r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
+			}
+
 		}
 		if err := result.MergeAndDestroy(curResult); err != nil {
 			// TODO(tschottdorf): see whether we really need to pass nontrivial

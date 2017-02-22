@@ -93,7 +93,11 @@ func (r *Replica) executeDyTSCmd(
 		}
 		pErr = roachpb.NewErrorWithTxn(err, txn)
 	}
-
+	if log.V(2) && pd.Slocks.wslocks != nil {
+		log.Infof(ctx, "executeDyTSCmd : evalresult locks %v", pd.Slocks.wslocks)
+	} else {
+		log.Infof(ctx, "executeDyTSCmd : evalresult slocks.wslocks is nil")
+	}
 	return pd, pErr
 
 }
@@ -121,17 +125,9 @@ func EvalDyTSGet(
 			log.Infof(ctx, "Write locks acqurired on EvalDyTSGet %v", each)
 		}
 	}
+	var result EvalResult
 
-	//if len(wslocks) != 0 {
-	//if err := pushSoftLocksOnReadToTnxRecord(ctx, batch, cArgs, wslocks); err != nil {
-	//	panic("failed to place soft  locks in Tnx Record")
-	//}
-	/*} else {
-		if log.V(2) {
-			log.Infof(ctx, " No Write locks acqurired on Get ")
-		}
-	}*/
-	return EvalResult{}, err
+	return result, err
 }
 
 func EvalDyTSPut(
@@ -157,17 +153,11 @@ func EvalDyTSPut(
 			log.Infof(ctx, "Read locks acqurired on EvalDyTSPut %v", each)
 		}
 	}
-	/*if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, batch, cArgs, rslocks, wslocks); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
-		if log.V(2) {
-			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
-		}
-	}*/
 
-	return EvalResult{}, nil
+	var result EvalResult
+	result.Slocks.wslocks = &wslocks
+	result.Slocks.rslocks = &rslocks
+	return result, nil
 }
 
 func EvalDyTSConditionalPut(
@@ -194,16 +184,11 @@ func EvalDyTSConditionalPut(
 			log.Infof(ctx, "Read locks acqurired on EvalDyTSConditionalPut %v", each)
 		}
 	}
-	/*if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, batch, cArgs, rslocks, wslocks); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
-		if log.V(2) {
-			log.Infof(ctx, " No Write or Read locks acqurired on ConditionalPut ")
-		}
-	}*/
-	return EvalResult{}, nil
+
+	var result EvalResult
+	result.Slocks.wslocks = &wslocks
+	result.Slocks.rslocks = &rslocks
+	return result, nil
 
 }
 
@@ -231,16 +216,11 @@ func EvalDyTSInitPut(
 			log.Infof(ctx, "Read locks acqurired on EvalDyTSInitPut %v", each)
 		}
 	}
-	/*if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, batch, cArgs, rslocks, wslocks); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
-		if log.V(2) {
-			log.Infof(ctx, " No Write or Read locks acqurired on InitPut ")
-		}
-	}*/
-	return EvalResult{}, nil
+
+	var result EvalResult
+	result.Slocks.wslocks = &wslocks
+	result.Slocks.rslocks = &rslocks
+	return result, nil
 
 }
 
@@ -273,16 +253,11 @@ func EvalDyTSIncrement(
 			log.Infof(ctx, "Read locks acqurired on EvalDyTSIncrement %v", each)
 		}
 	}
-	/*if len(wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTnxRecord(ctx, batch, cArgs, wslocks); err != nil {
-			panic("failed to place soft  locks in Tnx Record")
-		}
-	} else {
-		if log.V(2) {
-			log.Infof(ctx, " No Write locks acqurired on Increment ")
-		}
-	}*/
-	return EvalResult{}, nil
+
+	var result EvalResult
+	result.Slocks.wslocks = &wslocks
+	result.Slocks.rslocks = &rslocks
+	return result, nil
 }
 
 func EvalDyTSDelete(
@@ -309,17 +284,11 @@ func EvalDyTSDelete(
 			log.Infof(ctx, "Read locks acqurired on EvalDyTSDelete %v", each)
 		}
 	}
-	/*if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, batch, cArgs, rslocks, wslocks); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
-		if log.V(2) {
-			log.Infof(ctx, " No Write or Read locks acqurired on Delete ")
-		}
-	}*/
 
-	return EvalResult{}, nil
+	var result EvalResult
+	result.Slocks.wslocks = &wslocks
+	result.Slocks.rslocks = &rslocks
+	return result, nil
 }
 
 func EvalDyTSDeleteRange(
@@ -345,17 +314,11 @@ func EvalDyTSDeleteRange(
 		wslocks = append(wslocks, wslockstmp...)
 		rslocks = append(rslocks, rslockstmp...)
 	}
-	/*if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, batch, cArgs, rslocks, wslocks); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
-		if log.V(2) {
-			log.Infof(ctx, " No Write or Read locks acqurired on DeleteRange ")
-		}
-	}*/
 
-	return EvalResult{}, nil
+	var result EvalResult
+	result.Slocks.wslocks = &wslocks
+	result.Slocks.rslocks = &rslocks
+	return result, nil
 }
 
 func EvalDyTSScan(
@@ -370,7 +333,7 @@ func EvalDyTSScan(
 	h := cArgs.Header
 	reply := resp.(*roachpb.ScanResponse)
 
-	rows, resumeSpan, _, wslocks, err := engine.MVCCScan(ctx, batch, args.Key, args.EndKey,
+	rows, resumeSpan, _, wslocks, _ := engine.MVCCScan(ctx, batch, args.Key, args.EndKey,
 		cArgs.MaxKeys, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
 
 	reply.NumKeys = int64(len(rows))
@@ -382,17 +345,13 @@ func EvalDyTSScan(
 			log.Infof(ctx, "Write locks acqurired on Scan %v", each)
 		}
 	}
-	//if len(wslocks) != 0 {
-	//if err := pushSoftLocksOnReadToTnxRecord(ctx, batch, cArgs, wslocks); err != nil {
-	//	panic("failed to place soft  locks in Tnx Record")
-	//}
-	/*} else {
-		if log.V(2) {
-			log.Infof(ctx, " No Write locks acqurired on Scan ")
-		}
-	}*/
 
-	return EvalResult{}, err
+	var result EvalResult
+	result.Slocks.wslocks = &wslocks
+	if log.V(2) {
+		log.Infof(ctx, "EvalDyTSGet : evalresult locks %v", result.Slocks.wslocks)
+	}
+	return result, nil
 }
 
 func EvalDyTSReverseScan(
@@ -407,7 +366,7 @@ func EvalDyTSReverseScan(
 	h := cArgs.Header
 	reply := resp.(*roachpb.ReverseScanResponse)
 
-	rows, resumeSpan, _, wslocks, err := engine.MVCCReverseScan(ctx, batch, args.Key, args.EndKey,
+	rows, resumeSpan, _, wslocks, _ := engine.MVCCReverseScan(ctx, batch, args.Key, args.EndKey,
 		cArgs.MaxKeys, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
 
 	reply.NumKeys = int64(len(rows))
@@ -419,16 +378,10 @@ func EvalDyTSReverseScan(
 			log.Infof(ctx, "Write locks acqurired on ReverseScan %v", each)
 		}
 	}
-	/*	if len(wslocks) != 0 {
-			if err := pushSoftLocksOnReadToTnxRecord(ctx, batch, cArgs, wslocks); err != nil {
-				panic("failed to place soft  locks in Tnx Record")
-			}
-		} else {
-			if log.V(2) {
-				log.Infof(ctx, " No Write locks acqurired on ReverseScan ")
-			}
-		}*/
-	return EvalResult{}, err
+
+	var result EvalResult
+	result.Slocks.wslocks = &wslocks
+	return result, nil
 }
 
 func EvalDyTSEndTransaction(

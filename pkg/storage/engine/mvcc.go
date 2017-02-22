@@ -1529,7 +1529,7 @@ func mvccScanInternal(
 	}
 
 	var resumeSpan *roachpb.Span
-	intents, _, err := MVCCIterate(ctx, engine, key, endKey, timestamp, consistent, txn, reverse,
+	intents, wslocks, err := MVCCIterate(ctx, engine, key, endKey, timestamp, consistent, txn, reverse,
 		func(kv roachpb.KeyValue) (bool, error) {
 			if int64(len(res)) == max {
 				// Another key was found beyond the max limit.
@@ -1547,7 +1547,7 @@ func mvccScanInternal(
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	return res, resumeSpan, intents, nil, nil
+	return res, resumeSpan, intents, wslocks, nil
 }
 
 // MVCCScan scans the key range [start,end) key up to some maximum number of

@@ -37,12 +37,19 @@ func (s *SoftLockCache) processPlaceReadLockRequest(
 	key roachpb.Key,
 	reverse bool) []roachpb.WriteSoftLock {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest")
+		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest , key %v , inetrnalkey %v", key, ToInternalKey(key))
 	}
 	readlk := roachpb.ReadSoftLock{TransactionMeta: tmeta, Reverse: reverse}
 	s.addToSoftReadLockCache(readlk, key)
 	wlks := s.getAllWriteSoftLocksOnKey(key)
-	return removeMyEntriesFromWriteLocks(ctx, wlks, *tmeta.ID)
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest, wlks %v", wlks)
+	}
+	wlks = removeMyEntriesFromWriteLocks(ctx, wlks, *tmeta.ID)
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest, wlks after %v", wlks)
+	}
+	return wlks
 }
 
 func (s *SoftLockCache) processPlaceWriteLockRequest(
@@ -51,7 +58,7 @@ func (s *SoftLockCache) processPlaceWriteLockRequest(
 	key roachpb.Key,
 	req roachpb.RequestUnion) ([]roachpb.ReadSoftLock, []roachpb.WriteSoftLock) {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : In processPlaceWriteLockRequest")
+		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest , key %v , inetrnalkey %v", key, ToInternalKey(key))
 	}
 	writelk := roachpb.WriteSoftLock{TransactionMeta: tmeta, Request: req}
 	s.addToSoftWriteLockCache(writelk, key)
@@ -67,10 +74,10 @@ func removeMyEntriesFromReadLocks(ctx context.Context, rlks []roachpb.ReadSoftLo
 	newrlks := make([]roachpb.ReadSoftLock, 0)
 	for _, lock := range rlks {
 		if *lock.TransactionMeta.ID != txnID {
-			newrlks = append(rlks, lock)
+			newrlks = append(newrlks, lock)
 		} else {
 			if log.V(2) {
-				log.Infof(ctx, "Removed my own write lock", lock)
+				log.Infof(ctx, "Removed my own read lock from retrived list", lock)
 			}
 		}
 
@@ -81,11 +88,15 @@ func removeMyEntriesFromReadLocks(ctx context.Context, rlks []roachpb.ReadSoftLo
 func removeMyEntriesFromWriteLocks(ctx context.Context, wlks []roachpb.WriteSoftLock, txnID uuid.UUID) []roachpb.WriteSoftLock {
 	newwlks := make([]roachpb.WriteSoftLock, 0)
 	for _, lock := range wlks {
+
 		if *lock.TransactionMeta.ID != txnID {
-			newwlks = append(wlks, lock)
+			if log.V(2) {
+				log.Infof(ctx, "removeMyEntriesFromWriteLocks adding %v ", lock)
+			}
+			newwlks = append(newwlks, lock)
 		} else {
 			if log.V(2) {
-				log.Infof(ctx, "Removed my own write lock", lock)
+				log.Infof(ctx, "Removed my own write lock from retrived list", lock)
 			}
 		}
 
