@@ -192,7 +192,6 @@ func (f *kvFetcher) fetch() error {
 
 	b := &f.batch
 	*b = client.Batch{}
-	b.ClientBatch = true
 	b.Header.MaxSpanRequestKeys = batchSize
 
 	for _, span := range f.spans {

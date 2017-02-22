@@ -404,14 +404,15 @@ func (ds *DistSender) sendRPC(
 	defer tracing.AnnotateTrace()
 
 	var customReplicas ReplicaSlice
-	if roachpb.GetReadType() != roachpb.DefaultReadType && ba.Txn == nil && ba.HasSingleGetOrScan() {
+	if roachpb.GetReadType() != roachpb.DefaultReadType && ba.HasSingleGetOrScan() {
 		switch roachpb.GetReadType() {
 		case roachpb.LocalReadType:
-			// The first element will be local
-			customReplicas = replicas[:1]
+			if index := getLocalReplicaIndex(ds, replicas); index != -1 {
+				customReplicas = append(customReplicas, replicas[index])
+			}
 
 		case roachpb.QuorumReadType, roachpb.StronglyConsistentQuorumReadType:
-			if firstAttempt && !tossCoin(len(replicas)) {
+			if firstAttempt && tossBiasedCoin(len(replicas)) {
 				customReplicas = createQuorumReplicas(ds, ctx, rangeID, replicas)
 			}
 		}
@@ -419,7 +420,7 @@ func (ds *DistSender) sendRPC(
 
 	var reply *roachpb.BatchResponse
 	var err error
-	if customReplicas != nil {
+	if customReplicas != nil && len(customReplicas) > 0 {
 		if log.V(2) {
 			log.Infof(ctx, "sending to custom replicas: %+v\n", customReplicas)
 		}
@@ -434,6 +435,9 @@ func (ds *DistSender) sendRPC(
 			}
 		}
 	} else {
+		if log.V(2) {
+			log.Infof(ctx, "sending to replicas: %+v\n", replicas)
+		}
 		reply, err = ds.sendToReplicas(ctx, rpcOpts, rangeID, replicas, ba, ds.rpcContext)
 	}
 
@@ -443,10 +447,10 @@ func (ds *DistSender) sendRPC(
 	return reply, nil
 }
 
-// tossCoin returns true by probability of 1/total
-func tossCoin(total int) bool {
+// tossCoin returns true by probability of (n-1)/n
+func tossBiasedCoin(n int) bool {
 	rand.Seed(time.Now().UnixNano())
-	return rand.Intn(total) == 0
+	return rand.Intn(n) != 0
 }
 
 // checks if the BatchResponse contains nil RawBytes
@@ -1074,8 +1078,7 @@ func (ds *DistSender) sendPartialBatch(
 			}
 		}
 
-		firstAttempt := r.CurrentAttempt() == 1
-		reply, pErr = ds.sendSingleRange(ctx, truncBA, desc, firstAttempt)
+		reply, pErr = ds.sendSingleRange(ctx, truncBA, desc, r.CurrentAttempt() == 0)
 
 		// If sending succeeded, return immediately.
 		if pErr == nil {
@@ -1346,8 +1349,9 @@ func (ds *DistSender) sendToAllReplicas(
 	args roachpb.BatchRequest,
 	rpcContext *rpc.Context,
 ) (*roachpb.BatchResponse, error) {
-	if args.Txn != nil {
-		panic("sendToAllReplicas only works for requests without txns")
+	if !args.HasSingleGetOrScan() {
+		return nil, roachpb.NewSendError(
+			fmt.Sprint("sendToAllReplicas only supports single Get/Scan/ReverseScan"))
 	}
 
 	if len(replicas) < 1 {

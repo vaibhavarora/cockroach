@@ -676,10 +676,10 @@ func mvccGetInternal(
 	txn *roachpb.Transaction,
 	buf *getBuffer,
 ) (*roachpb.Value, []roachpb.Intent, valueSafety, error) {
-	if !consistent && txn != nil {
-		return nil, nil, safeValue, errors.Errorf(
-			"cannot allow inconsistent reads within a transaction")
-	}
+	// if !consistent && txn != nil {
+	// 	return nil, nil, safeValue, errors.Errorf(
+	// 		"cannot allow inconsistent reads within a transaction")
+	// }
 
 	meta := &buf.meta
 
@@ -692,6 +692,7 @@ func mvccGetInternal(
 		}
 		return value, nil, safeValue, nil
 	}
+	timestampModified := false
 	var ignoredIntents []roachpb.Intent
 	if !consistent && meta.Txn != nil && !timestamp.Less(meta.Timestamp) {
 		// If we're doing inconsistent reads and there's an intent, we
@@ -701,6 +702,7 @@ func mvccGetInternal(
 		ignoredIntents = append(ignoredIntents,
 			roachpb.Intent{Span: roachpb.Span{Key: metaKey.Key}, Status: roachpb.PENDING, Txn: *meta.Txn})
 		timestamp = meta.Timestamp.Prev()
+		timestampModified = true
 	}
 
 	ownIntent := IsIntentOf(*meta, txn) // false if txn == nil
@@ -735,7 +737,7 @@ func mvccGetInternal(
 			}
 			seekKey = seekKey.Next()
 		}
-	} else if txn != nil && timestamp.Less(txn.MaxTimestamp) {
+	} else if txn != nil && timestamp.Less(txn.MaxTimestamp) && !timestampModified {
 		// In this branch, the latest timestamp is ahead, and so the read of an
 		// "old" value in a transactional context at time (timestamp, MaxTimestamp]
 		// occurs, leading to a clock uncertainty error if a version exists in
@@ -1567,9 +1569,9 @@ func MVCCIterate(
 	reverse bool,
 	f func(roachpb.KeyValue) (bool, error),
 ) ([]roachpb.Intent, error) {
-	if !consistent && txn != nil {
-		return nil, errors.Errorf("cannot allow inconsistent reads within a transaction")
-	}
+	// if !consistent && txn != nil {
+	// 	return nil, errors.Errorf("cannot allow inconsistent reads within a transaction")
+	// }
 	if len(endKey) == 0 {
 		return nil, emptyKeyError()
 	}

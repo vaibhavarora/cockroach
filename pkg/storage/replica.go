@@ -1409,10 +1409,10 @@ func (r *Replica) checkBatchRange(ba roachpb.BatchRequest) error {
 // and that EndTransaction only occurs at the very end.
 func (r *Replica) checkBatchRequest(ba roachpb.BatchRequest) error {
 	if ba.IsReadOnly() {
-		if ba.ReadConsistency == roachpb.INCONSISTENT && ba.Txn != nil {
-			// Disallow any inconsistent reads within txns.
-			return errors.Errorf("cannot allow inconsistent reads within a transaction")
-		}
+		// if ba.ReadConsistency == roachpb.INCONSISTENT && ba.Txn != nil {
+		// Disallow any inconsistent reads within txns.
+		// 	return errors.Errorf("cannot allow inconsistent reads within a transaction")
+		// }
 		if ba.ReadConsistency == roachpb.CONSENSUS {
 			return errors.Errorf("consensus reads not implemented")
 		}

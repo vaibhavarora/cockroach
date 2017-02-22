@@ -65,8 +65,6 @@ type Batch struct {
 	rowsBuf       []KeyValue
 	rowsStaticBuf [8]KeyValue
 	rowsStaticIdx int
-	// Set when Batch created for client statements
-	ClientBatch bool
 }
 
 // RawResponse returns the BatchResponse which was the result of a successful
