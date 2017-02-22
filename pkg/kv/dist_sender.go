@@ -1409,13 +1409,24 @@ func (ds *DistSender) sendToAllReplicas(
 
 				if call.Reply.Error == nil {
 					latestResponse = selectLatestValues(ctx, args, latestResponse, call.Reply)
+				} else if !ds.handlePerReplicaError(ctx, transport, rangeID, call.Reply.Error) {
+					// The error received is not specific to this replica, so we
+					// should return it instead of trying other replicas.
+					log.ErrEventf(ctx, "application error: %s", call.Reply.Error)
+					err = call.Reply.Error
 				} else {
+					// Extract the detail so it can be included in the error message
 					log.ErrEventf(ctx, "application error: %s", call.Reply.Error)
 					err = call.Reply.Error.GoError()
-					return nil, err
 				}
 			} else {
-				err = roachpb.NewSendError(fmt.Sprintf("sending to replica failed; error: %v", err))
+				log.ErrEventf(ctx, "RPC error: %s", err)
+			}
+
+			if err != nil {
+				err = roachpb.NewSendError(
+					fmt.Sprintf("sendToAllReplicas failed; error: %v", err),
+				)
 				log.ErrEvent(ctx, err.Error())
 				return nil, err
 			}
