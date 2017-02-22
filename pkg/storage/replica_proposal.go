@@ -176,12 +176,6 @@ type EvalResult struct {
 	Local      LocalEvalResult
 	Replicated storagebase.ReplicatedEvalResult
 	WriteBatch *storagebase.WriteBatch
-	Slocks     SoftLocks
-}
-
-type SoftLocks struct {
-	rslocks *[]roachpb.ReadSoftLock
-	wslocks *[]roachpb.WriteSoftLock
 }
 
 // coalesceBool ORs rhs into lhs and then zeroes rhs.

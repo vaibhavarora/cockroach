@@ -14,7 +14,7 @@ import (
 
 type DyTSValidationRequest struct {
 	//EvalDyTSCommand func(context.Context, roachpb.Header, roachpb.Request)
-	EvalDyTSValidationRequest func(context.Context, *Store, roachpb.Header, EvalResult) error
+	EvalDyTSValidationRequest func(context.Context, *Store, roachpb.Header, SoftLocks) error
 }
 
 var DyTSValidationRequests = map[roachpb.Method]DyTSValidationRequest{
@@ -41,7 +41,7 @@ func (r *Replica) ApplyDyTSValidation(
 	ctx context.Context,
 	args roachpb.Request,
 	h roachpb.Header,
-	result EvalResult) (err error) {
+	slocks SoftLocks) (err error) {
 
 	if _, ok := args.(*roachpb.NoopRequest); ok {
 		return nil
@@ -50,18 +50,9 @@ func (r *Replica) ApplyDyTSValidation(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In applyDyTSValidation")
 	}
-	if result.Slocks.wslocks == nil && result.Slocks.rslocks == nil {
-		if log.V(2) {
-			log.Infof(ctx, "Ravi : No read or write locks, returning")
-		}
-		return nil
-	}
-	if cmd, ok := DyTSValidationRequests[args.Method()]; ok {
 
-		if log.V(2) {
-			log.Infof(ctx, "Ravi : executing request %v with evalresults %v ", args.Method(), result)
-		}
-		err = cmd.EvalDyTSValidationRequest(ctx, r.store, h, result)
+	if cmd, ok := DyTSValidationRequests[args.Method()]; ok {
+		err = cmd.EvalDyTSValidationRequest(ctx, r.store, h, slocks)
 	} else {
 		err = errors.Errorf("unrecognized command %s", args.Method())
 		return err
@@ -80,11 +71,9 @@ func EvalDyTSValidationRequestGet(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 	//pushSoftLocksOnReadToTnxRecord(ctx, s, h, *result.Slocks.wslocks)
-	if log.V(2) {
-		log.Infof(ctx, "got read locks %v", *result.Slocks.rslocks)
-	}
+
 	//if len(wslocks) != 0 {
 	//if err := pushSoftLocksOnReadToTnxRecord(ctx, batch, cArgs, wslocks); err != nil {
 	//	panic("failed to place soft  locks in Tnx Record")
@@ -101,10 +90,8 @@ func EvalDyTSValidationRequestPut(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
-	if log.V(2) {
-		log.Infof(ctx, "got read locks %v", *result.Slocks.rslocks)
-	}
+	slocks SoftLocks) error {
+
 	/*if len(wslocks) != 0 || len(rslocks) != 0 {
 		if err := pushSoftLocksOnWriteToTnxRecord(ctx, batch, cArgs, rslocks, wslocks); err != nil {
 			panic("failed to place locks in transaction record")
@@ -121,7 +108,7 @@ func EvalDyTSValidationRequestConditionalPut(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 
 	return nil
 }
@@ -129,7 +116,7 @@ func EvalDyTSValidationRequestInitPut(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 
 	return nil
 }
@@ -137,7 +124,7 @@ func EvalDyTSValidationRequestIncrement(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 
 	return nil
 }
@@ -145,7 +132,7 @@ func EvalDyTSValidationRequestDelete(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 
 	return nil
 }
@@ -153,7 +140,7 @@ func EvalDyTSValidationRequestDeleteRange(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 
 	return nil
 }
@@ -161,7 +148,7 @@ func EvalDyTSValidationRequestScan(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 
 	return nil
 }
@@ -169,7 +156,7 @@ func EvalDyTSValidationRequestReverseScan(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 
 	return nil
 }
@@ -178,7 +165,7 @@ func EvalDyTSValidationRequestEndTransaction(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 
 	return nil
 }

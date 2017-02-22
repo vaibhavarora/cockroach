@@ -109,6 +109,12 @@ const (
 	raftInitialLogTerm  = 5
 )
 
+// Soft locks as part of Dynamic Timestamp Processing requests
+type SoftLocks struct {
+	rslocks []roachpb.ReadSoftLock
+	wslocks []roachpb.WriteSoftLock
+}
+
 // consultsTimestampCacheMethods specifies the set of methods which
 // consult the timestamp cache. This syntax creates a sparse array
 // with maximum index equal to the value of the final Method. Unused
@@ -1869,6 +1875,7 @@ func (r *Replica) addReadOnlyCmd(
 	}
 	var result EvalResult
 	var endCmds *endCmds
+	var slocks SoftLocks
 
 	if !ba.IsNonKV() {
 		// Add the read to the command queue to gate subsequent
@@ -1896,7 +1903,7 @@ func (r *Replica) addReadOnlyCmd(
 				log.Infof(ctx, "Out of command queue pErr %v", pErr)
 			}
 			if pErr == nil {
-				r.submitValidationProcessing(ctx, ba, result)
+				r.submitValidationProcessing(ctx, ba, slocks)
 			}
 		}
 	}()
@@ -1913,7 +1920,7 @@ func (r *Replica) addReadOnlyCmd(
 	// that holding readMu throughout is important to avoid reads from the
 	// "wrong" key range being served after the range has been split.
 
-	br, result, pErr = r.executeBatch(ctx, storagebase.CmdIDKey(""), r.store.Engine(), nil, ba)
+	br, result, slocks, pErr = r.executeBatch(ctx, storagebase.CmdIDKey(""), r.store.Engine(), nil, ba)
 
 	if pErr == nil && ba.Txn != nil {
 		r.assert5725(ba)
@@ -1940,12 +1947,12 @@ func (r *Replica) addReadOnlyCmd(
 func (r *Replica) submitValidationProcessing(
 	ctx context.Context,
 	ba roachpb.BatchRequest,
-	result EvalResult) error {
+	slocks SoftLocks) error {
 
 	for _, union := range ba.Requests {
 		args := union.GetInner()
 		if ba.Txn != nil && consultsDyTSValidationRequests(args) {
-			return r.ApplyDyTSValidation(ctx, args, ba.Header, result)
+			return r.ApplyDyTSValidation(ctx, args, ba.Header, slocks)
 		}
 	}
 	return nil
@@ -3951,7 +3958,7 @@ func (r *Replica) executeWriteBatch(
 	// If not transactional or there are indications that the batch's txn
 	// will require restart or retry, execute as normal.
 	if r.store.TestingKnobs().DisableOnePhaseCommits || !isOnePhaseCommit(ba) {
-		br, result, pErr := r.executeBatch(ctx, idKey, batch, &ms, ba)
+		br, result, _, pErr := r.executeBatch(ctx, idKey, batch, &ms, ba)
 		return batch, ms, br, result, pErr
 	}
 
@@ -3961,7 +3968,7 @@ func (r *Replica) executeWriteBatch(
 	strippedBa.Requests = ba.Requests[1 : len(ba.Requests)-1] // strip begin/end txn reqs
 
 	// If all writes occurred at the intended timestamp, we've succeeded on the fast path.
-	br, result, pErr := r.executeBatch(ctx, idKey, batch, &ms, strippedBa)
+	br, result, _, pErr := r.executeBatch(ctx, idKey, batch, &ms, strippedBa)
 	if pErr == nil && ba.Timestamp == br.Timestamp {
 		clonedTxn := ba.Txn.Clone()
 		clonedTxn.Writing = true
@@ -3997,7 +4004,7 @@ func (r *Replica) executeWriteBatch(
 	batch.Close()
 	batch = r.store.Engine().NewBatch()
 	ms = enginepb.MVCCStats{}
-	br, result, pErr = r.executeBatch(ctx, idKey, batch, &ms, ba)
+	br, result, _, pErr = r.executeBatch(ctx, idKey, batch, &ms, ba)
 	return batch, ms, br, result, pErr
 }
 
@@ -4117,7 +4124,7 @@ func (r *Replica) executeBatch(
 	batch engine.ReadWriter,
 	ms *enginepb.MVCCStats,
 	ba roachpb.BatchRequest,
-) (*roachpb.BatchResponse, EvalResult, *roachpb.Error) {
+) (*roachpb.BatchResponse, EvalResult, SoftLocks, *roachpb.Error) {
 	br := ba.CreateReply()
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : At execute batch fn arguments idkey : %v, ba : %v ", idKey, ba)
@@ -4129,7 +4136,7 @@ func (r *Replica) executeBatch(
 	threshold := r.mu.state.GCThreshold
 	r.mu.Unlock()
 	if !threshold.Less(ba.Timestamp) {
-		return nil, EvalResult{}, roachpb.NewError(fmt.Errorf("batch timestamp %v must be after replica GC threshold %v", ba.Timestamp, threshold))
+		return nil, EvalResult{}, SoftLocks{}, roachpb.NewError(fmt.Errorf("batch timestamp %v must be after replica GC threshold %v", ba.Timestamp, threshold))
 	}
 
 	maxKeys := int64(math.MaxInt64)
@@ -4145,7 +4152,7 @@ func (r *Replica) executeBatch(
 	}
 
 	if err := r.checkBatchRange(ba); err != nil {
-		return nil, EvalResult{}, roachpb.NewErrorWithTxn(err, ba.Header.Txn)
+		return nil, EvalResult{}, SoftLocks{}, roachpb.NewErrorWithTxn(err, ba.Header.Txn)
 	}
 
 	// Create a shallow clone of the transaction. We only modify a few
@@ -4157,6 +4164,7 @@ func (r *Replica) executeBatch(
 	}
 
 	var result EvalResult
+	var slocks SoftLocks
 	for index, union := range ba.Requests {
 		// Execute the command.
 		args := union.GetInner()
@@ -4169,19 +4177,20 @@ func (r *Replica) executeBatch(
 		reply := br.Responses[index].GetInner()
 		var curResult EvalResult
 		var pErr *roachpb.Error
+
 		if consultsDyTSValidatorCommands(args) {
 			curResult, pErr = r.executeDyTSValidatorCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 		} else {
 			//shadowing for now
 
 			if ba.Txn != nil && consultsDyTSCommands(args) {
-				curResult, pErr = r.executeDyTSCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
+				curResult, slocks, pErr = r.executeDyTSCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 			}
 			if log.V(2) {
 				log.Infof(ctx, "Ravi :before replica command : reply %v", reply)
 			}
 			if !consultsBlockCommands(args) {
-				curResult, pErr = r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
+				curResult, _, pErr = r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 			}
 
 		}
@@ -4212,7 +4221,7 @@ func (r *Replica) executeBatch(
 					// a txn, intents from earlier commands in the same batch
 					// won't return a WriteTooOldError.
 					if ba.Txn != nil {
-						return nil, result, pErr
+						return nil, result, slocks, pErr
 					}
 					// If not in a txn, need to make sure we don't propagate the
 					// error unless there are no earlier commands in the batch
@@ -4227,7 +4236,7 @@ func (r *Replica) executeBatch(
 						}
 					}
 					if !overlap {
-						return nil, result, pErr
+						return nil, result, slocks, pErr
 					}
 				}
 				// On WriteTooOldError, we've written a new value or an intent
@@ -4246,7 +4255,7 @@ func (r *Replica) executeBatch(
 			default:
 				// Initialize the error index.
 				pErr.SetErrorIndex(int32(index))
-				return nil, result, pErr
+				return nil, result, slocks, pErr
 			}
 		}
 
@@ -4283,7 +4292,7 @@ func (r *Replica) executeBatch(
 		br.Timestamp.Forward(ba.Timestamp)
 	}
 
-	return br, result, nil
+	return br, result, slocks, nil
 }
 
 // getLeaseForGossip tries to obtain a range lease. Only one of the replicas
@@ -4475,7 +4484,7 @@ func (r *Replica) maybeGossipNodeLiveness(ctx context.Context, span roachpb.Span
 	ba.Timestamp = r.store.Clock().Now()
 	ba.Add(&roachpb.ScanRequest{Span: span})
 	// Call executeBatch instead of Send to avoid command queue reentrance.
-	br, result, pErr :=
+	br, result, _, pErr :=
 		r.executeBatch(ctx, storagebase.CmdIDKey(""), r.store.Engine(), nil, ba)
 	if pErr != nil {
 		return errors.Wrapf(pErr.GoError(), "couldn't scan node liveness records in span %s", span)
@@ -4558,7 +4567,7 @@ func (r *Replica) loadSystemConfigSpan() ([]roachpb.KeyValue, []byte, error) {
 	ba.Timestamp = r.store.Clock().Now()
 	ba.Add(&roachpb.ScanRequest{Span: keys.SystemConfigSpan})
 	// Call executeBatch instead of Send to avoid command queue reentrance.
-	br, result, pErr := r.executeBatch(
+	br, result, _, pErr := r.executeBatch(
 		ctx, storagebase.CmdIDKey(""), r.store.Engine(), nil, ba,
 	)
 	if pErr != nil {
