@@ -1413,7 +1413,7 @@ func (ds *DistSender) sendToAllReplicas(
 					// The error received is not specific to this replica, so we
 					// should return it instead of trying other replicas.
 					log.ErrEventf(ctx, "application error: %s", call.Reply.Error)
-					err = call.Reply.Error
+					err = roachpb.NewSendError(call.Reply.Error.Message)
 				} else {
 					// Extract the detail so it can be included in the error message
 					log.ErrEventf(ctx, "application error: %s", call.Reply.Error)
