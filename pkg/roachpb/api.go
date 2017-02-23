@@ -118,6 +118,10 @@ func IsRange(args Request) bool {
 	return (args.flags() & isRange) != 0
 }
 
+func IsReverse(args Request) bool {
+	return (args.flags() & isReverse) != 0
+}
+
 // Request is an interface for RPC requests.
 type Request interface {
 	proto.Message

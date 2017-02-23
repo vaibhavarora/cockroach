@@ -2244,6 +2244,72 @@ func MVCCPlaceReadSoftLock(
 
 }
 
+// This will remove the entry in the soft lock cache and gets the lock
+func MVCCGetWriteSoftLock(
+	ctx context.Context,
+	engine ReadWriter,
+	h roachpb.Header,
+	spans []roachpb.Span,
+	slcache *SoftLockCache,
+) []roachpb.WriteSoftLock {
+	var wslocks []roachpb.WriteSoftLock
+	for _, span := range spans {
+		if len(span.EndKey) == 0 {
+			// getting lock from cache
+			wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
+			// removing the entry from cache
+			slcache.removeFromWriteLockCache(wslock, span.Key)
+			wslocks = append(wslocks, wslock)
+		} else {
+			wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
+			reverse := roachpb.IsReverse(wslock.Request.GetInner())
+
+			keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, h, reverse)
+
+			for _, key := range keys {
+				// getting lock from cache
+				wslock := slcache.getWriteSoftLock(key, *h.Txn.ID)
+				// removing the entry from cache
+				slcache.removeFromWriteLockCache(wslock, span.Key)
+				wslocks = append(wslocks, wslock)
+			}
+		}
+	}
+	return wslocks
+}
+
+// This will remove the entry in the soft lock cache and gets the lock
+func MVCCGetReadSoftLock(
+	ctx context.Context,
+	engine ReadWriter,
+	h roachpb.Header,
+	spans []roachpb.Span,
+	slcache *SoftLockCache,
+) []roachpb.ReadSoftLock {
+	var rslocks []roachpb.ReadSoftLock
+	for _, span := range spans {
+		if len(span.EndKey) == 0 {
+			// getting lock from cache
+			rslock := slcache.getReadSoftLock(span.Key, *h.Txn.ID)
+			// removing the entry from cache
+			slcache.removeFromReadLockCache(rslock, span.Key)
+			rslocks = append(rslocks, rslock)
+		} else {
+			rslock := slcache.getReadSoftLock(span.Key, *h.Txn.ID)
+			keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, h, rslock.Reverse)
+
+			for _, key := range keys {
+				// getting lock from cache
+				rslock := slcache.getReadSoftLock(key, *h.Txn.ID)
+				// removing the entry from cache
+				slcache.removeFromReadLockCache(rslock, span.Key)
+				rslocks = append(rslocks, rslock)
+			}
+		}
+	}
+	return rslocks
+}
+
 func MVCCgetKeysUsingIter(
 	ctx context.Context,
 	start, end roachpb.Key,

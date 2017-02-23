@@ -198,7 +198,7 @@ func (s *SoftLockCache) removeFromWriteLockCache(writelk roachpb.WriteSoftLock, 
 
 func (s *SoftLockCache) getWriteSoftLock(
 	key roachpb.Key,
-	tmeta enginepb.TxnMeta) (writelk roachpb.WriteSoftLock) {
+	txnID uuid.UUID) (writelk roachpb.WriteSoftLock) {
 	internalkey := ToInternalKey(key)
 
 	s.WriteMu.Lock()
@@ -208,7 +208,7 @@ func (s *SoftLockCache) getWriteSoftLock(
 	position := -1
 	if ok {
 		for index, lock := range Q.Queue {
-			if *lock.TransactionMeta.ID == *tmeta.ID {
+			if *lock.TransactionMeta.ID == txnID {
 				position = index
 			}
 		}
@@ -221,7 +221,7 @@ func (s *SoftLockCache) getWriteSoftLock(
 
 func (s *SoftLockCache) getReadSoftLock(
 	key roachpb.Key,
-	tmeta enginepb.TxnMeta) (readlk roachpb.ReadSoftLock) {
+	txnID uuid.UUID) (readlk roachpb.ReadSoftLock) {
 	internalkey := ToInternalKey(key)
 
 	s.ReadMu.Lock()
@@ -231,7 +231,7 @@ func (s *SoftLockCache) getReadSoftLock(
 	position := -1
 	if ok {
 		for index, lock := range Q.Queue {
-			if *lock.TransactionMeta.ID == *tmeta.ID {
+			if *lock.TransactionMeta.ID == txnID {
 				position = index
 			}
 		}

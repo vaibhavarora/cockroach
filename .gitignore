@@ -28,4 +28,7 @@ benchmark/contention/contention
 benchmark/concurrency/concurrency
 benchmark/clearDB/clearDB
 /bin/
+mytesting/gotests/softlockcache/softlockcache
+mytesting/gotests/misc/misc
+mytesting/gotests/trnxlck/trnxlck
 mytesting/history_exec/history_exec

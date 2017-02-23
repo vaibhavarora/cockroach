@@ -1,13 +1,13 @@
 package storage
 
 import (
-	"fmt"
-	"github.com/cockroachdb/cockroach/pkg/keys"
+	//"fmt"
+	//"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	//"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
@@ -382,7 +382,6 @@ func EvalDyTSEndTransaction(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, SoftLocks, error) {
-	//removes all the read and write locks placed by the transaction
 
 	if log.V(2) {
 		log.Infof(ctx, "In EvalDyTSEndTransaction")
@@ -392,48 +391,83 @@ func EvalDyTSEndTransaction(
 	args := cArgs.Args.(*roachpb.EndTransactionRequest)
 	//h := cArgs.Header
 	//ms := cArgs.Stats
-	reply := resp.(*roachpb.EndTransactionResponse)
+	//reply := resp.(*roachpb.EndTransactionResponse)
 
-	key := keys.TransactionKey(cArgs.Header.Txn.Key, *cArgs.Header.Txn.ID)
+	// split the read lock spans into local and external
+	rlocalspans, rexternalspans := cArgs.Repl.getSpans(ctx, batch, *args, args.ReadSpans)
 
-	var existingTxn roachpb.Transaction
-	if ok, err := engine.MVCCGetProto(
-		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &existingTxn,
-	); err != nil {
-		return EvalResult{}, SoftLocks{}, err
-	} else if !ok {
-		return EvalResult{}, SoftLocks{}, roachpb.NewTransactionStatusError("does not exist")
-	}
-	reply.Txn = &existingTxn
+	// split  the write lock spans into local and external
+	wlocalspans, wexternalspans := cArgs.Repl.getSpans(ctx, batch, *args, args.IntentSpans)
+
+	//remove and get all local read and write locks placed by the transaction
+	rslocks := engine.MVCCGetReadSoftLock(ctx, batch, cArgs.Header, rlocalspans, cArgs.Repl.slockcache)
+	wslocks := engine.MVCCGetWriteSoftLock(ctx, batch, cArgs.Header, wlocalspans, cArgs.Repl.slockcache)
+
+	var slocks SoftLocks
+	slocks.rslocks = append(slocks.rslocks, rslocks...)
+	slocks.wslocks = append(slocks.wslocks, wslocks...)
+	slocks.rextspans = append(slocks.rextspans, rexternalspans...)
+	slocks.wextspans = append(slocks.wextspans, wexternalspans...)
+
+	return EvalResult{}, slocks, nil
+}
+
+func (r *Replica) getSpans(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	args roachpb.EndTransactionRequest,
+	Spans []roachpb.Span,
+) ([]roachpb.Span, []roachpb.Span) {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi :evalEndTransaction : reply.Txn %v", reply.Txn)
+		log.Infof(ctx, "Ravi :getSpans : begin ")
 	}
-	switch reply.Txn.Status {
-	case roachpb.COMMITTED:
-		if log.V(2) {
-			log.Infof(ctx, "Ravi :evalEndTransaction : case commited")
-		}
-		return EvalResult{}, SoftLocks{}, roachpb.NewTransactionStatusError("already committed")
-
-	case roachpb.ABORTED:
-		if log.V(2) {
-			log.Infof(ctx, "Ravi :evalEndTransaction : case commited")
-		}
-		return EvalResult{}, SoftLocks{}, roachpb.NewTransactionStatusError("already Aborted")
-	case roachpb.PENDING:
-		// remove all the soft locks of the transaction locally
-		if args.Commit {
-			reply.Txn.Status = roachpb.COMMITTED
-		} else {
-			reply.Txn.Status = roachpb.ABORTED
-		}
-		//validateTimeStamp(ctx, batch, cArgs, reply.Txn)
-
-	default:
-		return EvalResult{}, SoftLocks{}, roachpb.NewTransactionStatusError(
-			fmt.Sprintf("bad txn status: %s", reply.Txn),
-		)
+	desc := r.Desc()
+	//var preMergeDesc *roachpb.RangeDescriptor
+	if mergeTrigger := args.InternalCommitTrigger.GetMergeTrigger(); mergeTrigger != nil {
+		// If this is a merge, then use the post-merge descriptor to determine
+		// which intents are local (note that for a split, we want to use the
+		// pre-split one instead because it's larger).
+		//preMergeDesc = desc
+		desc = &mergeTrigger.LeftDesc
 	}
-	//	return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, reply.Txn)
-	return EvalResult{}, SoftLocks{}, nil
+
+	iterAndBuf := engine.GetIterAndBuf(batch)
+	defer iterAndBuf.Cleanup()
+
+	var externalSoftLocks []roachpb.Span
+	var localSoftLocks []roachpb.Span
+	for _, span := range Spans {
+
+		if len(span.EndKey) == 0 {
+			// For single-key intents, do a KeyAddress-aware check of
+			// whether it's contained in our Range.
+			if !containsKey(*desc, span.Key) {
+				externalSoftLocks = append(externalSoftLocks, span)
+			} else {
+				localSoftLocks = append(localSoftLocks, span)
+			}
+			/*resolveMS := ms
+			if preMergeDesc != nil && !containsKey(*preMergeDesc, span.Key) {
+				// If this transaction included a merge and the intents
+				// are from the subsumed range, ignore the intent resolution
+				// stats, as they will already be accounted for during the
+				// merge trigger.
+				resolveMS = nil
+			}*/
+
+		}
+		// For intent ranges, cut into parts inside and outside our key
+		// range. Resolve locally inside, delegate the rest. In particular,
+		// an intent range for range-local data is correctly considered local.
+		inSpan, outSpans := intersectSpan(span, *desc)
+		for _, span := range outSpans {
+			externalSoftLocks = append(externalSoftLocks, span)
+		}
+		if inSpan != nil {
+			localSoftLocks = append(localSoftLocks, *inSpan)
+		}
+
+	}
+
+	return localSoftLocks, externalSoftLocks
 }
