@@ -340,6 +340,8 @@ type Replica struct {
 
 	slockcache *engine.SoftLockCache
 
+	tnxlockcache *TransactionRecordLockCache
+
 	cmdQMu struct {
 		// Protects all fields in the cmdQMu struct.
 		//
@@ -610,6 +612,7 @@ func newReplica(rangeID roachpb.RangeID, store *Store) *Replica {
 		store:          store,
 		abortCache:     NewAbortCache(rangeID),
 		slockcache:     engine.NewSoftLockCache(),
+		tnxlockcache:   NewTransactionRecordLockCache(),
 	}
 	// Init rangeStr with the range ID.
 	r.rangeStr.store(0, &roachpb.RangeDescriptor{RangeID: rangeID})
@@ -1905,7 +1908,7 @@ func (r *Replica) addReadOnlyCmd(
 				log.Infof(ctx, "Out of command queue pErr %v", pErr)
 			}
 			if pErr == nil {
-				r.submitValidationProcessing(ctx, ba, r.store.Engine(), slocks)
+				r.submitValidationProcessing(ctx, ba, r.store.Engine(), r.tnxlockcache, slocks)
 			}
 		}
 	}()
@@ -1950,12 +1953,13 @@ func (r *Replica) submitValidationProcessing(
 	ctx context.Context,
 	ba roachpb.BatchRequest,
 	batch engine.ReadWriter,
+	tnxcache *TransactionRecordLockCache,
 	slocks SoftLocks) error {
 
 	for _, union := range ba.Requests {
 		args := union.GetInner()
 		if ba.Txn != nil && consultsDyTSValidationRequests(args) {
-			return r.ApplyDyTSValidation(ctx, args, batch, ba.Header, slocks)
+			return r.ApplyDyTSValidation(ctx, args, batch, tnxcache, ba.Header, slocks)
 		}
 	}
 	return nil
