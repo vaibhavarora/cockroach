@@ -2244,7 +2244,7 @@ func MVCCPlaceReadSoftLock(
 
 }
 
-// This will remove the entry in the soft lock cache and gets the lock
+// This will get all write soft lock of the transaction
 func MVCCGetWriteSoftLock(
 	ctx context.Context,
 	engine ReadWriter,
@@ -2258,7 +2258,7 @@ func MVCCGetWriteSoftLock(
 			// getting lock from cache
 			wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
 			// removing the entry from cache
-			slcache.removeFromWriteLockCache(wslock, span.Key)
+			//slcache.removeFromWriteLockCache(wslock, span.Key)
 			wslocks = append(wslocks, wslock)
 		} else {
 			wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
@@ -2270,7 +2270,7 @@ func MVCCGetWriteSoftLock(
 				// getting lock from cache
 				wslock := slcache.getWriteSoftLock(key, *h.Txn.ID)
 				// removing the entry from cache
-				slcache.removeFromWriteLockCache(wslock, span.Key)
+				//slcache.removeFromWriteLockCache(wslock, span.Key)
 				wslocks = append(wslocks, wslock)
 			}
 		}
@@ -2279,21 +2279,21 @@ func MVCCGetWriteSoftLock(
 }
 
 // This will remove the entry in the soft lock cache and gets the lock
-func MVCCGetReadSoftLock(
+func MVCCRemoveReadSoftLock(
 	ctx context.Context,
 	engine ReadWriter,
 	h roachpb.Header,
 	spans []roachpb.Span,
 	slcache *SoftLockCache,
-) []roachpb.ReadSoftLock {
-	var rslocks []roachpb.ReadSoftLock
+) error {
+
 	for _, span := range spans {
 		if len(span.EndKey) == 0 {
 			// getting lock from cache
 			rslock := slcache.getReadSoftLock(span.Key, *h.Txn.ID)
 			// removing the entry from cache
 			slcache.removeFromReadLockCache(rslock, span.Key)
-			rslocks = append(rslocks, rslock)
+
 		} else {
 			rslock := slcache.getReadSoftLock(span.Key, *h.Txn.ID)
 			keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, h, rslock.Reverse)
@@ -2303,11 +2303,11 @@ func MVCCGetReadSoftLock(
 				rslock := slcache.getReadSoftLock(key, *h.Txn.ID)
 				// removing the entry from cache
 				slcache.removeFromReadLockCache(rslock, span.Key)
-				rslocks = append(rslocks, rslock)
+
 			}
 		}
 	}
-	return rslocks
+	return nil
 }
 
 func MVCCgetKeysUsingIter(

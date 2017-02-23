@@ -399,13 +399,13 @@ func EvalDyTSEndTransaction(
 	// split  the write lock spans into local and external
 	wlocalspans, wexternalspans := cArgs.Repl.getSpans(ctx, batch, *args, args.IntentSpans)
 
-	//remove and get all local read and write locks placed by the transaction
-	rslocks := engine.MVCCGetReadSoftLock(ctx, batch, cArgs.Header, rlocalspans, cArgs.Repl.slockcache)
+	// get all local write soft locks placed by the transaction
 	wslocks := engine.MVCCGetWriteSoftLock(ctx, batch, cArgs.Header, wlocalspans, cArgs.Repl.slockcache)
 
 	var slocks SoftLocks
-	slocks.rslocks = append(slocks.rslocks, rslocks...)
+	//slocks.rslocks = append(slocks.rslocks, rslocks...)
 	slocks.wslocks = append(slocks.wslocks, wslocks...)
+	slocks.rlocalspans = append(slocks.rlocalspans, rlocalspans...)
 	slocks.rextspans = append(slocks.rextspans, rexternalspans...)
 	slocks.wextspans = append(slocks.wextspans, wexternalspans...)
 

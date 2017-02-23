@@ -8,6 +8,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
@@ -40,9 +41,9 @@ func (r *Replica) ApplyDyTSValidation(
 	ctx context.Context,
 	args roachpb.Request,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) (err error) {
+	slocks SoftLocks,
+) (err error) {
 
 	if _, ok := args.(*roachpb.NoopRequest); ok {
 		return nil
@@ -53,7 +54,7 @@ func (r *Replica) ApplyDyTSValidation(
 	}
 
 	if cmd, ok := DyTSValidationRequests[args.Method()]; ok {
-		err = cmd.EvalDyTSValidationRequest(ctx, r.store, batch, tnxcache, h, slocks)
+		err = cmd.EvalDyTSValidationRequest(ctx, r.store, batch, r.txnlockcache, h, slocks)
 	} else {
 		err = errors.Errorf("unrecognized command %s", args.Method())
 		return err
@@ -72,16 +73,17 @@ func EvalDyTSValidationRequestGet(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestGet")
 	}
 	if len(slocks.wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTnxRecord(ctx, s, batch, tnxcache, h, slocks.wslocks); err != nil {
-			panic("failed to place soft  locks in Tnx Record")
+		if err := pushSoftLocksOnReadToTxnRecord(ctx, s, batch, txncache, h, slocks.wslocks); err != nil {
+			panic("failed to place soft  locks in txn Record")
 		}
 	} else {
 		if log.V(2) {
@@ -95,14 +97,15 @@ func EvalDyTSValidationRequestPut(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestPut")
 	}
 	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, s, batch, tnxcache, h, slocks.rslocks, slocks.wslocks); err != nil {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -117,14 +120,15 @@ func EvalDyTSValidationRequestConditionalPut(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestConditionalPut")
 	}
 	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, s, batch, tnxcache, h, slocks.rslocks, slocks.wslocks); err != nil {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -138,14 +142,15 @@ func EvalDyTSValidationRequestInitPut(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestInitPut")
 	}
 	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, s, batch, tnxcache, h, slocks.rslocks, slocks.wslocks); err != nil {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -159,14 +164,15 @@ func EvalDyTSValidationRequestIncrement(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestIncrement")
 	}
 	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, s, batch, tnxcache, h, slocks.rslocks, slocks.wslocks); err != nil {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -180,14 +186,15 @@ func EvalDyTSValidationRequestDelete(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestDelete")
 	}
 	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, s, batch, tnxcache, h, slocks.rslocks, slocks.wslocks); err != nil {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -201,14 +208,15 @@ func EvalDyTSValidationRequestDeleteRange(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestDeleteRange")
 	}
 	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTnxRecord(ctx, s, batch, tnxcache, h, slocks.rslocks, slocks.wslocks); err != nil {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -222,15 +230,16 @@ func EvalDyTSValidationRequestScan(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestScan")
 	}
 	if len(slocks.wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTnxRecord(ctx, s, batch, tnxcache, h, slocks.wslocks); err != nil {
-			panic("failed to place soft  locks in Tnx Record")
+		if err := pushSoftLocksOnReadToTxnRecord(ctx, s, batch, txncache, h, slocks.wslocks); err != nil {
+			panic("failed to place soft  locks in txn Record")
 		}
 	} else {
 		if log.V(2) {
@@ -243,15 +252,16 @@ func EvalDyTSValidationRequestReverseScan(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestReverseScan")
 	}
 	if len(slocks.wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTnxRecord(ctx, s, batch, tnxcache, h, slocks.wslocks); err != nil {
-			panic("failed to place soft  locks in Tnx Record")
+		if err := pushSoftLocksOnReadToTxnRecord(ctx, s, batch, txncache, h, slocks.wslocks); err != nil {
+			panic("failed to place soft  locks in txn Record")
 		}
 	} else {
 		if log.V(2) {
@@ -265,13 +275,16 @@ func EvalDyTSValidationRequestEndTransaction(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	slocks SoftLocks) error {
+	slocks SoftLocks,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestEndTransaction")
 	}
-
+	if err := executeValidator(ctx, s, batch, txncache, h); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -279,8 +292,10 @@ func transactionRecordExists(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	h roachpb.Header) bool {
-	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
+	tkey roachpb.Key,
+	txnid uuid.UUID,
+) bool {
+	key := keys.TransactionKey(tkey, txnid)
 
 	var txnRecord roachpb.Transaction
 
@@ -298,31 +313,57 @@ func updateTransactionRecord(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	rArgs RpcArgs) error {
+	rArgs RpcArgs,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In updateTransactionrecord")
 	}
 
-	if !transactionRecordExists(ctx, s, batch, h) {
+	if !transactionRecordExists(ctx, s, batch, h.Txn.Key, *h.Txn.ID) {
 		// Transaction is in different range so making a RPC call
 		return sendUpdateTransactionRecordRPC(ctx, s, h, rArgs)
 	}
 
-	return updateLocalTransactionRecord(ctx, s, tnxcache, h, rArgs)
+	return updateLocalTransactionRecord(ctx, batch, txncache, h, rArgs)
 
 }
 
 func updateLocalTransactionRecord(
 	ctx context.Context,
-	s *Store,
-	tnxcache *TransactionRecordLockCache,
+	batch engine.ReadWriter,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	rArgs RpcArgs) error {
+	rArgs RpcArgs,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In updateLocalTransactionRecord")
 	}
+	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
+
+	txncache.getAccess(key)
+	defer txncache.releaseAccess(key)
+
+	var txnRecord roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
+	); err != nil {
+		return err
+	} else if ok {
+		// Update the Transaction record
+		txnRecord.DynamicTimestampLowerBound.Forward(rArgs.lowerbound)
+		txnRecord.DynamicTimestampUpperBound.Backward(rArgs.upperbound)
+		for _, txn := range rArgs.commitAQ {
+			txnRecord.CommitAfterThem = append(txnRecord.CommitAfterThem, txn)
+		}
+		for _, txn := range rArgs.commitBQ {
+			txnRecord.CommitBeforeThem = append(txnRecord.CommitBeforeThem, txn)
+		}
+		// Save the updated Transaction record
+		return engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+	}
+
 	return nil
 }
 
@@ -330,13 +371,14 @@ func sendUpdateTransactionRecordRPC(
 	ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-	rArgs RpcArgs) error {
+	rArgs RpcArgs,
+) error {
 
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : sendUpdateTransactionRecordRPC")
 	}
 
-	updateTnxReq := &roachpb.UpdateTransactionRecordRequest{
+	updatetxnReq := &roachpb.UpdateTransactionRecordRequest{
 		Span: roachpb.Span{
 			Key: h.Txn.Key,
 		},
@@ -351,9 +393,9 @@ func sendUpdateTransactionRecordRPC(
 	//b.Header = cArgs.Header
 	//b.Header.Timestamp = hlc.ZeroTimestamp
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : updateTnxReq %v", updateTnxReq)
+		log.Infof(ctx, "Ravi : updatetxnReq %v", updatetxnReq)
 	}
-	b.AddRawRequest(updateTnxReq)
+	b.AddRawRequest(updatetxnReq)
 
 	if err := s.db.Run(ctx, b); err != nil {
 		_ = b.MustPErr()
@@ -370,22 +412,17 @@ func sendUpdateTransactionRecordRPC(
 	return nil
 }
 
-func makeTnxIntact(oldTnx roachpb.Transaction, newTnx *roachpb.Transaction) {
-	newTnx.DynamicTimestampLowerBound.Forward(oldTnx.DynamicTimestampLowerBound)
-	newTnx.DynamicTimestampUpperBound.Backward(oldTnx.DynamicTimestampUpperBound)
-
-}
-
-func pushSoftLocksOnReadToTnxRecord(
+func pushSoftLocksOnReadToTxnRecord(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-	wslocks []roachpb.WriteSoftLock) error {
+	wslocks []roachpb.WriteSoftLock,
+) error {
 
 	if log.V(2) {
-		log.Infof(ctx, "Ravi :pushSoftLocksOnReadToTnxRecord ")
+		log.Infof(ctx, "Ravi :pushSoftLocksOnReadToTxnRecord ")
 	}
 
 	var rARgs RpcArgs
@@ -400,23 +437,24 @@ func pushSoftLocksOnReadToTnxRecord(
 	}
 
 	// Update transaction
-	if err := updateTransactionRecord(ctx, s, batch, tnxcache, h, rARgs); err != nil {
+	if err := updateTransactionRecord(ctx, s, batch, txncache, h, rARgs); err != nil {
 		panic("failed to update transaction")
 	}
 
 	return nil
 }
 
-func pushSoftLocksOnWriteToTnxRecord(
+func pushSoftLocksOnWriteToTxnRecord(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
+	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	rslocks []roachpb.ReadSoftLock,
-	wslocks []roachpb.WriteSoftLock) error {
+	wslocks []roachpb.WriteSoftLock,
+) error {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi :pushSoftLocksOnWriteToTnxRecord ")
+		log.Infof(ctx, "Ravi :pushSoftLocksOnWriteToTxnRecord ")
 	}
 	var rARgs RpcArgs
 	// Modify its Lower bound based on last committed write time stamp
@@ -434,7 +472,7 @@ func pushSoftLocksOnWriteToTnxRecord(
 		rARgs.commitAQ = append(rARgs.commitAQ, lock.TransactionMeta)
 	}
 	// Update transaction
-	if err := updateTransactionRecord(ctx, s, batch, tnxcache, h, rARgs); err != nil {
+	if err := updateTransactionRecord(ctx, s, batch, txncache, h, rARgs); err != nil {
 		panic("failed to update transaction")
 	}
 	return nil
@@ -442,62 +480,194 @@ func pushSoftLocksOnWriteToTnxRecord(
 
 func manageCommitBeforeQueue(
 	ctx context.Context,
+	s *Store,
 	batch engine.ReadWriter,
-	cArgs CommandArgs,
-	mytnxRecord *roachpb.Transaction) {
+	txncache *TransactionRecordLockCache,
+	mytxnRecord *roachpb.Transaction,
+) error {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi :pushSoftLocksOnWriteToTnxRecord ")
+		log.Infof(ctx, "Ravi :manageCommitBeforeQueue ")
 	}
-	/*
-		for _, tnx := range mytnxRecord.CommitBeforeThem {
-			tnxrcd, _ := fetchTransactionrecordv2(ctx, batch, cArgs, tnx)
-			switch tnxrcd.Status {
-			case roachpb.COMMITTED:
-				ts := tnxrcd.DynamicTimestampLowerBound.Prev()
-				mytnxRecord.DynamicTimestampUpperBound.Backward(ts)
-				// trigger resolveSoftLock
-			case roachpb.PENDING:
-				ts := tnxrcd.DynamicTimestampLowerBound.Prev()
-				mytnxRecord.DynamicTimestampUpperBound.Backward(ts)
-			}
-			updateTransactionrecordv2(ctx, batch, cArgs, tnx, tnxrcd)
 
-		}*/
+	for _, txn := range mytxnRecord.CommitBeforeThem {
+		if err := validateCommitBefore(ctx, s, batch, txncache, mytxnRecord, txn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validates the commit before case
+func validateCommitBefore(
+	ctx context.Context,
+	s *Store,
+	batch engine.ReadWriter,
+	txncache *TransactionRecordLockCache,
+	mytxnRecord *roachpb.Transaction,
+	othertxn enginepb.TxnMeta,
+) error {
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In validateCommitBefore")
+	}
+	var upperBound hlc.Timestamp
+	var err error
+	if !transactionRecordExists(ctx, s, batch, othertxn.Key, *othertxn.ID) {
+		// Transaction is in different range so making a RPC call
+		upperBound, err = sendValidateCommitBeforeRPC(ctx, s, mytxnRecord.DynamicTimestampLowerBound, othertxn)
+	}
+
+	upperBound, err = executelocalValidateCommitBefore(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampLowerBound, othertxn)
+
+	mytxnRecord.DynamicTimestampUpperBound.Backward(upperBound)
+
+	return err
+}
+
+func sendValidateCommitBeforeRPC(
+	ctx context.Context,
+	s *Store,
+	upperBound hlc.Timestamp,
+	txn enginepb.TxnMeta,
+) (hlc.Timestamp, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In sendValidateCommitBeforeRPC")
+	}
+	return hlc.ZeroTimestamp, nil
+}
+
+func executelocalValidateCommitBefore(
+	ctx context.Context,
+	s *Store,
+	batch engine.ReadWriter,
+	txncache *TransactionRecordLockCache,
+	upperBound hlc.Timestamp,
+	txn enginepb.TxnMeta,
+) (hlc.Timestamp, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In executelocalValidateCommitBefore")
+	}
+	key := keys.TransactionKey(txn.Key, *txn.ID)
+
+	txncache.getAccess(key)
+	defer txncache.releaseAccess(key)
+
+	var txnRecord roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
+	); err != nil {
+		return hlc.MaxTimestamp, err
+	} else if ok {
+		// Update the Transaction record
+		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+		// Save the updated Transaction record
+		//return engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+	}
+	return upperBound, nil
+}
+
+func validateCommitAfter(
+	ctx context.Context,
+	s *Store,
+	batch engine.ReadWriter,
+	txncache *TransactionRecordLockCache,
+	mytxnRecord *roachpb.Transaction,
+	othertxn enginepb.TxnMeta,
+) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In validateCommitAfter")
+	}
+	var lowerBound hlc.Timestamp
+	var err error
+	if !transactionRecordExists(ctx, s, batch, othertxn.Key, *othertxn.ID) {
+		// Transaction is in different range so making a RPC call
+		lowerBound, err = sendValidateCommitAfterRPC(ctx, s, mytxnRecord.DynamicTimestampLowerBound, othertxn)
+	}
+
+	lowerBound, err = executelocalValidateCommitAfter(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampLowerBound, othertxn)
+
+	mytxnRecord.DynamicTimestampLowerBound.Forward(lowerBound)
+
+	return err
+}
+
+func sendValidateCommitAfterRPC(
+	ctx context.Context,
+	s *Store,
+	lowerBound hlc.Timestamp,
+	txn enginepb.TxnMeta,
+) (hlc.Timestamp, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In sendValidateCommitAfterRPC")
+	}
+	return hlc.ZeroTimestamp, nil
+}
+
+func executelocalValidateCommitAfter(
+	ctx context.Context,
+	s *Store,
+	batch engine.ReadWriter,
+	txncache *TransactionRecordLockCache,
+	lowerBound hlc.Timestamp,
+	txn enginepb.TxnMeta,
+) (hlc.Timestamp, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In executelocalValidateCommitAfter")
+	}
+	key := keys.TransactionKey(txn.Key, *txn.ID)
+
+	txncache.getAccess(key)
+	defer txncache.releaseAccess(key)
+
+	var txnRecord roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
+	); err != nil {
+		return hlc.ZeroTimestamp, err
+	} else if ok {
+		// Update the Transaction record
+		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+		// Save the updated Transaction record
+		//return engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+	}
+
+	return lowerBound, nil
 }
 
 func manageCommitAfterQueue(
 	ctx context.Context,
+	s *Store,
 	batch engine.ReadWriter,
-	cArgs CommandArgs,
-	mytnxRecord *roachpb.Transaction) {
+	txncache *TransactionRecordLockCache,
+	mytxnRecord *roachpb.Transaction,
+) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :manageCommitAfterQueue ")
 	}
-	/*
-		for _, tnx := range mytnxRecord.CommitAfterThem {
-			tnxrcd, _ := fetchTransactionrecordv2(ctx, batch, cArgs, tnx)
-			switch tnxrcd.Status {
-			case roachpb.COMMITTED:
-				ts := tnxrcd.DynamicTimestampUpperBound.Next()
-				mytnxRecord.DynamicTimestampLowerBound.Forward(ts)
-				// trigger resolveSoftLock
-			case roachpb.PENDING:
-				ts := mytnxRecord.DynamicTimestampLowerBound.Prev()
-				tnxrcd.DynamicTimestampUpperBound.Backward(ts)
-			}
-			updateTransactionrecordv2(ctx, batch, cArgs, tnx, tnxrcd)
-		}*/
 
+	for _, txn := range mytxnRecord.CommitAfterThem {
+		if err := validateCommitAfter(ctx, s, batch, txncache, mytxnRecord, txn); err != nil {
+			return err
+		}
+
+	}
+	return nil
 }
 
-func isTSIntact(lowerBound hlc.Timestamp, upperBound hlc.Timestamp) bool {
+func isTSIntact(
+	lowerBound hlc.Timestamp,
+	upperBound hlc.Timestamp,
+) bool {
 	if lowerBound.Less(upperBound) || lowerBound.Equal(upperBound) {
 		return true
 	}
 	return false
 }
 
-func pickCommitTimeStamp(lowerBound hlc.Timestamp, upperBound hlc.Timestamp) hlc.Timestamp {
+func pickCommitTimeStamp(
+	lowerBound hlc.Timestamp,
+	upperBound hlc.Timestamp,
+) hlc.Timestamp {
 
 	if upperBound == hlc.MaxTimestamp || upperBound == lowerBound {
 		return lowerBound
@@ -505,21 +675,88 @@ func pickCommitTimeStamp(lowerBound hlc.Timestamp, upperBound hlc.Timestamp) hlc
 	return lowerBound
 }
 
-func executeLocalvalidator(
+func makeDecision(
 	ctx context.Context,
-	batch engine.ReadWriter,
-	cArgs CommandArgs,
-	mytnxRecord *roachpb.Transaction) {
+	mytxnRecord *roachpb.Transaction,
+) error {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi :executeLocalvalidator ")
+		log.Infof(ctx, "Ravi : In makeDecision")
+	}
+	if isTSIntact(mytxnRecord.DynamicTimestampLowerBound, mytxnRecord.DynamicTimestampUpperBound) {
+		mytxnRecord.Status = roachpb.ABORTED
+
+	} else {
+		commitTimestamp := pickCommitTimeStamp(mytxnRecord.DynamicTimestampLowerBound, mytxnRecord.DynamicTimestampUpperBound)
+		mytxnRecord.OrigTimestamp = commitTimestamp
+		mytxnRecord.Status = roachpb.COMMITTED
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In decision %v", mytxnRecord.Status)
+	}
+	return nil
+}
+
+func executeLocalValidator(
+	ctx context.Context,
+	s *Store,
+	batch engine.ReadWriter,
+	txncache *TransactionRecordLockCache,
+	h roachpb.Header,
+) error {
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In executeLocalValidator")
+	}
+	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
+
+	txncache.getAccess(key)
+	defer txncache.releaseAccess(key)
+
+	var txnRecord roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
+	); err != nil {
+		return err
+	} else if ok {
+		if err := manageCommitBeforeQueue(ctx, s, batch, txncache, &txnRecord); err != nil {
+			return err
+		}
+		if err := manageCommitAfterQueue(ctx, s, batch, txncache, &txnRecord); err != nil {
+			return err
+		}
+		if err := makeDecision(ctx, &txnRecord); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sendexecuteValidatorRPC(ctx context.Context,
+	s *Store,
+	h roachpb.Header,
+) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In sendexecuteValidatorRPC")
+	}
+	return nil
+}
+
+func executeValidator(
+	ctx context.Context,
+	s *Store,
+	batch engine.ReadWriter,
+	txncache *TransactionRecordLockCache,
+	h roachpb.Header,
+) error {
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In executeValidator")
 	}
 
-	manageCommitBeforeQueue(ctx, batch, cArgs, mytnxRecord)
-	manageCommitAfterQueue(ctx, batch, cArgs, mytnxRecord)
-
-	if !isTSIntact(mytnxRecord.DynamicTimestampLowerBound, mytnxRecord.DynamicTimestampUpperBound) {
-		mytnxRecord.Status = roachpb.ABORTED
+	if !transactionRecordExists(ctx, s, batch, h.Txn.Key, *h.Txn.ID) {
+		// Transaction is in different range so making a RPC call
+		return sendexecuteValidatorRPC(ctx, s, h)
 	}
-	pickCommitTimeStamp(mytnxRecord.DynamicTimestampLowerBound, mytnxRecord.DynamicTimestampUpperBound)
 
+	return executeLocalValidator(ctx, s, batch, txncache, h)
 }

@@ -111,10 +111,11 @@ const (
 
 // Soft locks as part of Dynamic Timestamp Processing requests
 type SoftLocks struct {
-	rslocks   []roachpb.ReadSoftLock
-	wslocks   []roachpb.WriteSoftLock
-	rextspans []roachpb.Span
-	wextspans []roachpb.Span
+	rslocks     []roachpb.ReadSoftLock
+	wslocks     []roachpb.WriteSoftLock
+	rlocalspans []roachpb.Span
+	rextspans   []roachpb.Span
+	wextspans   []roachpb.Span
 }
 
 // consultsTimestampCacheMethods specifies the set of methods which
@@ -340,7 +341,7 @@ type Replica struct {
 
 	slockcache *engine.SoftLockCache
 
-	tnxlockcache *TransactionRecordLockCache
+	txnlockcache *TransactionRecordLockCache
 
 	cmdQMu struct {
 		// Protects all fields in the cmdQMu struct.
@@ -612,7 +613,7 @@ func newReplica(rangeID roachpb.RangeID, store *Store) *Replica {
 		store:          store,
 		abortCache:     NewAbortCache(rangeID),
 		slockcache:     engine.NewSoftLockCache(),
-		tnxlockcache:   NewTransactionRecordLockCache(),
+		txnlockcache:   NewTransactionRecordLockCache(),
 	}
 	// Init rangeStr with the range ID.
 	r.rangeStr.store(0, &roachpb.RangeDescriptor{RangeID: rangeID})
@@ -1908,7 +1909,7 @@ func (r *Replica) addReadOnlyCmd(
 				log.Infof(ctx, "Out of command queue pErr %v", pErr)
 			}
 			if pErr == nil {
-				r.submitValidationProcessing(ctx, ba, r.store.Engine(), r.tnxlockcache, slocks)
+				r.submitValidationProcessing(ctx, ba, slocks)
 			}
 		}
 	}()
@@ -1952,14 +1953,12 @@ func (r *Replica) addReadOnlyCmd(
 func (r *Replica) submitValidationProcessing(
 	ctx context.Context,
 	ba roachpb.BatchRequest,
-	batch engine.ReadWriter,
-	tnxcache *TransactionRecordLockCache,
 	slocks SoftLocks) error {
 
 	for _, union := range ba.Requests {
 		args := union.GetInner()
 		if ba.Txn != nil && consultsDyTSValidationRequests(args) {
-			return r.ApplyDyTSValidation(ctx, args, batch, tnxcache, ba.Header, slocks)
+			return r.ApplyDyTSValidation(ctx, args, r.store.Engine(), ba.Header, slocks)
 		}
 	}
 	return nil
