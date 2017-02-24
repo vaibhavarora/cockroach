@@ -4,16 +4,19 @@ import (
 	"fmt"
 )
 
-type lock struct {
-	id int
-}
 
 func main() {
 
-    var l *lock
+   fmt.Println(example()) 
+}
 
-    if l == nil{
-        fmt.Printf("is nil")
-    }
+func example() (a int) {
 
+    defer func() {
+        a = 5
+    }()
+
+    a = 3
+
+    return a
 }

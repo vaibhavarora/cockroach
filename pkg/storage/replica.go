@@ -113,6 +113,7 @@ const (
 type SoftLocks struct {
 	rslocks     []roachpb.ReadSoftLock
 	wslocks     []roachpb.WriteSoftLock
+	wlocalspans []roachpb.Span
 	rlocalspans []roachpb.Span
 	rextspans   []roachpb.Span
 	wextspans   []roachpb.Span
@@ -1909,7 +1910,7 @@ func (r *Replica) addReadOnlyCmd(
 				log.Infof(ctx, "Out of command queue pErr %v", pErr)
 			}
 			if pErr == nil {
-				r.submitValidationProcessing(ctx, ba, slocks)
+				br, _ = r.submitForValidationProcessing(ctx, ba, br, slocks)
 			}
 		}
 	}()
@@ -1950,18 +1951,20 @@ func (r *Replica) addReadOnlyCmd(
 	return br, pErr
 }
 
-func (r *Replica) submitValidationProcessing(
+func (r *Replica) submitForValidationProcessing(
 	ctx context.Context,
 	ba roachpb.BatchRequest,
-	slocks SoftLocks) error {
+	br *roachpb.BatchResponse,
+	slocks SoftLocks) (*roachpb.BatchResponse, error) {
 
-	for _, union := range ba.Requests {
+	for index, union := range ba.Requests {
 		args := union.GetInner()
+		reply := br.Responses[index].GetInner()
 		if ba.Txn != nil && consultsDyTSValidationRequests(args) {
-			return r.ApplyDyTSValidation(ctx, args, r.store.Engine(), ba.Header, slocks)
+			r.ApplyDyTSValidation(ctx, args, r.store.Engine(), ba.Header, slocks, reply)
 		}
 	}
-	return nil
+	return br, nil
 }
 
 // TODO(tschottdorf): temporary assertion for #5725, which saw batches with

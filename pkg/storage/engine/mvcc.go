@@ -2245,36 +2245,71 @@ func MVCCPlaceReadSoftLock(
 }
 
 // This will get all write soft lock of the transaction
-func MVCCGetWriteSoftLock(
+func MVCCresolveWriteSoftLock(
+	ctx context.Context,
+	engine ReadWriter,
+	ms *enginepb.MVCCStats,
+	span roachpb.Span,
+	h roachpb.Header,
+	slcache *SoftLockCache,
+) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In MVCCresolveWriteSoftLock")
+	}
+	var err error
+	wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
+	args := wslock.Request.GetInner()
+	if cmd, ok := DyTSMVCCCommands[args.Method()]; ok {
+		dmArgs := DyTSmArgs{
+			h:      h,
+			engine: engine,
+			Args:   args.ShallowCopy(),
+			ms:     ms,
+		}
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : executing cmd %v with cArgs %v ", args.Method(), dmArgs)
+		}
+		err = cmd.EvalDyTSMVCCCommand(ctx, dmArgs)
+	} else {
+		err = errors.Errorf("unrecognized command %s", args.Method())
+	}
+	return err
+}
+
+// to be removed
+func MVCCRemoveWriteSoftLock(
 	ctx context.Context,
 	engine ReadWriter,
 	h roachpb.Header,
 	spans []roachpb.Span,
 	slcache *SoftLockCache,
 ) []roachpb.WriteSoftLock {
-	var wslocks []roachpb.WriteSoftLock
-	for _, span := range spans {
-		if len(span.EndKey) == 0 {
-			// getting lock from cache
-			wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
-			// removing the entry from cache
-			//slcache.removeFromWriteLockCache(wslock, span.Key)
-			wslocks = append(wslocks, wslock)
-		} else {
-			wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
-			reverse := roachpb.IsReverse(wslock.Request.GetInner())
-
-			keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, h, reverse)
-
-			for _, key := range keys {
-				// getting lock from cache
-				wslock := slcache.getWriteSoftLock(key, *h.Txn.ID)
-				// removing the entry from cache
-				//slcache.removeFromWriteLockCache(wslock, span.Key)
-				wslocks = append(wslocks, wslock)
-			}
-		}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In MVCCGetWriteSoftLock")
 	}
+	var wslocks []roachpb.WriteSoftLock
+	//for _, span := range spans {
+	//if len(span.EndKey) == 0 {
+	// getting lock from cache
+	//wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
+	// removing the entry from cache
+	//slcache.removeFromWriteLockCache(wslock, span.Key)
+	//wslocks = append(wslocks, wslock)
+	/*} else {
+	wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
+	//reverse := roachpb.IsReverse(wslock.Request.GetInner())
+
+	//keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, h, reverse)
+
+	for _, key := range keys {
+		// getting lock from cache
+		wslock := slcache.getWriteSoftLock(key, *h.Txn.ID)
+		// removing the entry from cache
+		//slcache.removeFromWriteLockCache(wslock, span.Key)
+		wslocks = append(wslocks, wslock)
+	}*/
+	//}
+	//}
 	return wslocks
 }
 
@@ -2286,7 +2321,9 @@ func MVCCRemoveReadSoftLock(
 	spans []roachpb.Span,
 	slcache *SoftLockCache,
 ) error {
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In MVCCRemoveReadSoftLock")
+	}
 	for _, span := range spans {
 		if len(span.EndKey) == 0 {
 			// getting lock from cache

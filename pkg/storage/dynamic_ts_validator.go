@@ -14,7 +14,7 @@ import (
 )
 
 type DyTSValidationRequest struct {
-	EvalDyTSValidationRequest func(context.Context, *Store, engine.ReadWriter, *TransactionRecordLockCache, roachpb.Header, SoftLocks) error
+	EvalDyTSValidationRequest func(context.Context, *Store, engine.ReadWriter, *TransactionRecordLockCache, roachpb.Header, SoftLocks, roachpb.Response) error
 }
 
 var DyTSValidationRequests = map[roachpb.Method]DyTSValidationRequest{
@@ -43,6 +43,7 @@ func (r *Replica) ApplyDyTSValidation(
 	batch engine.ReadWriter,
 	h roachpb.Header,
 	slocks SoftLocks,
+	reply roachpb.Response,
 ) (err error) {
 
 	if _, ok := args.(*roachpb.NoopRequest); ok {
@@ -54,7 +55,7 @@ func (r *Replica) ApplyDyTSValidation(
 	}
 
 	if cmd, ok := DyTSValidationRequests[args.Method()]; ok {
-		err = cmd.EvalDyTSValidationRequest(ctx, r.store, batch, r.txnlockcache, h, slocks)
+		err = cmd.EvalDyTSValidationRequest(ctx, r.store, batch, r.txnlockcache, h, slocks, reply)
 	} else {
 		err = errors.Errorf("unrecognized command %s", args.Method())
 		return err
@@ -76,6 +77,7 @@ func EvalDyTSValidationRequestGet(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 
 	if log.V(2) {
@@ -100,6 +102,7 @@ func EvalDyTSValidationRequestPut(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestPut")
@@ -123,6 +126,7 @@ func EvalDyTSValidationRequestConditionalPut(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestConditionalPut")
@@ -145,6 +149,7 @@ func EvalDyTSValidationRequestInitPut(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestInitPut")
@@ -167,6 +172,7 @@ func EvalDyTSValidationRequestIncrement(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestIncrement")
@@ -189,6 +195,7 @@ func EvalDyTSValidationRequestDelete(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestDelete")
@@ -211,6 +218,7 @@ func EvalDyTSValidationRequestDeleteRange(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestDeleteRange")
@@ -233,6 +241,7 @@ func EvalDyTSValidationRequestScan(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestScan")
@@ -255,6 +264,7 @@ func EvalDyTSValidationRequestReverseScan(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestReverseScan")
@@ -278,13 +288,39 @@ func EvalDyTSValidationRequestEndTransaction(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	slocks SoftLocks,
+	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestEndTransaction")
 	}
-	if err := executeValidator(ctx, s, batch, txncache, h); err != nil {
+	var err error
+	var txnrcd roachpb.Transaction
+	reply := resp.(*roachpb.EndTransactionResponse)
+	if txnrcd, err = executeValidator(ctx, s, batch, txncache, h); err != nil {
 		return err
 	}
+	if err = executeDyTSDecision(ctx, s, batch, h, txnrcd, slocks); err != nil {
+		return err
+	}
+	// updating the response
+	reply.Txn = &txnrcd
+	return nil
+}
+
+func executeDyTSDecision(
+	ctx context.Context,
+	s *Store,
+	batch engine.ReadWriter,
+	h roachpb.Header,
+	txnrcd roachpb.Transaction,
+	slocks SoftLocks,
+) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In executeDyTSDecision")
+	}
+	// resolve write intents
+
+	// clear read and write locks
 	return nil
 }
 
@@ -624,14 +660,20 @@ func executelocalValidateCommitAfter(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
 	); err != nil {
 		return hlc.ZeroTimestamp, err
-	} else if ok {
-		// Update the Transaction record
-		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
-		// Save the updated Transaction record
-		//return engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+	} else if !ok {
+		// should never be this case
+		return hlc.ZeroTimestamp, roachpb.NewTransactionStatusError("does not exist")
 	}
+	// Update the Transaction record
+	if txnRecord.Status == roachpb.COMMITTED {
+		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+	} else if txnRecord.Status == roachpb.PENDING {
+		txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
+	}
+	// Save the updated Transaction record
+	err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
 
-	return lowerBound, nil
+	return lowerBound, err
 }
 
 func manageCommitAfterQueue(
@@ -702,7 +744,7 @@ func executeLocalValidator(
 	batch engine.ReadWriter,
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-) error {
+) (roachpb.Transaction, error) {
 
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In executeLocalValidator")
@@ -716,29 +758,30 @@ func executeLocalValidator(
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
 	); err != nil {
-		return err
+		return txnRecord, err
 	} else if ok {
 		if err := manageCommitBeforeQueue(ctx, s, batch, txncache, &txnRecord); err != nil {
-			return err
+			return txnRecord, err
 		}
 		if err := manageCommitAfterQueue(ctx, s, batch, txncache, &txnRecord); err != nil {
-			return err
+			return txnRecord, err
 		}
 		if err := makeDecision(ctx, &txnRecord); err != nil {
-			return err
+			return txnRecord, err
 		}
 	}
-	return nil
+	return txnRecord, nil
 }
 
 func sendexecuteValidatorRPC(ctx context.Context,
 	s *Store,
 	h roachpb.Header,
-) error {
+) (roachpb.Transaction, error) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In sendexecuteValidatorRPC")
 	}
-	return nil
+	var txnRecord roachpb.Transaction
+	return txnRecord, nil
 }
 
 func executeValidator(
@@ -747,7 +790,7 @@ func executeValidator(
 	batch engine.ReadWriter,
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
-) error {
+) (roachpb.Transaction, error) {
 
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In executeValidator")
