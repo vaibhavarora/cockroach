@@ -386,30 +386,30 @@ func EvalDyTSEndTransaction(
 	if log.V(2) {
 		log.Infof(ctx, "In EvalDyTSEndTransaction")
 	}
+	/*
+		//r := cArgs.Repl
+		args := cArgs.Args.(*roachpb.EndTransactionRequest)
+		//h := cArgs.Header
+		//ms := cArgs.Stats
+		//reply := resp.(*roachpb.EndTransactionResponse)
 
-	//r := cArgs.Repl
-	args := cArgs.Args.(*roachpb.EndTransactionRequest)
-	//h := cArgs.Header
-	//ms := cArgs.Stats
-	//reply := resp.(*roachpb.EndTransactionResponse)
+		// split the read lock spans into local and external
+		rlocalspans, rexternalspans := cArgs.Repl.getSpans(ctx, batch, *args, args.ReadSpans)
 
-	// split the read lock spans into local and external
-	rlocalspans, rexternalspans := cArgs.Repl.getSpans(ctx, batch, *args, args.ReadSpans)
+		// split  the write lock spans into local and external
+		wlocalspans, wexternalspans := cArgs.Repl.getSpans(ctx, batch, *args, args.IntentSpans)
 
-	// split  the write lock spans into local and external
-	wlocalspans, wexternalspans := cArgs.Repl.getSpans(ctx, batch, *args, args.IntentSpans)
+		// get all local write soft locks placed by the transaction
+		//wslocks := engine.MVCCGetWriteSoftLock(ctx, batch, cArgs.Header, wlocalspans, cArgs.Repl.slockcache)
 
-	// get all local write soft locks placed by the transaction
-	//wslocks := engine.MVCCGetWriteSoftLock(ctx, batch, cArgs.Header, wlocalspans, cArgs.Repl.slockcache)
-
-	var slocks SoftLocks
-	//slocks.rslocks = append(slocks.rslocks, rslocks...)
-	slocks.wlocalspans = append(slocks.wlocalspans, wlocalspans.)
-	slocks.rlocalspans = append(slocks.rlocalspans, rlocalspans...)
-	slocks.rextspans = append(slocks.rextspans, rexternalspans...)
-	slocks.wextspans = append(slocks.wextspans, wexternalspans...)
-
-	return EvalResult{}, slocks, nil
+		var slocks SoftLocks
+		//slocks.rslocks = append(slocks.rslocks, rslocks...)
+		slocks.wlocalspans = append(slocks.wlocalspans, wlocalspans...)
+		slocks.rlocalspans = append(slocks.rlocalspans, rlocalspans...)
+		slocks.rextspans = append(slocks.rextspans, rexternalspans...)
+		slocks.wextspans = append(slocks.wextspans, wexternalspans...)
+	*/
+	return EvalResult{}, SoftLocks{}, nil
 }
 
 func (r *Replica) getSpans(

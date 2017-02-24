@@ -14,7 +14,7 @@ import (
 )
 
 type DyTSValidationRequest struct {
-	EvalDyTSValidationRequest func(context.Context, *Store, engine.ReadWriter, *TransactionRecordLockCache, roachpb.Header, SoftLocks, roachpb.Response) error
+	EvalDyTSValidationRequest func(context.Context, DyTSArgs, roachpb.Response) error
 }
 
 var DyTSValidationRequests = map[roachpb.Method]DyTSValidationRequest{
@@ -37,6 +37,15 @@ type RpcArgs struct {
 	commitBQ   []enginepb.TxnMeta
 }
 
+type DyTSArgs struct {
+	s        *Store
+	batch    engine.ReadWriter
+	txncache *TransactionRecordLockCache
+	h        roachpb.Header
+	slocks   SoftLocks
+	args     roachpb.Request
+}
+
 func (r *Replica) ApplyDyTSValidation(
 	ctx context.Context,
 	args roachpb.Request,
@@ -55,7 +64,16 @@ func (r *Replica) ApplyDyTSValidation(
 	}
 
 	if cmd, ok := DyTSValidationRequests[args.Method()]; ok {
-		err = cmd.EvalDyTSValidationRequest(ctx, r.store, batch, r.txnlockcache, h, slocks, reply)
+		dytsargs := DyTSArgs{
+			s:        r.store,
+			batch:    batch,
+			txncache: r.txnlockcache,
+			h:        h,
+			slocks:   slocks,
+			args:     args.ShallowCopy(),
+		}
+
+		err = cmd.EvalDyTSValidationRequest(ctx, dytsargs, reply)
 	} else {
 		err = errors.Errorf("unrecognized command %s", args.Method())
 		return err
@@ -72,19 +90,15 @@ func (r *Replica) ApplyDyTSValidation(
 
 func EvalDyTSValidationRequestGet(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestGet")
 	}
-	if len(slocks.wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTxnRecord(ctx, s, batch, txncache, h, slocks.wslocks); err != nil {
+	if len(dargs.slocks.wslocks) != 0 {
+		if err := pushSoftLocksOnReadToTxnRecord(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h, dargs.slocks.wslocks); err != nil {
 			panic("failed to place soft  locks in txn Record")
 		}
 	} else {
@@ -97,18 +111,14 @@ func EvalDyTSValidationRequestGet(
 
 func EvalDyTSValidationRequestPut(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestPut")
 	}
-	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
+	if len(dargs.slocks.wslocks) != 0 || len(dargs.slocks.rslocks) != 0 {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h, dargs.slocks.rslocks, dargs.slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -121,18 +131,14 @@ func EvalDyTSValidationRequestPut(
 
 func EvalDyTSValidationRequestConditionalPut(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestConditionalPut")
 	}
-	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
+	if len(dargs.slocks.wslocks) != 0 || len(dargs.slocks.rslocks) != 0 {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h, dargs.slocks.rslocks, dargs.slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -144,18 +150,14 @@ func EvalDyTSValidationRequestConditionalPut(
 }
 func EvalDyTSValidationRequestInitPut(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestInitPut")
 	}
-	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
+	if len(dargs.slocks.wslocks) != 0 || len(dargs.slocks.rslocks) != 0 {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h, dargs.slocks.rslocks, dargs.slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -167,18 +169,14 @@ func EvalDyTSValidationRequestInitPut(
 }
 func EvalDyTSValidationRequestIncrement(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestIncrement")
 	}
-	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
+	if len(dargs.slocks.wslocks) != 0 || len(dargs.slocks.rslocks) != 0 {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h, dargs.slocks.rslocks, dargs.slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -190,18 +188,14 @@ func EvalDyTSValidationRequestIncrement(
 }
 func EvalDyTSValidationRequestDelete(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestDelete")
 	}
-	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
+	if len(dargs.slocks.wslocks) != 0 || len(dargs.slocks.rslocks) != 0 {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h, dargs.slocks.rslocks, dargs.slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -213,18 +207,14 @@ func EvalDyTSValidationRequestDelete(
 }
 func EvalDyTSValidationRequestDeleteRange(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestDeleteRange")
 	}
-	if len(slocks.wslocks) != 0 || len(slocks.rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, s, batch, txncache, h, slocks.rslocks, slocks.wslocks); err != nil {
+	if len(dargs.slocks.wslocks) != 0 || len(dargs.slocks.rslocks) != 0 {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h, dargs.slocks.rslocks, dargs.slocks.wslocks); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -236,19 +226,15 @@ func EvalDyTSValidationRequestDeleteRange(
 }
 func EvalDyTSValidationRequestScan(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestScan")
 	}
-	if len(slocks.wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTxnRecord(ctx, s, batch, txncache, h, slocks.wslocks); err != nil {
-			panic("failed to place soft  locks in txn Record")
+	if len(dargs.slocks.wslocks) != 0 {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h, dargs.slocks.rslocks, dargs.slocks.wslocks); err != nil {
+			panic("failed to place locks in transaction record")
 		}
 	} else {
 		if log.V(2) {
@@ -259,18 +245,14 @@ func EvalDyTSValidationRequestScan(
 }
 func EvalDyTSValidationRequestReverseScan(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSValidationRequestReverseScan")
 	}
-	if len(slocks.wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTxnRecord(ctx, s, batch, txncache, h, slocks.wslocks); err != nil {
+	if len(dargs.slocks.wslocks) != 0 {
+		if err := pushSoftLocksOnReadToTxnRecord(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h, dargs.slocks.wslocks); err != nil {
 			panic("failed to place soft  locks in txn Record")
 		}
 	} else {
@@ -283,11 +265,7 @@ func EvalDyTSValidationRequestReverseScan(
 
 func EvalDyTSValidationRequestEndTransaction(
 	ctx context.Context,
-	s *Store,
-	batch engine.ReadWriter,
-	txncache *TransactionRecordLockCache,
-	h roachpb.Header,
-	slocks SoftLocks,
+	dargs DyTSArgs,
 	resp roachpb.Response,
 ) error {
 	if log.V(2) {
@@ -295,32 +273,61 @@ func EvalDyTSValidationRequestEndTransaction(
 	}
 	var err error
 	var txnrcd roachpb.Transaction
+	args := dargs.args.(*roachpb.EndTransactionRequest)
 	reply := resp.(*roachpb.EndTransactionResponse)
-	if txnrcd, err = executeValidator(ctx, s, batch, txncache, h); err != nil {
+	if txnrcd, err = executeValidator(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h); err != nil {
 		return err
 	}
-	if err = executeDyTSDecision(ctx, s, batch, h, txnrcd, slocks); err != nil {
+	if err = sendDyTSEndTranactionRPC(ctx, dargs.s, dargs.batch, dargs.h, txnrcd, args.IntentSpans, args.ReadSpans); err != nil {
 		return err
 	}
-	// updating the response
+
 	reply.Txn = &txnrcd
 	return nil
 }
 
-func executeDyTSDecision(
+func sendDyTSEndTranactionRPC(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
 	h roachpb.Header,
 	txnrcd roachpb.Transaction,
-	slocks SoftLocks,
+	rspans []roachpb.Span,
+	wspans []roachpb.Span,
 ) error {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : In executeDyTSDecision")
+		log.Infof(ctx, "Ravi : In sendDyTSEndTranactionRPC")
 	}
-	// resolve write intents
 
-	// clear read and write locks
+	dytsendtxnreq := &roachpb.DyTSEndTransactionRequest{
+		Span: roachpb.Span{
+			Key: txnrcd.Key,
+		},
+		Txnrecord: txnrcd,
+	}
+	dytsendtxnreq.ReadSpans = append(dytsendtxnreq.ReadSpans, rspans...)
+	dytsendtxnreq.WriteSpans = append(dytsendtxnreq.WriteSpans, wspans...)
+	b := &client.Batch{}
+	//b.Header = cArgs.Header
+	//b.Header.Timestamp = hlc.ZeroTimestamp
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : dytsendtxnreq %v", dytsendtxnreq)
+	}
+	b.AddRawRequest(dytsendtxnreq)
+
+	if err := s.db.Run(ctx, b); err != nil {
+		_ = b.MustPErr()
+	} else {
+
+		br := b.RawResponse()
+		for _, res := range br.Responses {
+			r := res.GetInner().(*roachpb.DyTSEndTransactionResponse)
+			if log.V(2) {
+				log.Infof(ctx, "DyTSEndTransactionRequest recieved response : %v", r)
+			}
+		}
+	}
+	return nil
 	return nil
 }
 
@@ -730,6 +737,8 @@ func makeDecision(
 	} else {
 		commitTimestamp := pickCommitTimeStamp(mytxnRecord.DynamicTimestampLowerBound, mytxnRecord.DynamicTimestampUpperBound)
 		mytxnRecord.OrigTimestamp = commitTimestamp
+		mytxnRecord.DynamicTimestampLowerBound = commitTimestamp
+		mytxnRecord.DynamicTimestampUpperBound = commitTimestamp
 		mytxnRecord.Status = roachpb.COMMITTED
 	}
 	if log.V(2) {
@@ -769,6 +778,7 @@ func executeLocalValidator(
 		if err := makeDecision(ctx, &txnRecord); err != nil {
 			return txnRecord, err
 		}
+
 	}
 	return txnRecord, nil
 }

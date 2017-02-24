@@ -125,4 +125,8 @@ const (
 	ChangeFrozen
 	// Updates the Transaction record
 	UpdateTxnRecord
+	//Resolves Write Soft locks
+	ResolveWriteSlock
+	// Dynamic Timestamp's End Transaction
+	DyTsEndTransaction
 )

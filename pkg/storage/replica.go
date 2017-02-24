@@ -111,12 +111,8 @@ const (
 
 // Soft locks as part of Dynamic Timestamp Processing requests
 type SoftLocks struct {
-	rslocks     []roachpb.ReadSoftLock
-	wslocks     []roachpb.WriteSoftLock
-	wlocalspans []roachpb.Span
-	rlocalspans []roachpb.Span
-	rextspans   []roachpb.Span
-	wextspans   []roachpb.Span
+	rslocks []roachpb.ReadSoftLock
+	wslocks []roachpb.WriteSoftLock
 }
 
 // consultsTimestampCacheMethods specifies the set of methods which
@@ -153,7 +149,8 @@ var consultsDyTSMethods = [...]bool{
 }
 
 var consultsDyTSValidatorMethods = [...]bool{
-	roachpb.UpdateTxnRecord: true,
+	roachpb.UpdateTxnRecord:    true,
+	roachpb.DyTsEndTransaction: true,
 }
 
 var consultsBlockMethods = [...]bool{

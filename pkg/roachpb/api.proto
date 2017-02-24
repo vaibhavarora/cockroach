@@ -250,6 +250,32 @@ message UpdateTransactionRecordResponse {
   optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
 
+// Resolve write soft lock request
+message ResolveWriteSoftLocksRequest{
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional Transaction txnrecord = 2 [(gogoproto.nullable) = false];
+}
+
+
+// Response for ResolveWriteSoftLocksRequest
+message ResolveWriteSoftLocksResponse{
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
+// Request to EndTransaction from dynamic timestamp validator
+message DyTSEndTransactionRequest{
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional Transaction txnrecord = 2 [(gogoproto.nullable) = false];
+  // List of keys writen by transaction
+  repeated Span write_spans = 5 [(gogoproto.nullable) = false];
+  // List of keys read by the transaction.
+  repeated Span read_spans = 6 [(gogoproto.nullable) = false];
+}
+
+message DyTSEndTransactionResponse{
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
 // A CheckConsistencyRequest is the argument to the CheckConsistency() method.
 // It specifies the start and end keys for a span of ranges to which a
 // consistency check should be applied. A consistency check on a range involves
@@ -761,6 +787,8 @@ message RequestUnion {
   optional TransferLeaseRequest transfer_lease = 28;
   optional LeaseInfoRequest lease_info = 30;
   optional UpdateTransactionRecordRequest update_txn_record = 31;
+  optional ResolveWriteSoftLocksRequest resolve_write_slock = 32;
+  optional DyTSEndTransactionRequest dy_ts_end_transaction = 33;
 }
 
 // A ResponseUnion contains exactly one of the optional responses.
@@ -804,6 +832,8 @@ message ResponseUnion {
   reserved 28; // TransferLease and RequestLease both use RequestLeaseResponse
   optional LeaseInfoResponse lease_info = 30;
   optional UpdateTransactionRecordResponse update_txn_record = 31;
+  optional ResolveWriteSoftLocksResponse resolve_write_slock = 32;
+  optional DyTSEndTransactionResponse dy_ts_end_transaction = 33;
 }
 
 // A Header is attached to a BatchRequest, encapsulating routing and auxiliary
