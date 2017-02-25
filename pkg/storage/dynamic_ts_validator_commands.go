@@ -131,7 +131,6 @@ func EvalDyTSUpdateTransactionRecord(
 	// Save the updated Transaction record
 	return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
 
-	return EvalResult{}, nil
 }
 
 func EvalDyTSValidatorEndTransaction(
@@ -197,7 +196,44 @@ func EvalDyTSValidateCommitAfter(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSValidateCommitAfter")
+	}
+	args := cArgs.Args.(*roachpb.ValidateCommitAfterRequest)
+
+	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
+
+	var txnRecord roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
+	); err != nil {
+		return EvalResult{}, err
+	} else if !ok {
+		if log.V(2) {
+			log.Infof(ctx, "EvalDyTSValidateCommitAfter : coudnt find transaction record in this range")
+		}
+		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
+	}
+	if log.V(2) {
+		log.Infof(ctx, "EvalDyTSValidateCommitAfter : found transaction record in this range")
+	}
+	// Update the Transaction record
+	lowerBound := *args.LowerBound
+	if txnRecord.Status == roachpb.COMMITTED {
+		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+	} else if txnRecord.Status == roachpb.PENDING {
+		txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
+		// Save the updated Transaction record
+		if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
+			return EvalResult{}, err
+		}
+	}
+
+	reply := resp.(*roachpb.ValidateCommitAfterResponse)
+	reply.LowerBound = &lowerBound
+
 	return EvalResult{}, nil
+
 }
 
 func EvalDyTSValidateCommitBefore(
@@ -206,6 +242,37 @@ func EvalDyTSValidateCommitBefore(
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
 
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSValidateCommitBefore")
+	}
+	args := cArgs.Args.(*roachpb.ValidateCommitBeforeRequest)
+
+	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
+
+	var txnRecord roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
+	); err != nil {
+		return EvalResult{}, err
+	} else if !ok {
+		if log.V(2) {
+			log.Infof(ctx, "EvalDyTSValidateCommitAfter : coudnt find transaction record in this range")
+		}
+		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
+	}
+	if log.V(2) {
+		log.Infof(ctx, "EvalDyTSValidateCommitAfter : found transaction record in this range")
+	}
+	// Update the Transaction record
+	upperBound := *args.UpperBound
+
+	upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+
+	reply := resp.(*roachpb.ValidateCommitBeforeResponse)
+	reply.UpperBound = &upperBound
+	// Save the updated Transaction record
+	//Nothing changed so no need to write
+	//return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
 	return EvalResult{}, nil
 }
 

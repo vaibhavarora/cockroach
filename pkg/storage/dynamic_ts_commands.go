@@ -719,7 +719,38 @@ func sendValidateCommitBeforeRPC(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In sendValidateCommitBeforeRPC")
 	}
-	return hlc.ZeroTimestamp, nil
+
+	commitbeforereq := &roachpb.ValidateCommitBeforeRequest{
+		Span: roachpb.Span{
+			Key: txn.Key,
+		},
+		Tmeta:      txn,
+		UpperBound: &upperBound,
+	}
+
+	b := &client.Batch{}
+	//b.Header = cArgs.Header
+	//b.Header.Timestamp = hlc.ZeroTimestamp
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : commitbeforereq %v", commitbeforereq)
+	}
+	b.AddRawRequest(commitbeforereq)
+
+	if err := s.db.Run(ctx, b); err != nil {
+		_ = b.MustPErr()
+	} else {
+
+		br := b.RawResponse()
+		for _, res := range br.Responses {
+			ub := res.GetInner().(*roachpb.ValidateCommitBeforeResponse).UpperBound
+			if log.V(2) {
+				log.Infof(ctx, "updateTransactionrecord recieved response : %v", *ub)
+			}
+			upperBound = *ub
+		}
+	}
+
+	return upperBound, nil
 }
 
 func executelocalValidateCommitBefore(
@@ -786,7 +817,37 @@ func sendValidateCommitAfterRPC(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In sendValidateCommitAfterRPC")
 	}
-	return hlc.ZeroTimestamp, nil
+	commitafterreq := &roachpb.ValidateCommitAfterRequest{
+		Span: roachpb.Span{
+			Key: txn.Key,
+		},
+		Tmeta:      txn,
+		LowerBound: &lowerBound,
+	}
+
+	b := &client.Batch{}
+	//b.Header = cArgs.Header
+	//b.Header.Timestamp = hlc.ZeroTimestamp
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : commitafterreq %v", commitafterreq)
+	}
+	b.AddRawRequest(commitafterreq)
+
+	if err := s.db.Run(ctx, b); err != nil {
+		_ = b.MustPErr()
+	} else {
+
+		br := b.RawResponse()
+		for _, res := range br.Responses {
+			lb := res.GetInner().(*roachpb.ValidateCommitAfterResponse).LowerBound
+			if log.V(2) {
+				log.Infof(ctx, "updateTransactionrecord recieved response : %v", *lb)
+			}
+			lowerBound = *lb
+		}
+	}
+
+	return lowerBound, nil
 }
 
 func executelocalValidateCommitAfter(
