@@ -294,7 +294,16 @@ message ValidateCommitAfterResponse{
   optional util.hlc.Timestamp lowerBound = 3;
 }
 
+message ValidateCommitBeforeRequest{
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional storage.engine.enginepb.TxnMeta tmeta = 2 [(gogoproto.nullable) = false];
+  optional util.hlc.Timestamp upperBound = 3;
+}
 
+message ValidateCommitBeforeResponse{
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional util.hlc.Timestamp upperBound = 3;
+}
 
 // A CheckConsistencyRequest is the argument to the CheckConsistency() method.
 // It specifies the start and end keys for a span of ranges to which a
@@ -810,6 +819,7 @@ message RequestUnion {
   optional ResolveWriteSoftLocksRequest resolve_write_slock = 32;
   optional DyTSEndTransactionRequest dy_ts_end_transaction = 33;
   optional ValidateCommitAfterRequest validate_commit_after = 34;
+  optional ValidateCommitBeforeRequest validate_commit_before = 35;
 }
 
 // A ResponseUnion contains exactly one of the optional responses.
@@ -856,6 +866,7 @@ message ResponseUnion {
   optional ResolveWriteSoftLocksResponse resolve_write_slock = 32;
   optional DyTSEndTransactionResponse dy_ts_end_transaction = 33;
   optional ValidateCommitAfterResponse validate_commit_after = 34;
+  optional ValidateCommitBeforeResponse validate_commit_before = 35;
 }
 
 // A Header is attached to a BatchRequest, encapsulating routing and auxiliary

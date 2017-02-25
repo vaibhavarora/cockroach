@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-type reqCounts [34]int32
+type reqCounts [35]int32
 
 // getReqCounts returns the number of times each
 // request type appears in the batch.
@@ -83,6 +83,8 @@ func (ba *BatchRequest) getReqCounts() reqCounts {
 			counts[32]++
 		case r.ValidateCommitAfter != nil:
 			counts[33]++
+		case r.ValidateCommitBefore != nil:
+			counts[34]++
 		default:
 			panic(fmt.Sprintf("unsupported request: %+v", r))
 		}
@@ -125,6 +127,7 @@ var requestNames = []string{
 	"ResolveWriteSlock",
 	"DyTsEndTransaction",
 	"ValidateCommitAfter",
+	"ValidateCommitBefore",
 }
 
 // Summary prints a short summary of the requests in a batch.
@@ -188,6 +191,7 @@ func (ba *BatchRequest) CreateReply() *BatchResponse {
 	var buf31 []ResolveWriteSoftLocksResponse
 	var buf32 []DyTSEndTransactionResponse
 	var buf33 []ValidateCommitAfterResponse
+	var buf34 []ValidateCommitBeforeResponse
 
 	for i, r := range ba.Requests {
 		switch {
@@ -395,6 +399,12 @@ func (ba *BatchRequest) CreateReply() *BatchResponse {
 			}
 			br.Responses[i].ValidateCommitAfter = &buf33[0]
 			buf33 = buf33[1:]
+		case r.ValidateCommitBefore != nil:
+			if buf34 == nil {
+				buf34 = make([]ValidateCommitBeforeResponse, counts[34])
+			}
+			br.Responses[i].ValidateCommitBefore = &buf34[0]
+			buf34 = buf34[1:]
 		default:
 			panic(fmt.Sprintf("unsupported request: %+v", r))
 		}

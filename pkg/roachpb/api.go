@@ -474,11 +474,17 @@ func (*DeprecatedVerifyChecksumRequest) Method() Method { return DeprecatedVerif
 // Method implements the Request interface.
 func (*UpdateTransactionRecordRequest) Method() Method { return UpdateTxnRecord }
 
+// Method implements the Request interface.
 func (*ResolveWriteSoftLocksRequest) Method() Method { return ResolveWriteSlock }
 
+// Method implements the Request interface.
 func (*DyTSEndTransactionRequest) Method() Method { return DyTsEndTransaction }
 
+// Method implements the Request interface.
 func (*ValidateCommitAfterRequest) Method() Method { return ValidateCommitAfter }
+
+// Method implements the Request interface.
+func (*ValidateCommitBeforeRequest) Method() Method { return ValidateCommitBefore }
 
 // ShallowCopy implements the Request interface.
 func (gr *GetRequest) ShallowCopy() Request {
@@ -680,6 +686,11 @@ func (vca *ValidateCommitAfterRequest) ShallowCopy() Request {
 	return &shallowCopy
 }
 
+func (vcb *ValidateCommitBeforeRequest) ShallowCopy() Request {
+	shallowCopy := *vcb
+	return &shallowCopy
+}
+
 // NewGet returns a Request initialized to get the value at key.
 func NewGet(key Key) Request {
 	return &GetRequest{
@@ -868,6 +879,7 @@ func (*UpdateTransactionRecordRequest) flags() int { return isRead | isTxn }
 func (*ResolveWriteSoftLocksRequest) flags() int   { return isWrite | isTxn }
 func (*DyTSEndTransactionRequest) flags() int      { return isWrite | isTxn }
 func (*ValidateCommitAfterRequest) flags() int     { return isRead | isTxn }
+func (*ValidateCommitBeforeRequest) flags() int    { return isRead | isTxn }
 
 // MergeRequests are considered "non KV" because they do not need to be gated
 // by the command queue (reordering is ok) and they operate on non-MVCC data so

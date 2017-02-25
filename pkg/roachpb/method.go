@@ -131,4 +131,6 @@ const (
 	DyTsEndTransaction
 	// To Validate the entry in commit after queue
 	ValidateCommitAfter
+	// To Validate the entry in commit before queue
+	ValidateCommitBefore
 )

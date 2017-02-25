@@ -19,9 +19,10 @@ type DyTSValidatorCommand struct {
 }
 
 var DyTSValidatorCommands = map[roachpb.Method]DyTSValidatorCommand{
-	roachpb.UpdateTxnRecord:     {EvalDyTSValidatorCommand: EvalDyTSUpdateTransactionRecord},
-	roachpb.DyTsEndTransaction:  {EvalDyTSValidatorCommand: EvalDyTSValidatorEndTransaction},
-	roachpb.ValidateCommitAfter: {EvalDyTSValidatorCommand: EvalDyTSValidateCommitAfter},
+	roachpb.UpdateTxnRecord:      {EvalDyTSValidatorCommand: EvalDyTSUpdateTransactionRecord},
+	roachpb.DyTsEndTransaction:   {EvalDyTSValidatorCommand: EvalDyTSValidatorEndTransaction},
+	roachpb.ValidateCommitAfter:  {EvalDyTSValidatorCommand: EvalDyTSValidateCommitAfter},
+	roachpb.ValidateCommitBefore: {EvalDyTSValidatorCommand: EvalDyTSValidateCommitBefore},
 }
 
 func (r *Replica) executeDyTSValidatorCmd(
@@ -191,6 +192,15 @@ func EvalDyTSValidatorEndTransaction(
 }
 
 func EvalDyTSValidateCommitAfter(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+
+	return EvalResult{}, nil
+}
+
+func EvalDyTSValidateCommitBefore(
 	ctx context.Context,
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
