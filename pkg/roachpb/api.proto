@@ -265,16 +265,36 @@ message ResolveWriteSoftLocksResponse{
 // Request to EndTransaction from dynamic timestamp validator
 message DyTSEndTransactionRequest{
   optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
-  optional Transaction txnrecord = 2 [(gogoproto.nullable) = false];
+  optional bool commit = 2 [(gogoproto.nullable) = false];
+  // The deadline by which the transaction must commit, if present.
+  optional util.hlc.Timestamp deadline = 3;
+  // Optional commit triggers. Note that commit triggers are for
+  // internal use only and will cause an error if requested through the
+  // external-facing KV API.
+  optional InternalCommitTrigger internal_commit_trigger = 4;
   // List of keys writen by transaction
   repeated Span write_spans = 5 [(gogoproto.nullable) = false];
   // List of keys read by the transaction.
   repeated Span read_spans = 6 [(gogoproto.nullable) = false];
+  optional storage.engine.enginepb.TxnMeta tmeta = 7 [(gogoproto.nullable) = false];
 }
 
 message DyTSEndTransactionResponse{
   optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
+
+message ValidateCommitAfterRequest{
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional storage.engine.enginepb.TxnMeta tmeta = 2 [(gogoproto.nullable) = false];
+  optional util.hlc.Timestamp lowerBound = 3;
+}
+
+message ValidateCommitAfterResponse{
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional util.hlc.Timestamp lowerBound = 3;
+}
+
+
 
 // A CheckConsistencyRequest is the argument to the CheckConsistency() method.
 // It specifies the start and end keys for a span of ranges to which a
@@ -789,6 +809,7 @@ message RequestUnion {
   optional UpdateTransactionRecordRequest update_txn_record = 31;
   optional ResolveWriteSoftLocksRequest resolve_write_slock = 32;
   optional DyTSEndTransactionRequest dy_ts_end_transaction = 33;
+  optional ValidateCommitAfterRequest validate_commit_after = 34;
 }
 
 // A ResponseUnion contains exactly one of the optional responses.
@@ -834,6 +855,7 @@ message ResponseUnion {
   optional UpdateTransactionRecordResponse update_txn_record = 31;
   optional ResolveWriteSoftLocksResponse resolve_write_slock = 32;
   optional DyTSEndTransactionResponse dy_ts_end_transaction = 33;
+  optional ValidateCommitAfterResponse validate_commit_after = 34;
 }
 
 // A Header is attached to a BatchRequest, encapsulating routing and auxiliary

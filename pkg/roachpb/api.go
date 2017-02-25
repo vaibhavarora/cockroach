@@ -478,6 +478,8 @@ func (*ResolveWriteSoftLocksRequest) Method() Method { return ResolveWriteSlock 
 
 func (*DyTSEndTransactionRequest) Method() Method { return DyTsEndTransaction }
 
+func (*ValidateCommitAfterRequest) Method() Method { return ValidateCommitAfter }
+
 // ShallowCopy implements the Request interface.
 func (gr *GetRequest) ShallowCopy() Request {
 	shallowCopy := *gr
@@ -673,6 +675,11 @@ func (det *DyTSEndTransactionRequest) ShallowCopy() Request {
 	return &shallowCopy
 }
 
+func (vca *ValidateCommitAfterRequest) ShallowCopy() Request {
+	shallowCopy := *vca
+	return &shallowCopy
+}
+
 // NewGet returns a Request initialized to get the value at key.
 func NewGet(key Key) Request {
 	return &GetRequest{
@@ -860,6 +867,7 @@ func (*TruncateLogRequest) flags() int             { return isWrite | isNonKV }
 func (*UpdateTransactionRecordRequest) flags() int { return isRead | isTxn }
 func (*ResolveWriteSoftLocksRequest) flags() int   { return isWrite | isTxn }
 func (*DyTSEndTransactionRequest) flags() int      { return isWrite | isTxn }
+func (*ValidateCommitAfterRequest) flags() int     { return isRead | isTxn }
 
 // MergeRequests are considered "non KV" because they do not need to be gated
 // by the command queue (reordering is ok) and they operate on non-MVCC data so

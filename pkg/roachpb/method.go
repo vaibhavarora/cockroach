@@ -129,4 +129,6 @@ const (
 	ResolveWriteSlock
 	// Dynamic Timestamp's End Transaction
 	DyTsEndTransaction
+	// To Validate the entry in commit after queue
+	ValidateCommitAfter
 )

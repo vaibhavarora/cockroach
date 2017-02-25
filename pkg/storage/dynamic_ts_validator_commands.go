@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
@@ -18,8 +19,9 @@ type DyTSValidatorCommand struct {
 }
 
 var DyTSValidatorCommands = map[roachpb.Method]DyTSValidatorCommand{
-	roachpb.UpdateTxnRecord:    {EvalDyTSValidatorCommand: EvalDyTSUpdateTransactionRecord},
-	roachpb.DyTsEndTransaction: {EvalDyTSValidatorCommand: EvalDyTSValidatorEndTransaction},
+	roachpb.UpdateTxnRecord:     {EvalDyTSValidatorCommand: EvalDyTSUpdateTransactionRecord},
+	roachpb.DyTsEndTransaction:  {EvalDyTSValidatorCommand: EvalDyTSValidatorEndTransaction},
+	roachpb.ValidateCommitAfter: {EvalDyTSValidatorCommand: EvalDyTSValidateCommitAfter},
 }
 
 func (r *Replica) executeDyTSValidatorCmd(
@@ -112,22 +114,21 @@ func EvalDyTSUpdateTransactionRecord(
 			log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : coudnt find transaction record in this range")
 		}
 		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
-	} else if ok {
-		if log.V(2) {
-			log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : found transaction record in this range")
-		}
-		// Update the Transaction record
-		txnRecord.DynamicTimestampLowerBound.Forward(args.LowerBound)
-		txnRecord.DynamicTimestampUpperBound.Backward(args.UpperBound)
-		for _, txn := range args.CommitAfterThem {
-			txnRecord.CommitAfterThem = append(txnRecord.CommitAfterThem, txn)
-		}
-		for _, txn := range args.CommitBeforeThem {
-			txnRecord.CommitBeforeThem = append(txnRecord.CommitBeforeThem, txn)
-		}
-		// Save the updated Transaction record
-		return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
 	}
+	if log.V(2) {
+		log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : found transaction record in this range")
+	}
+	// Update the Transaction record
+	txnRecord.DynamicTimestampLowerBound.Forward(args.LowerBound)
+	txnRecord.DynamicTimestampUpperBound.Backward(args.UpperBound)
+	for _, txn := range args.CommitAfterThem {
+		txnRecord.CommitAfterThem = append(txnRecord.CommitAfterThem, txn)
+	}
+	for _, txn := range args.CommitBeforeThem {
+		txnRecord.CommitBeforeThem = append(txnRecord.CommitBeforeThem, txn)
+	}
+	// Save the updated Transaction record
+	return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
 
 	return EvalResult{}, nil
 }
@@ -137,6 +138,132 @@ func EvalDyTSValidatorEndTransaction(
 	batch engine.ReadWriter,
 	cArgs CommandArgs,
 	resp roachpb.Response) (EvalResult, error) {
-	return EvalResult{}, nil
 
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSValidatorEndTransaction")
+	}
+	args := cArgs.Args.(*roachpb.DyTSEndTransactionRequest)
+
+	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
+
+	var txnRecord roachpb.Transaction
+	if ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
+	); err != nil {
+		return EvalResult{}, err
+	} else if !ok {
+		if log.V(2) {
+			log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : coudnt find transaction record in this range")
+		}
+		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
+	}
+	if log.V(2) {
+		log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : found transaction record in this range")
+	}
+	if args.Commit {
+		txnRecord.DynamicTimestampLowerBound = *args.Deadline
+		txnRecord.DynamicTimestampUpperBound = *args.Deadline
+		txnRecord.OrigTimestamp = *args.Deadline
+		txnRecord.Status = roachpb.COMMITTED
+	} else {
+		txnRecord.Status = roachpb.ABORTED
+	}
+	// Save the updated Transaction record
+	if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
+		return EvalResult{}, err
+	}
+
+	if args.Commit {
+		// Resolve Local Write Soft locks
+		externalWriteSpans := cArgs.Repl.resolveLocalSoftWriteLocks(ctx, batch, cArgs.Stats, *args, &txnRecord)
+		if log.V(2) {
+			log.Infof(ctx, "external write spans : %v", externalWriteSpans)
+		}
+		// Add external write soft locks to asyncronous processing
+	} else {
+		// add write spans to garbage collect
+	}
+	// add read spans to garbage collect
+
+	//Asyncronously garbage collect soft locks
+
+	return EvalResult{}, nil
+}
+
+func EvalDyTSValidateCommitAfter(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+
+	return EvalResult{}, nil
+}
+
+// resolveLocalSoftWriteLocks synchronously resolves any soft locks that are
+// local to this range in the same batch. The remainder are collected
+// and returned so that they can be handed off to asynchronous
+// processing.
+func (r *Replica) resolveLocalSoftWriteLocks(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	ms *enginepb.MVCCStats,
+	args roachpb.DyTSEndTransactionRequest,
+	txn *roachpb.Transaction,
+) []roachpb.Span {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :resolveLocalIntents : begin ")
+	}
+	desc := r.Desc()
+	var preMergeDesc *roachpb.RangeDescriptor
+	if mergeTrigger := args.InternalCommitTrigger.GetMergeTrigger(); mergeTrigger != nil {
+		// If this is a merge, then use the post-merge descriptor to determine
+		// which intents are local (note that for a split, we want to use the
+		// pre-split one instead because it's larger).
+		preMergeDesc = desc
+		desc = &mergeTrigger.LeftDesc
+	}
+
+	var externalSoftWriteSpan []roachpb.Span
+	for _, span := range args.WriteSpans {
+		if err := func() error {
+			if len(span.EndKey) == 0 {
+				// For single-key intents, do a KeyAddress-aware check of
+				// whether it's contained in our Range.
+				if !containsKey(*desc, span.Key) {
+					externalSoftWriteSpan = append(externalSoftWriteSpan, span)
+					return nil
+				}
+				resolveMS := ms
+				if preMergeDesc != nil && !containsKey(*preMergeDesc, span.Key) {
+					// If this transaction included a merge and the intents
+					// are from the subsumed range, ignore the intent resolution
+					// stats, as they will already be accounted for during the
+					// merge trigger.
+					resolveMS = nil
+				}
+				return engine.MVCCresolveWriteSoftLock(ctx, batch, resolveMS, span, txn.OrigTimestamp, txn, r.slockcache)
+				//return engine.MVCCResolveWriteSoftLockUsingIter(ctx, batch, iterAndBuf, resolveMS, span)
+			}
+			// For intent ranges, cut into parts inside and outside our key
+			// range. Resolve locally inside, delegate the rest. In particular,
+			// an intent range for range-local data is correctly considered local.
+			inSpan, outSpans := intersectSpan(span, *desc)
+			for _, span := range outSpans {
+				externalSoftWriteSpan = append(externalSoftWriteSpan, span)
+			}
+			if inSpan != nil {
+				return engine.MVCCresolveWriteSoftLock(ctx, batch, ms, span, txn.OrigTimestamp, txn, r.slockcache)
+			}
+			return nil
+		}(); err != nil {
+			// TODO(tschottdorf): any legitimate reason for this to happen?
+			// Figure that out and if not, should still be ReplicaCorruption
+			// and not a panic.
+			panic(fmt.Sprintf("error resolving Local Write Soft locks at %s on end transaction [%s]: %s", span, txn.Status, err))
+		}
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :resolveLocalIntents : end")
+	}
+	return externalSoftWriteSpan
 }

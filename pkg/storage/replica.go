@@ -149,8 +149,9 @@ var consultsDyTSMethods = [...]bool{
 }
 
 var consultsDyTSValidatorMethods = [...]bool{
-	roachpb.UpdateTxnRecord:    true,
-	roachpb.DyTsEndTransaction: true,
+	roachpb.UpdateTxnRecord:     true,
+	roachpb.DyTsEndTransaction:  true,
+	roachpb.ValidateCommitAfter: true,
 }
 
 var consultsBlockMethods = [...]bool{

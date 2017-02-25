@@ -275,10 +275,15 @@ func EvalDyTSValidationRequestEndTransaction(
 	var txnrcd roachpb.Transaction
 	args := dargs.args.(*roachpb.EndTransactionRequest)
 	reply := resp.(*roachpb.EndTransactionResponse)
-	if txnrcd, err = executeValidator(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h); err != nil {
-		return err
+	if args.Commit {
+		if txnrcd, err = executeValidator(ctx, dargs.s, dargs.batch, dargs.txncache, dargs.h); err != nil {
+			return err
+		}
+	} else {
+		txnrcd.Status = roachpb.ABORTED
 	}
-	if err = sendDyTSEndTranactionRPC(ctx, dargs.s, dargs.batch, dargs.h, txnrcd, args.IntentSpans, args.ReadSpans); err != nil {
+
+	if err = sendDyTSEndTranactionRPC(ctx, dargs.s, dargs.batch, dargs.h, txnrcd, *args); err != nil {
 		return err
 	}
 
@@ -292,8 +297,7 @@ func sendDyTSEndTranactionRPC(
 	batch engine.ReadWriter,
 	h roachpb.Header,
 	txnrcd roachpb.Transaction,
-	rspans []roachpb.Span,
-	wspans []roachpb.Span,
+	args roachpb.EndTransactionRequest,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In sendDyTSEndTranactionRPC")
@@ -303,10 +307,14 @@ func sendDyTSEndTranactionRPC(
 		Span: roachpb.Span{
 			Key: txnrcd.Key,
 		},
-		Txnrecord: txnrcd,
 	}
-	dytsendtxnreq.ReadSpans = append(dytsendtxnreq.ReadSpans, rspans...)
-	dytsendtxnreq.WriteSpans = append(dytsendtxnreq.WriteSpans, wspans...)
+	dytsendtxnreq.ReadSpans = append(dytsendtxnreq.ReadSpans, args.IntentSpans...)
+	dytsendtxnreq.WriteSpans = append(dytsendtxnreq.WriteSpans, args.ReadSpans...)
+	dytsendtxnreq.Commit = txnrcd.Status == roachpb.COMMITTED
+	dytsendtxnreq.Deadline = &txnrcd.OrigTimestamp
+	dytsendtxnreq.InternalCommitTrigger = args.InternalCommitTrigger
+	dytsendtxnreq.Tmeta = txnrcd.TxnMeta
+
 	b := &client.Batch{}
 	//b.Header = cArgs.Header
 	//b.Header.Timestamp = hlc.ZeroTimestamp

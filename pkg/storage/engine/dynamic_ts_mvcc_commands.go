@@ -3,6 +3,7 @@ package engine
 import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"golang.org/x/net/context"
 )
@@ -21,10 +22,11 @@ var DyTSMVCCCommands = map[roachpb.Method]DyTSMVCCCommand{
 }
 
 type DyTSmArgs struct {
-	engine ReadWriter
-	ms     *enginepb.MVCCStats
-	h      roachpb.Header
-	Args   roachpb.Request
+	engine    ReadWriter
+	ms        *enginepb.MVCCStats
+	timestamp hlc.Timestamp
+	txn       *roachpb.Transaction
+	Args      roachpb.Request
 }
 
 func EvalDyTSMVCCPut(

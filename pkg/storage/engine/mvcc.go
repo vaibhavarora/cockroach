@@ -2250,21 +2250,23 @@ func MVCCresolveWriteSoftLock(
 	engine ReadWriter,
 	ms *enginepb.MVCCStats,
 	span roachpb.Span,
-	h roachpb.Header,
+	timestamp hlc.Timestamp,
+	txn *roachpb.Transaction,
 	slcache *SoftLockCache,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In MVCCresolveWriteSoftLock")
 	}
 	var err error
-	wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
+	wslock := slcache.getWriteSoftLock(span.Key, *txn.ID)
 	args := wslock.Request.GetInner()
 	if cmd, ok := DyTSMVCCCommands[args.Method()]; ok {
 		dmArgs := DyTSmArgs{
-			h:      h,
-			engine: engine,
-			Args:   args.ShallowCopy(),
-			ms:     ms,
+			txn:       txn,
+			timestamp: timestamp,
+			engine:    engine,
+			Args:      args.ShallowCopy(),
+			ms:        ms,
 		}
 		if log.V(2) {
 			log.Infof(ctx, "Ravi : executing cmd %v with cArgs %v ", args.Method(), dmArgs)
