@@ -128,10 +128,10 @@ func (r *Replica) executeCmd(
 	maxKeys int64,
 	args roachpb.Request,
 	reply roachpb.Response,
-) (EvalResult, SoftLocks, *roachpb.Error) {
+) (EvalResult, *roachpb.Error) {
 
 	if _, ok := args.(*roachpb.NoopRequest); ok {
-		return EvalResult{}, SoftLocks{}, nil
+		return EvalResult{}, nil
 	}
 
 	// If a unittest filter was installed, check for an injected error; otherwise, continue.
@@ -140,7 +140,7 @@ func (r *Replica) executeCmd(
 			Sid: r.store.StoreID(), Req: args, Hdr: h}
 		if pErr := filter(filterArgs); pErr != nil {
 			log.Infof(ctx, "test injecting error: %s", pErr)
-			return EvalResult{}, SoftLocks{}, pErr
+			return EvalResult{}, pErr
 		}
 	}
 
@@ -202,7 +202,7 @@ func (r *Replica) executeCmd(
 		pErr = roachpb.NewErrorWithTxn(err, txn)
 	}
 
-	return pd, SoftLocks{}, pErr
+	return pd, pErr
 }
 
 func intentsToEvalResult(intents []roachpb.Intent, args roachpb.Request) EvalResult {
