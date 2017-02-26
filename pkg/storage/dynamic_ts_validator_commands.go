@@ -287,6 +287,10 @@ func EvalDyTSGcWriteSoftLock(
 	if log.V(2) {
 		log.Infof(ctx, "In EvalDyTSGcWriteSoftLock")
 	}
+	args := cArgs.Args.(*roachpb.GCWriteSoftockRequest)
+	if err := engine.MVCCRemoveWriteSoftLock(ctx, batch, args.Txnrecord, args.Span, cArgs.Repl.slockcache); err != nil {
+		return EvalResult{}, err
+	}
 	return EvalResult{}, nil
 }
 func EvalDyTSGcReadSoftLock(
@@ -297,6 +301,10 @@ func EvalDyTSGcReadSoftLock(
 
 	if log.V(2) {
 		log.Infof(ctx, "In EvalDyTSGcReadSoftLock")
+	}
+	args := cArgs.Args.(*roachpb.GCReadSoftockRequest)
+	if err := engine.MVCCRemoveReadSoftLock(ctx, batch, args.Txnrecord, args.Span, cArgs.Repl.slockcache); err != nil {
+		return EvalResult{}, err
 	}
 	return EvalResult{}, nil
 }

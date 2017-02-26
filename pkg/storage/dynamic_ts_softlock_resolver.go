@@ -157,6 +157,50 @@ func (sr *softLockResolver) gcWriteSoftLocks(
 	now hlc.Timestamp,
 	wait bool,
 ) error {
+	// Everything here is best effort; give up rather than waiting
+	// too long (helps avoid deadlocks during test shutdown,
+	// although this is imperfect due to the use of an
+	// uninterruptible WaitGroup.Wait in beginCmds).
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, base.NetworkTimeout)
+	defer cancel()
+
+	var reqs []roachpb.Request
+	for i := range wslockspans {
+		wslockspan := wslockspans[i] // avoids a race in `i, intent := range ...`
+		var resolveArgs roachpb.Request
+		{
+
+			resolveArgs = &roachpb.GCWriteSoftockRequest{
+				Span:      wslockspan,
+				Txnrecord: txnrecord,
+			}
+
+		}
+
+		reqs = append(reqs, resolveArgs)
+	}
+	// Resolve all of the write soft locks.
+	if len(reqs) > 0 {
+		b := &client.Batch{}
+		b.AddRawRequest(reqs...)
+		action := func() error {
+			// TODO(tschottdorf): no tracing here yet.
+			return sr.store.DB().Run(ctx, b)
+		}
+		if wait || sr.store.Stopper().RunLimitedAsyncTask(
+			ctxWithTimeout, sr.sem, true /* wait */, func(ctx context.Context) {
+				if err := action(); err != nil {
+					log.Warningf(ctx, "unable to resolve external soft locks: %s", err)
+				}
+			}) != nil {
+			// Try async to not keep the caller waiting, but when draining
+			// just go ahead and do it synchronously. See #1684.
+			// TODO(tschottdorf): This is ripe for removal.
+			if err := action(); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

@@ -2278,74 +2278,69 @@ func MVCCresolveWriteSoftLock(
 	return err
 }
 
-// to be removed
 func MVCCRemoveWriteSoftLock(
 	ctx context.Context,
 	engine ReadWriter,
-	h roachpb.Header,
-	spans []roachpb.Span,
+	txnrcd roachpb.Transaction,
+	span roachpb.Span,
 	slcache *SoftLockCache,
-) []roachpb.WriteSoftLock {
+) error {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : In MVCCGetWriteSoftLock")
+		log.Infof(ctx, "Ravi : In MVCCRemoveWriteSoftLock")
 	}
-	var wslocks []roachpb.WriteSoftLock
-	//for _, span := range spans {
-	//if len(span.EndKey) == 0 {
-	// getting lock from cache
-	//wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
-	// removing the entry from cache
-	//slcache.removeFromWriteLockCache(wslock, span.Key)
-	//wslocks = append(wslocks, wslock)
-	/*} else {
-	wslock := slcache.getWriteSoftLock(span.Key, *h.Txn.ID)
-	//reverse := roachpb.IsReverse(wslock.Request.GetInner())
-
-	//keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, h, reverse)
-
-	for _, key := range keys {
+	if len(span.EndKey) == 0 {
 		// getting lock from cache
-		wslock := slcache.getWriteSoftLock(key, *h.Txn.ID)
+		wslock := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
 		// removing the entry from cache
-		//slcache.removeFromWriteLockCache(wslock, span.Key)
-		wslocks = append(wslocks, wslock)
-	}*/
-	//}
-	//}
-	return wslocks
+		slcache.removeFromWriteLockCache(wslock, span.Key)
+	} else {
+		wslock := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
+		reverse := roachpb.IsReverse(wslock.Request.GetInner())
+
+		keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, txnrcd, reverse)
+
+		for _, key := range keys {
+			// getting lock from cache
+			wslock := slcache.getWriteSoftLock(key, *txnrcd.ID)
+			// removing the entry from cache
+			slcache.removeFromWriteLockCache(wslock, span.Key)
+		}
+	}
+
+	return nil
 }
 
 // This will remove the entry in the soft lock cache and gets the lock
 func MVCCRemoveReadSoftLock(
 	ctx context.Context,
 	engine ReadWriter,
-	h roachpb.Header,
-	spans []roachpb.Span,
+	txnrcd roachpb.Transaction,
+	span roachpb.Span,
 	slcache *SoftLockCache,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In MVCCRemoveReadSoftLock")
 	}
-	for _, span := range spans {
-		if len(span.EndKey) == 0 {
+
+	if len(span.EndKey) == 0 {
+		// getting lock from cache
+		rslock := slcache.getReadSoftLock(span.Key, *txnrcd.ID)
+		// removing the entry from cache
+		slcache.removeFromReadLockCache(rslock, span.Key)
+
+	} else {
+		rslock := slcache.getReadSoftLock(span.Key, *txnrcd.ID)
+		keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, txnrcd, rslock.Reverse)
+
+		for _, key := range keys {
 			// getting lock from cache
-			rslock := slcache.getReadSoftLock(span.Key, *h.Txn.ID)
+			rslock := slcache.getReadSoftLock(key, *txnrcd.ID)
 			// removing the entry from cache
 			slcache.removeFromReadLockCache(rslock, span.Key)
 
-		} else {
-			rslock := slcache.getReadSoftLock(span.Key, *h.Txn.ID)
-			keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, h, rslock.Reverse)
-
-			for _, key := range keys {
-				// getting lock from cache
-				rslock := slcache.getReadSoftLock(key, *h.Txn.ID)
-				// removing the entry from cache
-				slcache.removeFromReadLockCache(rslock, span.Key)
-
-			}
 		}
 	}
+
 	return nil
 }
 
@@ -2353,22 +2348,12 @@ func MVCCgetKeysUsingIter(
 	ctx context.Context,
 	start, end roachpb.Key,
 	engine ReadWriter,
-	h roachpb.Header,
+	txnrcd roachpb.Transaction,
 	reverse bool) (keys []roachpb.Key) {
 
-	maxKeys := int64(math.MaxInt64)
-	if h.MaxSpanRequestKeys != 0 {
-		// We have a batch of requests with a limit. We keep track of how many
-		// remaining keys we can touch.
-		maxKeys = h.MaxSpanRequestKeys
-	}
 	var res []roachpb.Key
-	_, _, _ = MVCCIterate(ctx, engine, start, end, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, reverse,
+	_, _, _ = MVCCIterate(ctx, engine, start, end, txnrcd.OrigTimestamp, true, &txnrcd, reverse,
 		func(kv roachpb.KeyValue) (bool, error) {
-			if int64(len(res)) == maxKeys {
-				// Another key was found beyond the max limit.
-				return true, nil
-			}
 			res = append(res, kv.Key)
 			return false, nil
 		}, nil, false)

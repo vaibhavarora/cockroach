@@ -348,7 +348,7 @@ func EvalDyTSDeleteRange(
 	var req roachpb.RequestUnion
 	req.MustSetInner(args)
 
-	keys := engine.MVCCgetKeysUsingIter(ctx, args.Key, args.EndKey, batch, cArgs.Header, false)
+	keys := engine.MVCCgetKeysUsingIter(ctx, args.Key, args.EndKey, batch, *cArgs.Header.Txn, false)
 
 	var wslocks []roachpb.WriteSoftLock
 	var rslocks []roachpb.ReadSoftLock

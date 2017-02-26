@@ -177,14 +177,6 @@ func consultsDyTSValidatorCommands(r roachpb.Request) bool {
 	return consultsDyTSValidatorMethods[m]
 }
 
-func consultsDyTSValidationRequests(r roachpb.Request) bool {
-	m := r.Method()
-	if m < 0 || m >= roachpb.Method(len(consultsDyTSMethods)) {
-		return false
-	}
-	return consultsDyTSMethods[m]
-}
-
 func consultsBlockCommands(r roachpb.Request) bool {
 	m := r.Method()
 	if m < 0 || m >= roachpb.Method(len(consultsBlockMethods)) {
