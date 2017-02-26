@@ -77,5 +77,4 @@ func sendDyTSEndTranactionRPC(
 		}
 	}
 	return nil
-	return nil
 }
