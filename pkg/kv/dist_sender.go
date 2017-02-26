@@ -35,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/instrumentation"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
@@ -379,6 +380,8 @@ func (ds *DistSender) getNodeDescriptor() *roachpb.NodeDescriptor {
 func (ds *DistSender) sendRPC(
 	ctx context.Context, rangeID roachpb.RangeID, replicas ReplicaSlice, ba roachpb.BatchRequest, firstAttempt bool,
 ) (*roachpb.BatchResponse, error) {
+	instrumentation.IncrementParam(instrumentation.F_DistSender_sendRPC, 1)
+
 	if len(replicas) == 0 {
 		return nil, roachpb.NewSendError(
 			fmt.Sprintf("no replica node addresses available via gossip for range %d", rangeID))
@@ -405,6 +408,8 @@ func (ds *DistSender) sendRPC(
 
 	var customReplicas ReplicaSlice
 	if roachpb.GetReadType() != roachpb.DefaultReadType && ba.HasSingleGetOrScan() {
+		instrumentation.IncrementParam(instrumentation.V_DistSender_sendRPC_specialRequestCount, 1)
+
 		switch roachpb.GetReadType() {
 		case roachpb.LocalReadType:
 			if index := getLocalReplicaIndex(ds, replicas); index != -1 {
@@ -1038,6 +1043,13 @@ func (ds *DistSender) sendPartialBatch(
 	evictToken *EvictionToken,
 	isFirst bool,
 ) response {
+	instrumentation.IncrementParam(instrumentation.F_DistSender_sendPartialBatch, 1)
+
+	numTries := 0
+	defer func() {
+		instrumentation.IncrementParam(instrumentation.V_DistSender_sendPartialBatch_numTries, numTries)
+	}()
+
 	ds.metrics.PartialBatchCount.Inc(1)
 
 	var reply *roachpb.BatchResponse
@@ -1063,6 +1075,8 @@ func (ds *DistSender) sendPartialBatch(
 
 	// Start a retry loop for sending the batch to the range.
 	for r := retry.StartWithCtx(ctx, ds.rpcRetryOptions); r.Next(); {
+		numTries++
+
 		// If we've cleared the descriptor on a send failure, re-lookup.
 		if desc == nil {
 			var descKey roachpb.RKey
@@ -1349,6 +1363,8 @@ func (ds *DistSender) sendToAllReplicas(
 	args roachpb.BatchRequest,
 	rpcContext *rpc.Context,
 ) (*roachpb.BatchResponse, error) {
+	instrumentation.IncrementParam(instrumentation.F_DistSender_sendToAllReplicas, 1)
+
 	if !args.HasSingleGetOrScan() {
 		return nil, roachpb.NewSendError(
 			fmt.Sprint("sendToAllReplicas only supports single Get/Scan/ReverseScan"))
@@ -1451,6 +1467,8 @@ func (ds *DistSender) sendToReplicas(
 	args roachpb.BatchRequest,
 	rpcContext *rpc.Context,
 ) (*roachpb.BatchResponse, error) {
+	instrumentation.IncrementParam(instrumentation.F_DistSender_sendToReplicas, 1)
+
 	if len(replicas) < 1 {
 		return nil, roachpb.NewSendError(
 			fmt.Sprintf("insufficient replicas (%d) to satisfy send request of %d",

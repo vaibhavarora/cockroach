@@ -57,6 +57,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
+	"github.com/cockroachdb/cockroach/pkg/util/instrumentation"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
@@ -398,6 +399,8 @@ type grpcGatewayServer interface {
 // The passed context can be used to trace the server startup. The context
 // should represent the general startup operation.
 func (s *Server) Start(ctx context.Context) error {
+	instrumentation.Start()
+
 	ctx = s.AnnotateCtx(ctx)
 
 	startTime := timeutil.Now()
@@ -833,6 +836,7 @@ func (s *Server) startSampleEnvironment(frequency time.Duration) {
 // Stop stops the server.
 func (s *Server) Stop() {
 	s.stopper.Stop()
+	instrumentation.Stop()
 }
 
 // ServeHTTP is necessary to implement the http.Handler interface.

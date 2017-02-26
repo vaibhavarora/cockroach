@@ -48,6 +48,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/instrumentation"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
@@ -2338,6 +2339,13 @@ func (s *Store) LeaseCount() int {
 func (s *Store) Send(
 	ctx context.Context, ba roachpb.BatchRequest,
 ) (br *roachpb.BatchResponse, pErr *roachpb.Error) {
+	instrumentation.IncrementParam(instrumentation.F_Store_Send, 1)
+
+	numTries := 0
+	defer func() {
+		instrumentation.IncrementParam(instrumentation.V_Store_Send_numTries, numTries)
+	}()
+
 	// Attach any log tags from the store to the context (which normally
 	// comes from gRPC).
 	ctx = s.AnnotateCtx(ctx)
@@ -2455,6 +2463,8 @@ func (s *Store) Send(
 	retryOpts := s.cfg.RangeRetryOptions
 	s.mu.Unlock()
 	for r := retry.StartWithCtx(ctx, retryOpts); next(&r); {
+		numTries++
+
 		// Get range and add command to the range for execution.
 		repl, err := s.GetReplica(ba.RangeID)
 		if err != nil {

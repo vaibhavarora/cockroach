@@ -50,6 +50,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/instrumentation"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -1854,6 +1855,8 @@ func (r *Replica) addReadOnlyCmd(
 		pErr = r.checkIfTxnAborted(ctx, r.store.Engine(), *ba.Txn)
 	}
 	if intents := result.Local.detachIntents(); len(intents) > 0 {
+		instrumentation.IncrementParam(instrumentation.V_Replica_addReadOnlyCmd_intentFoundCount, 1)
+
 		if roachpb.GetReadType() == roachpb.StronglyConsistentQuorumReadType && ba.HasSingleGetOrScan() &&
 			ba.ReadConsistency == roachpb.INCONSISTENT {
 			if log.V(2) {
@@ -1876,6 +1879,7 @@ func (r *Replica) addReadOnlyCmd(
 // Updates the reponse Value.RawBytes to nil if there is conflicting intent
 func updateResponseWithIntentTimestamp(ba roachpb.BatchRequest, br *roachpb.BatchResponse,
 	intents []intentsWithArg) {
+	instrumentation.IncrementParam(instrumentation.F_updateResponseWithIntentTimestamp, 1)
 
 	tsToSpanMap := make(map[hlc.Timestamp]roachpb.Span)
 	for _, item := range intents {
