@@ -24,6 +24,7 @@ var DyTSValidatorCommands = map[roachpb.Method]DyTSValidatorCommand{
 	roachpb.ValidateCommitAfter:  {EvalDyTSValidatorCommand: EvalDyTSValidateCommitAfter},
 	roachpb.ValidateCommitBefore: {EvalDyTSValidatorCommand: EvalDyTSValidateCommitBefore},
 	roachpb.GcWriteSoftLock:      {EvalDyTSValidatorCommand: EvalDyTSGcWriteSoftLock},
+	roachpb.GcReadSoftLock:       {EvalDyTSValidatorCommand: EvalDyTSGcReadSoftLock},
 }
 
 func (r *Replica) executeDyTSValidatorCmd(
@@ -285,6 +286,17 @@ func EvalDyTSGcWriteSoftLock(
 
 	if log.V(2) {
 		log.Infof(ctx, "In EvalDyTSGcWriteSoftLock")
+	}
+	return EvalResult{}, nil
+}
+func EvalDyTSGcReadSoftLock(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSGcReadSoftLock")
 	}
 	return EvalResult{}, nil
 }

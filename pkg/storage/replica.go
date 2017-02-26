@@ -154,6 +154,7 @@ var consultsDyTSValidatorMethods = [...]bool{
 	roachpb.ValidateCommitAfter:  true,
 	roachpb.ValidateCommitBefore: true,
 	roachpb.GcWriteSoftLock:      true,
+	roachpb.GcReadSoftLock:       true,
 }
 
 var consultsBlockMethods = [...]bool{

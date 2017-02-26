@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-type reqCounts [36]int32
+type reqCounts [37]int32
 
 // getReqCounts returns the number of times each
 // request type appears in the batch.
@@ -87,6 +87,8 @@ func (ba *BatchRequest) getReqCounts() reqCounts {
 			counts[34]++
 		case r.GcWriteSoftLock != nil:
 			counts[35]++
+		case r.GcReadSoftLock != nil:
+			counts[36]++
 		default:
 			panic(fmt.Sprintf("unsupported request: %+v", r))
 		}
@@ -131,6 +133,7 @@ var requestNames = []string{
 	"ValidateCommitAfter",
 	"ValidateCommitBefore",
 	"GcWriteSoftLock",
+	"GcReadSoftLock",
 }
 
 // Summary prints a short summary of the requests in a batch.
@@ -196,6 +199,7 @@ func (ba *BatchRequest) CreateReply() *BatchResponse {
 	var buf33 []ValidateCommitAfterResponse
 	var buf34 []ValidateCommitBeforeResponse
 	var buf35 []GCWriteSoftockResponse
+	var buf36 []GCReadSoftockResponse
 
 	for i, r := range ba.Requests {
 		switch {
@@ -415,6 +419,12 @@ func (ba *BatchRequest) CreateReply() *BatchResponse {
 			}
 			br.Responses[i].GcWriteSoftLock = &buf35[0]
 			buf35 = buf35[1:]
+		case r.GcReadSoftLock != nil:
+			if buf36 == nil {
+				buf36 = make([]GCReadSoftockResponse, counts[36])
+			}
+			br.Responses[i].GcReadSoftLock = &buf36[0]
+			buf36 = buf36[1:]
 		default:
 			panic(fmt.Sprintf("unsupported request: %+v", r))
 		}

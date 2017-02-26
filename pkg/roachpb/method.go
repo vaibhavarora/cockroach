@@ -135,4 +135,6 @@ const (
 	ValidateCommitBefore
 	// Garbage collect write soft locks
 	GcWriteSoftLock
+	// Garbage collect read soft locks
+	GcReadSoftLock
 )

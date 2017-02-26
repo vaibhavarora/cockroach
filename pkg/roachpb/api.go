@@ -489,6 +489,9 @@ func (*ValidateCommitBeforeRequest) Method() Method { return ValidateCommitBefor
 // Method implements the Request interface.
 func (*GCWriteSoftockRequest) Method() Method { return GcWriteSoftLock }
 
+// Method implements the Request interface.
+func (*GCReadSoftockRequest) Method() Method { return GcReadSoftLock }
+
 // ShallowCopy implements the Request interface.
 func (gr *GetRequest) ShallowCopy() Request {
 	shallowCopy := *gr
@@ -699,6 +702,11 @@ func (gcw *GCWriteSoftockRequest) ShallowCopy() Request {
 	return &shallowCopy
 }
 
+func (gcr *GCReadSoftockRequest) ShallowCopy() Request {
+	shallowCopy := *gcr
+	return &shallowCopy
+}
+
 // NewGet returns a Request initialized to get the value at key.
 func NewGet(key Key) Request {
 	return &GetRequest{
@@ -889,6 +897,7 @@ func (*DyTSEndTransactionRequest) flags() int      { return isWrite | isTxn }
 func (*ValidateCommitAfterRequest) flags() int     { return isRead | isTxn }
 func (*ValidateCommitBeforeRequest) flags() int    { return isRead | isTxn }
 func (*GCWriteSoftockRequest) flags() int          { return isRead | isTxn }
+func (*GCReadSoftockRequest) flags() int           { return isRead | isTxn }
 
 // MergeRequests are considered "non KV" because they do not need to be gated
 // by the command queue (reordering is ok) and they operate on non-MVCC data so
