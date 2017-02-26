@@ -417,7 +417,7 @@ func (ds *DistSender) sendRPC(
 			}
 
 		case roachpb.QuorumReadType, roachpb.StronglyConsistentQuorumReadType:
-			if firstAttempt && tossBiasedCoin(len(replicas)) {
+			if tossBiasedCoin(len(replicas)) {
 				customReplicas = createQuorumReplicas(ds, ctx, rangeID, replicas)
 			}
 		}
