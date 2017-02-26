@@ -231,7 +231,7 @@ func setAppliedIndexCommon(
 			keys.RaftAppliedIndexKey(rangeID),
 			hlc.ZeroTimestamp,
 			value,
-			nil /* txn */); err != nil {
+			nil /* txn */, nil, false); err != nil {
 			return err
 		}
 	} else {
@@ -239,7 +239,7 @@ func setAppliedIndexCommon(
 			keys.RaftAppliedIndexKey(rangeID),
 			hlc.ZeroTimestamp,
 			value,
-			nil /* txn */); err != nil {
+			nil /* txn */, nil, false); err != nil {
 			return err
 		}
 	}
@@ -248,7 +248,7 @@ func setAppliedIndexCommon(
 		keys.LeaseAppliedIndexKey(rangeID),
 		hlc.ZeroTimestamp,
 		value,
-		nil /* txn */)
+		nil /* txn */, nil, false)
 }
 
 func inlineValueIntEncodedSize(v int64) int {
@@ -367,7 +367,7 @@ func setFrozenStatus(
 	var val roachpb.Value
 	val.SetBool(frozen == storagebase.ReplicaState_FROZEN)
 	return engine.MVCCPut(ctx, eng, ms,
-		keys.RangeFrozenStatusKey(rangeID), hlc.ZeroTimestamp, val, nil)
+		keys.RangeFrozenStatusKey(rangeID), hlc.ZeroTimestamp, val, nil, nil, false)
 }
 
 func loadFrozenStatus(
@@ -433,7 +433,7 @@ func setLastIndex(
 	return engine.MVCCPut(ctx, eng, nil, keys.RaftLastIndexKey(rangeID),
 		hlc.ZeroTimestamp,
 		value,
-		nil /* txn */)
+		nil /* txn */, nil, false)
 }
 
 // loadReplicaDestroyedError loads the replica destroyed error for the specified

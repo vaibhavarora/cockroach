@@ -451,9 +451,9 @@ func (r *Replica) append(
 		value.InitChecksum(key)
 		var err error
 		if ent.Index > prevLastIndex {
-			err = engine.MVCCBlindPut(ctx, batch, &diff, key, hlc.ZeroTimestamp, value, nil /* txn */)
+			err = engine.MVCCBlindPut(ctx, batch, &diff, key, hlc.ZeroTimestamp, value, nil /* txn */, nil, false)
 		} else {
-			err = engine.MVCCPut(ctx, batch, &diff, key, hlc.ZeroTimestamp, value, nil /* txn */)
+			err = engine.MVCCPut(ctx, batch, &diff, key, hlc.ZeroTimestamp, value, nil /* txn */, nil, false)
 		}
 		if err != nil {
 			return 0, 0, err
@@ -464,7 +464,7 @@ func (r *Replica) append(
 	lastIndex := entries[len(entries)-1].Index
 	for i := lastIndex + 1; i <= prevLastIndex; i++ {
 		err := engine.MVCCDelete(ctx, batch, &diff, keys.RaftLogKey(r.RangeID, i),
-			hlc.ZeroTimestamp, nil /* txn */)
+			hlc.ZeroTimestamp, nil /* txn */, nil, false)
 		if err != nil {
 			return 0, 0, err
 		}

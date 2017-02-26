@@ -251,9 +251,9 @@ func evalPut(
 		}
 	}
 	if args.Blind {
-		return EvalResult{}, engine.MVCCBlindPut(ctx, batch, ms, args.Key, ts, args.Value, h.Txn)
+		return EvalResult{}, engine.MVCCBlindPut(ctx, batch, ms, args.Key, ts, args.Value, h.Txn, nil, false)
 	}
-	return EvalResult{}, engine.MVCCPut(ctx, batch, ms, args.Key, ts, args.Value, h.Txn)
+	return EvalResult{}, engine.MVCCPut(ctx, batch, ms, args.Key, ts, args.Value, h.Txn, nil, false)
 }
 
 // evalConditionalPut sets the value for a specified key only if
@@ -275,9 +275,9 @@ func evalConditionalPut(
 		}
 	}
 	if args.Blind {
-		return EvalResult{}, engine.MVCCBlindConditionalPut(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, args.Value, args.ExpValue, h.Txn)
+		return EvalResult{}, engine.MVCCBlindConditionalPut(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, args.Value, args.ExpValue, h.Txn, nil, false)
 	}
-	return EvalResult{}, engine.MVCCConditionalPut(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, args.Value, args.ExpValue, h.Txn)
+	return EvalResult{}, engine.MVCCConditionalPut(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, args.Value, args.ExpValue, h.Txn, nil, false)
 }
 
 // evalInitPut sets the value for a specified key only if it doesn't exist. It
@@ -289,7 +289,7 @@ func evalInitPut(
 	args := cArgs.Args.(*roachpb.InitPutRequest)
 	h := cArgs.Header
 
-	return EvalResult{}, engine.MVCCInitPut(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, args.Value, h.Txn)
+	return EvalResult{}, engine.MVCCInitPut(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, args.Value, h.Txn, nil, false)
 }
 
 // evalIncrement increments the value (interpreted as varint64 encoded) and
@@ -302,7 +302,7 @@ func evalIncrement(
 	h := cArgs.Header
 	reply := resp.(*roachpb.IncrementResponse)
 
-	newVal, err := engine.MVCCIncrement(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, h.Txn, args.Increment)
+	newVal, err := engine.MVCCIncrement(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, h.Txn, args.Increment, nil, false)
 	reply.NewValue = newVal
 	return EvalResult{}, err
 }
@@ -314,7 +314,7 @@ func evalDelete(
 	args := cArgs.Args.(*roachpb.DeleteRequest)
 	h := cArgs.Header
 
-	return EvalResult{}, engine.MVCCDelete(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, h.Txn)
+	return EvalResult{}, engine.MVCCDelete(ctx, batch, cArgs.Stats, args.Key, h.Timestamp, h.Txn, nil, false)
 }
 
 // evalDeleteRange deletes the range of key/value pairs specified by
@@ -331,7 +331,7 @@ func evalDeleteRange(
 		timestamp = h.Timestamp
 	}
 	deleted, resumeSpan, num, err := engine.MVCCDeleteRange(
-		ctx, batch, cArgs.Stats, args.Key, args.EndKey, cArgs.MaxKeys, timestamp, h.Txn, args.ReturnKeys,
+		ctx, batch, cArgs.Stats, args.Key, args.EndKey, cArgs.MaxKeys, timestamp, h.Txn, args.ReturnKeys, nil, false,
 	)
 	if err == nil {
 		reply.Keys = deleted
@@ -786,7 +786,7 @@ func updateTxnWithExternalIntents(
 		if log.V(2) {
 			log.Infof(ctx, "auto-gc'ed %s (%d intents)", txn.Short(), len(args.IntentSpans))
 		}
-		return engine.MVCCDelete(ctx, batch, ms, key, hlc.ZeroTimestamp, nil /* txn */)
+		return engine.MVCCDelete(ctx, batch, ms, key, hlc.ZeroTimestamp, nil /* txn */, nil, false)
 	}
 	txn.Intents = make([]roachpb.Span, len(externalIntents))
 	for i := range externalIntents {
@@ -1596,7 +1596,7 @@ func evalTruncateLog(
 	// Passing zero timestamp to MVCCDeleteRange is equivalent to a ranged clear
 	// but it also computes stats.
 	if _, _, _, err := engine.MVCCDeleteRange(ctx, batch, &diff, start, end, math.MaxInt64, /* max */
-		hlc.ZeroTimestamp, nil /* txn */, false /* returnKeys */); err != nil {
+		hlc.ZeroTimestamp, nil /* txn */, false /* returnKeys */, nil, false); err != nil {
 		return EvalResult{}, err
 	}
 
@@ -2983,7 +2983,7 @@ func (r *Replica) mergeTrigger(
 	// keep track of stats here, because we already set the right range's
 	// system-local stats contribution to 0.
 	localRangeIDKeyPrefix := keys.MakeRangeIDPrefix(rightRangeID)
-	if _, _, _, err := engine.MVCCDeleteRange(ctx, batch, nil, localRangeIDKeyPrefix, localRangeIDKeyPrefix.PrefixEnd(), math.MaxInt64, hlc.ZeroTimestamp, nil, false); err != nil {
+	if _, _, _, err := engine.MVCCDeleteRange(ctx, batch, nil, localRangeIDKeyPrefix, localRangeIDKeyPrefix.PrefixEnd(), math.MaxInt64, hlc.ZeroTimestamp, nil, false, nil, false); err != nil {
 		return EvalResult{}, errors.Errorf("cannot remove range metadata %s", err)
 	}
 

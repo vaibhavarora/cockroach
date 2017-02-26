@@ -484,7 +484,7 @@ func MVCCPutProto(
 		return err
 	}
 	value.InitChecksum(key)
-	return MVCCPut(ctx, engine, ms, key, timestamp, value, txn)
+	return MVCCPut(ctx, engine, ms, key, timestamp, value, txn, nil, false)
 }
 
 type getBuffer struct {
@@ -904,6 +904,8 @@ func MVCCPut(
 	timestamp hlc.Timestamp,
 	value roachpb.Value,
 	txn *roachpb.Transaction,
+	slcache *SoftLockCache,
+	nointent bool,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :MVCCPut : begin")
@@ -916,7 +918,7 @@ func MVCCPut(
 		iter = engine.NewIterator(true)
 		defer iter.Close()
 	}
-	return mvccPutUsingIter(ctx, engine, iter, ms, key, timestamp, value, txn, nil /* valueFn */)
+	return mvccPutUsingIter(ctx, engine, iter, ms, key, timestamp, value, txn, nil /* valueFn */, slcache, nointent)
 }
 
 // MVCCBlindPut is a fast-path of MVCCPut. See the MVCCPut comments for details
@@ -933,8 +935,10 @@ func MVCCBlindPut(
 	timestamp hlc.Timestamp,
 	value roachpb.Value,
 	txn *roachpb.Transaction,
+	slcache *SoftLockCache,
+	nointent bool,
 ) error {
-	return mvccPutUsingIter(ctx, engine, nil, ms, key, timestamp, value, txn, nil /* valueFn */)
+	return mvccPutUsingIter(ctx, engine, nil, ms, key, timestamp, value, txn, nil /* valueFn */, slcache, nointent)
 }
 
 // MVCCDelete marks the key deleted so that it will not be returned in
@@ -946,11 +950,13 @@ func MVCCDelete(
 	key roachpb.Key,
 	timestamp hlc.Timestamp,
 	txn *roachpb.Transaction,
+	slcache *SoftLockCache,
+	nointent bool,
 ) error {
 	iter := engine.NewIterator(true)
 	defer iter.Close()
 
-	return mvccPutUsingIter(ctx, engine, iter, ms, key, timestamp, noValue, txn, nil /* valueFn */)
+	return mvccPutUsingIter(ctx, engine, iter, ms, key, timestamp, noValue, txn, nil /* valueFn */, slcache, nointent)
 }
 
 var noValue = roachpb.Value{}
@@ -969,6 +975,8 @@ func mvccPutUsingIter(
 	value roachpb.Value,
 	txn *roachpb.Transaction,
 	valueFn func(*roachpb.Value) ([]byte, error),
+	slcache *SoftLockCache,
+	nointent bool,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :mvccPutUsingIter : begin")
@@ -984,7 +992,7 @@ func mvccPutUsingIter(
 	buf := newPutBuffer()
 
 	err := mvccPutInternal(ctx, engine, iter, ms, key, timestamp, rawBytes,
-		txn, buf, valueFn)
+		txn, buf, valueFn, slcache, nointent)
 
 	// Using defer would be more convenient, but it is measurably slower.
 	buf.release()
@@ -1009,6 +1017,8 @@ func mvccPutInternal(
 	txn *roachpb.Transaction,
 	buf *putBuffer,
 	valueFn func(*roachpb.Value) ([]byte, error),
+	slcache *SoftLockCache,
+	nointent bool,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : mvccPutInternal: begin key %v, tnx %v", key, txn)
@@ -1107,7 +1117,7 @@ func mvccPutInternal(
 					return err
 				}
 			}
-		} else if !meta.Timestamp.Less(timestamp) {
+		} else if !nointent && !meta.Timestamp.Less(timestamp) {
 			// This is the case where we're trying to write under a
 			// committed value. Obviously we can't do that, but we can
 			// increment our timestamp to one logical tick past the existing
@@ -1146,7 +1156,7 @@ func mvccPutInternal(
 	}
 	{
 		var txnMeta *enginepb.TxnMeta
-		if txn != nil {
+		if txn != nil && !nointent {
 			txnMeta = &txn.TxnMeta
 		}
 		buf.newMeta = enginepb.MVCCMetadata{Txn: txnMeta, Timestamp: timestamp}
@@ -1161,7 +1171,11 @@ func mvccPutInternal(
 	if err := engine.Put(versionKey, value); err != nil {
 		return err
 	}
-
+	if nointent {
+		// Remove write soft lock
+		swlock := slcache.getWriteSoftLock(metaKey.Key, *txn.ID)
+		slcache.removeFromWriteLockCache(swlock, metaKey.Key)
+	}
 	// Write the mvcc metadata now that we have sizes for the latest
 	// versioned value. For values, the size of keys is always accounted
 	// for as mvccVersionTimestampSize. The size of the metadata key is
@@ -1171,212 +1185,7 @@ func mvccPutInternal(
 	newMeta.Deleted = value == nil
 
 	var metaKeySize, metaValSize int64
-	if newMeta.Txn != nil {
-		if log.V(2) {
-			log.Infof(ctx, "Ravi : mvccPutInternal: calling put meta : newMeta - %v", newMeta)
-		}
-		metaKeySize, metaValSize, err = buf.putMeta(engine, metaKey, newMeta)
-		if err != nil {
-			return err
-		}
-	} else {
-		// Per-key stats count the full-key once and mvccVersionTimestampSize for
-		// each versioned value. We maintain that accounting even when the MVCC
-		// metadata is implicit.
-		metaKeySize = int64(metaKey.EncodedSize())
-	}
-
-	// Update MVCC stats.
-	if ms != nil {
-		ms.Add(updateStatsOnPut(key, origMetaKeySize, origMetaValSize,
-			metaKeySize, metaValSize, meta, newMeta))
-	}
-	if log.V(2) {
-		log.Infof(ctx, "Ravi : mvccPutInternal: begin")
-	}
-	return maybeTooOldErr
-}
-
-// As part of Dynamic Timestamping changes, This Put will triggerred
-// on commit. This writes the value into DB without writng an intent
-// It doesnt check or bother about intents, becuase DyTS correctness
-// doesnt need that.
-
-func mvccDyTSPutInternal(
-	ctx context.Context,
-	engine Writer,
-	iter Iterator,
-	ms *enginepb.MVCCStats,
-	key roachpb.Key,
-	timestamp hlc.Timestamp,
-	value []byte,
-	txn *roachpb.Transaction,
-	buf *putBuffer,
-	valueFn func(*roachpb.Value) ([]byte, error),
-) error {
-	if log.V(2) {
-		log.Infof(ctx, "Ravi : mvccDyTSPutInternal: begin key %v, tnx %v", key, txn)
-	}
-	if len(key) == 0 {
-		return emptyKeyError()
-	}
-
-	metaKey := MakeMVCCMetadataKey(key)
-	ok, origMetaKeySize, origMetaValSize, err := mvccGetMetadata(iter, metaKey, &buf.meta)
-	if err != nil {
-		return err
-	}
-
-	// maybeGetValue returns either value (if valueFn is nil) or else
-	// the result of calling valueFn on the data read at readTS.
-	maybeGetValue := func(exists bool, readTS hlc.Timestamp) ([]byte, error) {
-		// If a valueFn is specified, read existing value using the iter.
-		if valueFn == nil {
-			return value, nil
-		}
-		var exVal *roachpb.Value
-		if exists {
-			getBuf := newGetBuffer()
-			defer getBuf.release()
-			getBuf.meta = buf.meta // initialize get metadata from what we've already read
-			if exVal, _, _, _, err = mvccGetInternal(
-				ctx, iter, metaKey, readTS, true /* consistent */, safeValue, txn, getBuf, nil, false, false); err != nil {
-				return nil, err
-			}
-		}
-		return valueFn(exVal)
-	}
-
-	// Verify we're not mixing inline and non-inline values.
-	putIsInline := timestamp.Equal(hlc.ZeroTimestamp)
-	if ok && putIsInline != buf.meta.IsInline() {
-		return errors.Errorf("%q: put is inline=%t, but existing value is inline=%t",
-			metaKey, putIsInline, buf.meta.IsInline())
-	}
-	// Handle inline put.
-	if putIsInline {
-		if txn != nil {
-			return errors.Errorf("%q: inline writes not allowed within transactions", metaKey)
-		}
-		var metaKeySize, metaValSize int64
-		if value, err = maybeGetValue(ok, timestamp); err != nil {
-			return err
-		}
-		if value == nil {
-			metaKeySize, metaValSize, err = 0, 0, engine.Clear(metaKey)
-		} else {
-			buf.meta = enginepb.MVCCMetadata{RawBytes: value}
-			metaKeySize, metaValSize, err = buf.putMeta(engine, metaKey, &buf.meta)
-		}
-		if ms != nil {
-			updateStatsForInline(ms, key, origMetaKeySize, origMetaValSize, metaKeySize, metaValSize)
-		}
-		return err
-	}
-
-	var meta *enginepb.MVCCMetadata
-	var maybeTooOldErr error
-	if ok {
-		// There is existing metadata for this key; ensure our write is permitted.
-		meta = &buf.meta
-
-		if meta.Txn != nil {
-			// There is an uncommitted write intent.
-			if txn == nil || !roachpb.TxnIDEqual(meta.Txn.ID, txn.ID) {
-				// The current Put operation does not come from the same
-				// transaction.
-				return &roachpb.WriteIntentError{Intents: []roachpb.Intent{{Span: roachpb.Span{Key: key}, Status: roachpb.PENDING, Txn: *meta.Txn}}}
-			} else if txn.Epoch < meta.Txn.Epoch {
-				return errors.Errorf("put with epoch %d came after put with epoch %d in txn %s",
-					txn.Epoch, meta.Txn.Epoch, txn.ID)
-			} else if txn.Sequence < meta.Txn.Sequence ||
-				(txn.Sequence == meta.Txn.Sequence && txn.BatchIndex <= meta.Txn.BatchIndex) {
-				// Replay error if we encounter an older sequence number or
-				// the same (or earlier) batch index for the same sequence.
-				return roachpb.NewTransactionRetryError()
-			}
-			// Make sure we process valueFn before clearing any earlier
-			// version.  For example, a conditional put within same
-			// transaction should read previous write.
-			if value, err = maybeGetValue(ok, timestamp); err != nil {
-				return err
-			}
-			// We are replacing our own older write intent. If we are
-			// writing at the same timestamp we can simply overwrite it;
-			// otherwise we must explicitly delete the obsolete intent.
-			if !timestamp.Equal(meta.Timestamp) {
-				versionKey := metaKey
-				versionKey.Timestamp = meta.Timestamp
-				if err = engine.Clear(versionKey); err != nil {
-					return err
-				}
-			}
-		} else if !meta.Timestamp.Less(timestamp) {
-			// This is the case where we're trying to write under a
-			// committed value. Obviously we can't do that, but we can
-			// increment our timestamp to one logical tick past the existing
-			// value and go on to write, but then return a write-too-old
-			// error indicating what the timestamp ended up being. This
-			// timestamp can then be used to increment the txn timestamp and
-			// be returned with the response.
-			actualTimestamp := meta.Timestamp.Next()
-			maybeTooOldErr = &roachpb.WriteTooOldError{Timestamp: timestamp, ActualTimestamp: actualTimestamp}
-			// If we're in a transaction, always get the value at the orig
-			// timestamp.
-			if txn != nil {
-				if value, err = maybeGetValue(ok, timestamp); err != nil {
-					return err
-				}
-			} else {
-				// Outside of a transaction, read the latest value and advance
-				// the write timestamp to the latest value's timestamp + 1. The
-				// new timestamp is returned to the caller in maybeTooOldErr.
-				if value, err = maybeGetValue(ok, actualTimestamp); err != nil {
-					return err
-				}
-			}
-			timestamp = actualTimestamp
-		} else {
-			if value, err = maybeGetValue(ok, timestamp); err != nil {
-				return err
-			}
-		}
-	} else {
-		// There is no existing value for this key. Even if the new value is
-		// nil write a deletion tombstone for the key.
-		if value, err = maybeGetValue(ok, timestamp); err != nil {
-			return err
-		}
-	}
-	{
-		var txnMeta *enginepb.TxnMeta
-		// DyTS : Do not put Intent
-		//if txn != nil {
-		//	txnMeta = &txn.TxnMeta
-		//}
-		buf.newMeta = enginepb.MVCCMetadata{Txn: txnMeta, Timestamp: timestamp}
-	}
-	newMeta := &buf.newMeta
-
-	versionKey := metaKey
-	versionKey.Timestamp = timestamp
-	if log.V(2) {
-		log.Infof(ctx, "Ravi : mvccPutInternal: calling put version key %v, value %v", versionKey, value)
-	}
-	if err := engine.Put(versionKey, value); err != nil {
-		return err
-	}
-
-	// Write the mvcc metadata now that we have sizes for the latest
-	// versioned value. For values, the size of keys is always accounted
-	// for as mvccVersionTimestampSize. The size of the metadata key is
-	// accounted for separately.
-	newMeta.KeyBytes = mvccVersionTimestampSize
-	newMeta.ValBytes = int64(len(value))
-	newMeta.Deleted = value == nil
-
-	var metaKeySize, metaValSize int64
-	if newMeta.Txn != nil {
+	if newMeta.Txn != nil || nointent {
 		if log.V(2) {
 			log.Infof(ctx, "Ravi : mvccPutInternal: calling put meta : newMeta - %v", newMeta)
 		}
@@ -1416,6 +1225,8 @@ func MVCCIncrement(
 	timestamp hlc.Timestamp,
 	txn *roachpb.Transaction,
 	inc int64,
+	slcache *SoftLockCache,
+	nointent bool,
 ) (int64, error) {
 	iter := engine.NewIterator(true)
 	defer iter.Close()
@@ -1439,7 +1250,7 @@ func MVCCIncrement(
 		newValue.SetInt(int64Val)
 		newValue.InitChecksum(key)
 		return newValue.RawBytes, nil
-	})
+	}, slcache, nointent)
 
 	return int64Val, err
 }
@@ -1459,11 +1270,13 @@ func MVCCConditionalPut(
 	value roachpb.Value,
 	expVal *roachpb.Value,
 	txn *roachpb.Transaction,
+	slcache *SoftLockCache,
+	nointent bool,
 ) error {
 	iter := engine.NewIterator(true)
 	defer iter.Close()
 
-	return mvccConditionalPutUsingIter(ctx, engine, iter, ms, key, timestamp, value, expVal, txn)
+	return mvccConditionalPutUsingIter(ctx, engine, iter, ms, key, timestamp, value, expVal, txn, slcache, nointent)
 }
 
 // MVCCBlindConditionalPut is a fast-path of MVCCConditionalPut. See the
@@ -1480,8 +1293,10 @@ func MVCCBlindConditionalPut(
 	value roachpb.Value,
 	expVal *roachpb.Value,
 	txn *roachpb.Transaction,
+	slcache *SoftLockCache,
+	nointent bool,
 ) error {
-	return mvccConditionalPutUsingIter(ctx, engine, nil, ms, key, timestamp, value, expVal, txn)
+	return mvccConditionalPutUsingIter(ctx, engine, nil, ms, key, timestamp, value, expVal, txn, slcache, nointent)
 }
 
 func mvccConditionalPutUsingIter(
@@ -1494,6 +1309,8 @@ func mvccConditionalPutUsingIter(
 	value roachpb.Value,
 	expVal *roachpb.Value,
 	txn *roachpb.Transaction,
+	slcache *SoftLockCache,
+	nointent bool,
 ) error {
 	return mvccPutUsingIter(
 		ctx, engine, iter, ms, key, timestamp, noValue, txn,
@@ -1511,7 +1328,7 @@ func mvccConditionalPutUsingIter(
 				}
 			}
 			return value.RawBytes, nil
-		})
+		}, slcache, nointent)
 }
 
 var errInitPutValueMatchesExisting = errors.New("the value matched the existing value")
@@ -1527,6 +1344,8 @@ func MVCCInitPut(
 	timestamp hlc.Timestamp,
 	value roachpb.Value,
 	txn *roachpb.Transaction,
+	slcache *SoftLockCache,
+	nointent bool,
 ) error {
 	iter := engine.NewIterator(true)
 	defer iter.Close()
@@ -1544,8 +1363,7 @@ func MVCCInitPut(
 				return nil, errInitPutValueMatchesExisting
 			}
 			return value.RawBytes, nil
-		},
-	)
+		}, slcache, nointent)
 	// Dummy error to prevent an unnecessary write.
 	if err == errInitPutValueMatchesExisting {
 		err = nil
@@ -1607,6 +1425,8 @@ func MVCCDeleteRange(
 	timestamp hlc.Timestamp,
 	txn *roachpb.Transaction,
 	returnKeys bool,
+	slcache *SoftLockCache,
+	nointent bool,
 ) ([]roachpb.Key, *roachpb.Span, int64, error) {
 	if max == 0 {
 		return nil, &roachpb.Span{Key: key, EndKey: endKey}, 0, nil
@@ -1622,7 +1442,7 @@ func MVCCDeleteRange(
 			resumeSpan = &roachpb.Span{Key: kv.Key, EndKey: endKey}
 			return true, nil
 		}
-		if err := mvccPutInternal(ctx, engine, iter, ms, kv.Key, timestamp, nil, txn, buf, nil); err != nil {
+		if err := mvccPutInternal(ctx, engine, iter, ms, kv.Key, timestamp, nil, txn, buf, nil, slcache, nointent); err != nil {
 			return true, err
 		}
 		if returnKeys {

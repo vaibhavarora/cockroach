@@ -1710,7 +1710,7 @@ func (s *Store) BootstrapRange(initialValues []roachpb.KeyValue) error {
 	for _, kv := range initialValues {
 		// Initialize the checksums.
 		kv.Value.InitChecksum(kv.Key)
-		if err := engine.MVCCPut(ctx, batch, ms, kv.Key, now, kv.Value, nil); err != nil {
+		if err := engine.MVCCPut(ctx, batch, ms, kv.Key, now, kv.Value, nil, nil, false); err != nil {
 			return err
 		}
 	}

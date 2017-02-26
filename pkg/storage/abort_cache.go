@@ -196,7 +196,7 @@ func (sc *AbortCache) Del(
 	ctx context.Context, e engine.ReadWriter, ms *enginepb.MVCCStats, txnID uuid.UUID,
 ) error {
 	key := keys.AbortCacheKey(sc.rangeID, txnID)
-	return engine.MVCCDelete(ctx, e, ms, key, hlc.ZeroTimestamp, nil /* txn */)
+	return engine.MVCCDelete(ctx, e, ms, key, hlc.ZeroTimestamp, nil /* txn */, nil, false)
 }
 
 // Put writes an entry for the specified transaction ID.
