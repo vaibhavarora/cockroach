@@ -133,4 +133,6 @@ const (
 	ValidateCommitAfter
 	// To Validate the entry in commit before queue
 	ValidateCommitBefore
+	// Garbage collect write soft locks
+	GcWriteSoftLock
 )

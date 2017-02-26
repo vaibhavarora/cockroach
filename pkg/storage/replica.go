@@ -153,6 +153,7 @@ var consultsDyTSValidatorMethods = [...]bool{
 	roachpb.DyTsEndTransaction:   true,
 	roachpb.ValidateCommitAfter:  true,
 	roachpb.ValidateCommitBefore: true,
+	roachpb.GcWriteSoftLock:      true,
 }
 
 var consultsBlockMethods = [...]bool{

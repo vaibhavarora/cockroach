@@ -23,6 +23,7 @@ var DyTSValidatorCommands = map[roachpb.Method]DyTSValidatorCommand{
 	roachpb.DyTsEndTransaction:   {EvalDyTSValidatorCommand: EvalDyTSValidatorEndTransaction},
 	roachpb.ValidateCommitAfter:  {EvalDyTSValidatorCommand: EvalDyTSValidateCommitAfter},
 	roachpb.ValidateCommitBefore: {EvalDyTSValidatorCommand: EvalDyTSValidateCommitBefore},
+	roachpb.GcWriteSoftLock:      {EvalDyTSValidatorCommand: EvalDyTSGcWriteSoftLock},
 }
 
 func (r *Replica) executeDyTSValidatorCmd(
@@ -273,6 +274,18 @@ func EvalDyTSValidateCommitBefore(
 	// Save the updated Transaction record
 	//Nothing changed so no need to write
 	//return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+	return EvalResult{}, nil
+}
+
+func EvalDyTSGcWriteSoftLock(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	cArgs CommandArgs,
+	resp roachpb.Response) (EvalResult, error) {
+
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSGcWriteSoftLock")
+	}
 	return EvalResult{}, nil
 }
 

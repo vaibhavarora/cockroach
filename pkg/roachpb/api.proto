@@ -262,6 +262,16 @@ message ResolveWriteSoftLocksResponse{
   optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
 
+// Grabage collect write soft locks
+message GCWriteSoftockRequest{
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional Transaction txnrecord = 2 [(gogoproto.nullable) = false];
+}
+
+message GCWriteSoftockResponse{
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
 // Request to EndTransaction from dynamic timestamp validator
 message DyTSEndTransactionRequest{
   optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
@@ -820,6 +830,7 @@ message RequestUnion {
   optional DyTSEndTransactionRequest dy_ts_end_transaction = 33;
   optional ValidateCommitAfterRequest validate_commit_after = 34;
   optional ValidateCommitBeforeRequest validate_commit_before = 35;
+  optional GCWriteSoftockRequest gc_write_soft_lock = 36;
 }
 
 // A ResponseUnion contains exactly one of the optional responses.
@@ -867,6 +878,7 @@ message ResponseUnion {
   optional DyTSEndTransactionResponse dy_ts_end_transaction = 33;
   optional ValidateCommitAfterResponse validate_commit_after = 34;
   optional ValidateCommitBeforeResponse validate_commit_before = 35;
+  optional GCWriteSoftockResponse gc_write_soft_lock = 36;
 }
 
 // A Header is attached to a BatchRequest, encapsulating routing and auxiliary
