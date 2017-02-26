@@ -2087,6 +2087,7 @@ func MVCCresolveWriteSoftLock(
 			engine:    engine,
 			Args:      args.ShallowCopy(),
 			ms:        ms,
+			slcache:   slcache,
 		}
 		if log.V(2) {
 			log.Infof(ctx, "Ravi : executing cmd %v with cArgs %v ", args.Method(), dmArgs)

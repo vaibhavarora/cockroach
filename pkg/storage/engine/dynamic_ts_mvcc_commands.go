@@ -6,6 +6,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"golang.org/x/net/context"
+	"math"
 )
 
 type DyTSMVCCCommand struct {
@@ -27,6 +28,7 @@ type DyTSmArgs struct {
 	timestamp hlc.Timestamp
 	txn       *roachpb.Transaction
 	Args      roachpb.Request
+	slcache   *SoftLockCache
 }
 
 func EvalDyTSMVCCPut(
@@ -36,7 +38,26 @@ func EvalDyTSMVCCPut(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSMVCCPut")
 	}
-	return nil
+	args := mARgs.Args.(*roachpb.PutRequest)
+
+	ts := hlc.ZeroTimestamp
+	if !args.Inline {
+		ts = mARgs.timestamp
+	}
+	/*
+		if h.DistinctSpans {
+			if b, ok := batch.(engine.Batch); ok {
+				// Use the distinct batch for both blind and normal ops so that we don't
+				// accidentally flush mutations to make them visible to the distinct
+				// batch.
+				batch = b.Distinct()
+				defer batch.Close()
+			}
+		}*/
+	if args.Blind {
+		return MVCCBlindPut(ctx, mARgs.engine, mARgs.ms, args.Key, ts, args.Value, mARgs.txn, mARgs.slcache, true)
+	}
+	return MVCCPut(ctx, mARgs.engine, mARgs.ms, args.Key, ts, args.Value, mARgs.txn, mARgs.slcache, true)
 }
 
 func EvalDyTSMVCCConditionalPut(
@@ -46,7 +67,21 @@ func EvalDyTSMVCCConditionalPut(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSMVCCConditionalPut")
 	}
-	return nil
+	args := mARgs.Args.(*roachpb.ConditionalPutRequest)
+
+	/*if h.DistinctSpans {
+		if b, ok := batch.(engine.Batch); ok {
+			// Use the distinct batch for both blind and normal ops so that we don't
+			// accidentally flush mutations to make them visible to the distinct
+			// batch.
+			batch = b.Distinct()
+			defer batch.Close()
+		}
+	}*/
+	if args.Blind {
+		return MVCCBlindConditionalPut(ctx, mARgs.engine, mARgs.ms, args.Key, mARgs.timestamp, args.Value, args.ExpValue, mARgs.txn, mARgs.slcache, true)
+	}
+	return MVCCConditionalPut(ctx, mARgs.engine, mARgs.ms, args.Key, mARgs.timestamp, args.Value, args.ExpValue, mARgs.txn, mARgs.slcache, true)
 }
 
 func EvalDyTSMVCCInitPut(
@@ -56,7 +91,9 @@ func EvalDyTSMVCCInitPut(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSMVCCInitPut")
 	}
-	return nil
+	args := mARgs.Args.(*roachpb.InitPutRequest)
+
+	return MVCCInitPut(ctx, mARgs.engine, mARgs.ms, args.Key, mARgs.timestamp, args.Value, mARgs.txn, mARgs.slcache, true)
 }
 
 func EvalDyTSMVCCIncrement(
@@ -66,7 +103,13 @@ func EvalDyTSMVCCIncrement(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSMVCCIncrement")
 	}
-	return nil
+	args := mARgs.Args.(*roachpb.IncrementRequest)
+
+	//reply := resp.(*roachpb.IncrementResponse)
+
+	_, err := MVCCIncrement(ctx, mARgs.engine, mARgs.ms, args.Key, mARgs.timestamp, mARgs.txn, args.Increment, mARgs.slcache, true)
+	//reply.NewValue = newVal
+	return err
 }
 
 func EvalDyTSMVCCDelete(
@@ -76,7 +119,9 @@ func EvalDyTSMVCCDelete(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSMVCCDelete")
 	}
-	return nil
+	args := mARgs.Args.(*roachpb.DeleteRequest)
+
+	return MVCCDelete(ctx, mARgs.engine, mARgs.ms, args.Key, mARgs.timestamp, mARgs.txn, mARgs.slcache, true)
 }
 
 func EvalDyTSMVCCDeleteRange(
@@ -86,5 +131,16 @@ func EvalDyTSMVCCDeleteRange(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In EvalDyTSMVCCDeleteRange")
 	}
-	return nil
+	args := mARgs.Args.(*roachpb.DeleteRangeRequest)
+
+	timestamp := hlc.ZeroTimestamp
+	if !args.Inline {
+		timestamp = mARgs.timestamp
+	}
+	maxKeys := int64(math.MaxInt64)
+	_, _, _, err := MVCCDeleteRange(
+		ctx, mARgs.engine, mARgs.ms, args.Key, args.EndKey, maxKeys, timestamp, mARgs.txn, args.ReturnKeys, mARgs.slcache, true,
+	)
+
+	return err
 }
