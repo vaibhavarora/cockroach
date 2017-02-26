@@ -38,13 +38,6 @@ var mutex = &sync.Mutex{}
 func Start() {
 	fmt.Println("ticker started")
 	go func() {
-		f, err := os.OpenFile(dumpFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-		if err != nil {
-			fmt.Println("Failed to open/create file for instrumentation")
-			panic(err)
-		}
-		defer f.Close()
-
 		for t := range ticker.C {
 			mutex.Lock()
 			// Prepare data
@@ -60,8 +53,11 @@ func Start() {
 			data = make(map[string]int)
 			mutex.Unlock()
 
+			// Dump to file
+			f, _ := os.OpenFile(dumpFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 			f.WriteString(str + "\n")
 			f.Sync()
+			f.Close()
 		}
 	}()
 }
