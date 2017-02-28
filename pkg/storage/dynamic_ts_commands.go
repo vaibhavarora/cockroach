@@ -776,9 +776,16 @@ func executelocalValidateCommitBefore(
 		return hlc.MaxTimestamp, err
 	} else if ok {
 		// Update the Transaction record
-		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+		if txnRecord.Status == roachpb.PENDING && !upperBound.Equal(hlc.MaxTimestamp) {
+			txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+		} else {
+			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+		}
+
 		// Save the updated Transaction record
-		//return engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+		if err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
+			return upperBound, err
+		}
 	}
 	return upperBound, nil
 }
@@ -876,10 +883,10 @@ func executelocalValidateCommitAfter(
 		return hlc.ZeroTimestamp, roachpb.NewTransactionStatusError("does not exist")
 	}
 	// Update the Transaction record
-	if txnRecord.Status == roachpb.COMMITTED {
-		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
-	} else if txnRecord.Status == roachpb.PENDING {
+	if txnRecord.Status == roachpb.PENDING && !txnRecord.DynamicTimestampLowerBound.Equal(hlc.MaxTimestamp) {
 		txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
+	} else {
+		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 	}
 	// Save the updated Transaction record
 	err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
@@ -922,10 +929,12 @@ func pickCommitTimeStamp(
 	upperBound hlc.Timestamp,
 ) hlc.Timestamp {
 
-	if upperBound == hlc.MaxTimestamp || upperBound == lowerBound {
+	if upperBound == lowerBound {
 		return lowerBound
 	}
-	return lowerBound
+
+	return lowerBound.Next()
+
 }
 
 func makeDecision(

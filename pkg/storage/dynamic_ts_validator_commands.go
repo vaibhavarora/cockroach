@@ -219,16 +219,17 @@ func EvalDyTSValidateCommitAfter(
 	if log.V(2) {
 		log.Infof(ctx, "EvalDyTSValidateCommitAfter : found transaction record in this range")
 	}
-	// Update the Transaction record
 	lowerBound := *args.LowerBound
-	if txnRecord.Status == roachpb.COMMITTED {
-		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
-	} else if txnRecord.Status == roachpb.PENDING {
+	// Update the Transaction record
+	if txnRecord.Status == roachpb.PENDING && !txnRecord.DynamicTimestampLowerBound.Equal(hlc.MaxTimestamp) {
 		txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
-		// Save the updated Transaction record
-		if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
-			return EvalResult{}, err
-		}
+	} else {
+		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+	}
+
+	// Save the updated Transaction record
+	if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
+		return EvalResult{}, err
 	}
 
 	reply := resp.(*roachpb.ValidateCommitAfterResponse)
@@ -268,14 +269,19 @@ func EvalDyTSValidateCommitBefore(
 	// Update the Transaction record
 	upperBound := *args.UpperBound
 
-	upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+	// Update the Transaction record
+	if txnRecord.Status == roachpb.PENDING && !upperBound.Equal(hlc.MaxTimestamp) {
+		txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+	} else {
+		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+	}
 
 	reply := resp.(*roachpb.ValidateCommitBeforeResponse)
 	reply.UpperBound = &upperBound
+
 	// Save the updated Transaction record
-	//Nothing changed so no need to write
-	//return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
-	return EvalResult{}, nil
+	return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+
 }
 
 func EvalDyTSGcWriteSoftLock(
