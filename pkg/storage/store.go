@@ -389,6 +389,7 @@ type Store struct {
 	consistencyQueue   *consistencyQueue           // Replica consistency check queue
 	metrics            *StoreMetrics
 	intentResolver     *intentResolver
+	softLockResolver   *softLockResolver
 	raftEntryCache     *raftEntryCache
 
 	// gossipRangeCountdown and leaseRangeCountdown are countdowns of
@@ -850,6 +851,7 @@ func NewStore(cfg StoreConfig, eng engine.Engine, nodeDesc *roachpb.NodeDescript
 	}
 
 	s.intentResolver = newIntentResolver(s)
+	s.softLockResolver = newSoftLockResolver(s)
 	s.raftEntryCache = newRaftEntryCache(cfg.RaftEntryCacheSize)
 	s.drainLeases.Store(false)
 	s.scheduler = newRaftScheduler(s.cfg.AmbientCtx, s.metrics, s, storeSchedulerConcurrency)

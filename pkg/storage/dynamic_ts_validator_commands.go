@@ -174,24 +174,25 @@ func EvalDyTSValidatorEndTransaction(
 	if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
 		return EvalResult{}, err
 	}
-
+	var pd EvalResult
 	if args.Commit {
-		// Resolve Local Write Soft locks
-		externalWriteSpans := cArgs.Repl.resolveLocalSoftWriteLocks(ctx, batch, cArgs.Stats, *args, &txnRecord)
-		if log.V(2) {
-			log.Infof(ctx, "external write spans : %v", externalWriteSpans)
-		}
-		// Add external write soft locks to asyncronous processing
+		// Resolve Local Soft locks
+		externalReadSpans, externalWriteSpans := cArgs.Repl.resolveLocalSoftLocks(ctx, batch, cArgs.Stats, *args, &txnRecord)
+		// Add external write soft locks to resolve asyncronous processing
+		pd.Local.resolvewslocks = &externalWriteSpans
+		// add external read spans to garbage collect asncronously
+		pd.Local.gcrslocks = &externalReadSpans
+
 	} else {
-		// add write spans to garbage collect
+		//  garbage collect Local Soft locks
+		externalReadSpans, externalWriteSpans := cArgs.Repl.GCLocalSoftLocks(ctx, batch, *args, &txnRecord)
+		//Add external write soft locks to GC asyncronous processing
+		pd.Local.gcwslocks = &externalWriteSpans
+		pd.Local.gcrslocks = &externalReadSpans
 	}
-	// clear the local read locks
+	pd.Local.txnrecord = &txnRecord
 
-	// add external read spans to garbage collect
-
-	//Asyncronously garbage collect soft locks
-
-	return EvalResult{}, nil
+	return pd, nil
 }
 
 func EvalDyTSValidateCommitAfter(
@@ -317,17 +318,17 @@ func EvalDyTSGcReadSoftLock(
 	return EvalResult{}, nil
 }
 
-// resolveLocalSoftWriteLocks synchronously resolves any soft locks that are
+// resolveLocalSoftLocks synchronously resolves any soft locks that are
 // local to this range in the same batch. The remainder are collected
 // and returned so that they can be handed off to asynchronous
 // processing.
-func (r *Replica) resolveLocalSoftWriteLocks(
+func (r *Replica) resolveLocalSoftLocks(
 	ctx context.Context,
 	batch engine.ReadWriter,
 	ms *enginepb.MVCCStats,
 	args roachpb.DyTSEndTransactionRequest,
 	txn *roachpb.Transaction,
-) []roachpb.Span {
+) ([]roachpb.Span, []roachpb.Span) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :resolveLocalIntents : begin ")
 	}
@@ -380,8 +381,129 @@ func (r *Replica) resolveLocalSoftWriteLocks(
 			panic(fmt.Sprintf("error resolving Local Write Soft locks at %s on end transaction [%s]: %s", span, txn.Status, err))
 		}
 	}
+	var externalSoftReadSpan []roachpb.Span
+	for _, span := range args.ReadSpans {
+		if err := func() error {
+			if len(span.EndKey) == 0 {
+				// For single-key intents, do a KeyAddress-aware check of
+				// whether it's contained in our Range.
+				if !containsKey(*desc, span.Key) {
+					externalSoftReadSpan = append(externalSoftReadSpan, span)
+					return nil
+				}
+
+				return engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+			}
+			// For intent ranges, cut into parts inside and outside our key
+			// range. Resolve locally inside, delegate the rest. In particular,
+			// an intent range for range-local data is correctly considered local.
+			inSpan, outSpans := intersectSpan(span, *desc)
+			for _, span := range outSpans {
+				externalSoftReadSpan = append(externalSoftReadSpan, span)
+			}
+			if inSpan != nil {
+				return engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+			}
+			return nil
+		}(); err != nil {
+			// TODO(tschottdorf): any legitimate reason for this to happen?
+			// Figure that out and if not, should still be ReplicaCorruption
+			// and not a panic.
+			panic(fmt.Sprintf("error resolving Local Write Soft locks at %s on end transaction [%s]: %s", span, txn.Status, err))
+		}
+	}
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :resolveLocalIntents : end")
 	}
-	return externalSoftWriteSpan
+	return externalSoftReadSpan, externalSoftWriteSpan
+}
+
+// GCLocalSoftLocks synchronously GCs any soft locks that are
+// local to this range in the same batch. The remainder are collected
+// and returned so that they can be handed off to asynchronous
+// processing.
+func (r *Replica) GCLocalSoftLocks(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	args roachpb.DyTSEndTransactionRequest,
+	txn *roachpb.Transaction,
+) ([]roachpb.Span, []roachpb.Span) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :GCLocalSoftLocks : begin ")
+	}
+	desc := r.Desc()
+	if mergeTrigger := args.InternalCommitTrigger.GetMergeTrigger(); mergeTrigger != nil {
+		// If this is a merge, then use the post-merge descriptor to determine
+		// which intents are local (note that for a split, we want to use the
+		// pre-split one instead because it's larger).
+
+		desc = &mergeTrigger.LeftDesc
+	}
+
+	var externalSoftWriteSpan []roachpb.Span
+	for _, span := range args.WriteSpans {
+		if err := func() error {
+			if len(span.EndKey) == 0 {
+				// For single-key intents, do a KeyAddress-aware check of
+				// whether it's contained in our Range.
+				if !containsKey(*desc, span.Key) {
+					externalSoftWriteSpan = append(externalSoftWriteSpan, span)
+					return nil
+				}
+
+				return engine.MVCCRemoveWriteSoftLock(ctx, batch, *txn, span, r.slockcache)
+			}
+			// For intent ranges, cut into parts inside and outside our key
+			// range. Resolve locally inside, delegate the rest. In particular,
+			// an intent range for range-local data is correctly considered local.
+			inSpan, outSpans := intersectSpan(span, *desc)
+			for _, span := range outSpans {
+				externalSoftWriteSpan = append(externalSoftWriteSpan, span)
+			}
+			if inSpan != nil {
+				return engine.MVCCRemoveWriteSoftLock(ctx, batch, *txn, span, r.slockcache)
+			}
+			return nil
+		}(); err != nil {
+			// TODO(tschottdorf): any legitimate reason for this to happen?
+			// Figure that out and if not, should still be ReplicaCorruption
+			// and not a panic.
+			panic(fmt.Sprintf("error resolving Local Write Soft locks at %s on end transaction [%s]: %s", span, txn.Status, err))
+		}
+	}
+	var externalSoftReadSpan []roachpb.Span
+	for _, span := range args.ReadSpans {
+		if err := func() error {
+			if len(span.EndKey) == 0 {
+				// For single-key intents, do a KeyAddress-aware check of
+				// whether it's contained in our Range.
+				if !containsKey(*desc, span.Key) {
+					externalSoftReadSpan = append(externalSoftReadSpan, span)
+					return nil
+				}
+
+				return engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+			}
+			// For intent ranges, cut into parts inside and outside our key
+			// range. Resolve locally inside, delegate the rest. In particular,
+			// an intent range for range-local data is correctly considered local.
+			inSpan, outSpans := intersectSpan(span, *desc)
+			for _, span := range outSpans {
+				externalSoftReadSpan = append(externalSoftReadSpan, span)
+			}
+			if inSpan != nil {
+				return engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+			}
+			return nil
+		}(); err != nil {
+			// TODO(tschottdorf): any legitimate reason for this to happen?
+			// Figure that out and if not, should still be ReplicaCorruption
+			// and not a panic.
+			panic(fmt.Sprintf("error resolving Local Write Soft locks at %s on end transaction [%s]: %s", span, txn.Status, err))
+		}
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :resolveLocalIntents : end")
+	}
+	return externalSoftReadSpan, externalSoftWriteSpan
 }

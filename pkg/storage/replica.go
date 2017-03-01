@@ -241,10 +241,14 @@ const (
 // the BatchResponse or the Error are set and represent the result of
 // the proposal.
 type proposalResult struct {
-	Reply         *roachpb.BatchResponse
-	Err           *roachpb.Error
-	ProposalRetry proposalRetryReason
-	Intents       []intentsWithArg
+	Reply          *roachpb.BatchResponse
+	Err            *roachpb.Error
+	ProposalRetry  proposalRetryReason
+	Intents        []intentsWithArg
+	ResolveWSLocks []roachpb.Span
+	GcWSLocks      []roachpb.Span
+	GcRSLocks      []roachpb.Span
+	TxnRecod       roachpb.Transaction
 }
 
 type replicaChecksum struct {
@@ -2198,6 +2202,10 @@ func (r *Replica) tryAddWriteCmd(
 				// resolved on reads.
 				r.store.intentResolver.processIntentsAsync(r, propResult.Intents)
 			}
+			// Semi-syncronously resolve any soft locks
+			if len(propResult.ResolveWSLocks) > 0 || len(propResult.GcWSLocks) > 0 || len(propResult.GcRSLocks) > 0 {
+				r.store.softLockResolver.processWriteSoftLocksAsync(r, propResult.ResolveWSLocks, propResult.GcWSLocks, propResult.GcRSLocks, propResult.TxnRecod)
+			}
 			return propResult.Reply, propResult.Err, propResult.ProposalRetry
 		case <-slowTimer:
 			slowTimer = nil
@@ -2305,6 +2313,10 @@ func (r *Replica) evaluateProposal(
 		// EvalResult except what's whitelisted here.
 		result.Local = LocalEvalResult{
 			intents:            result.Local.intents,
+			resolvewslocks:     result.Local.resolvewslocks,
+			gcwslocks:          result.Local.gcwslocks,
+			gcrslocks:          result.Local.gcrslocks,
+			txnrecord:          result.Local.txnrecord,
 			Err:                r.maybeSetCorrupt(ctx, result.Local.Err),
 			leaseMetricsResult: result.Local.leaseMetricsResult,
 		}
@@ -3621,6 +3633,11 @@ func (r *Replica) processRaftCommand(
 				log.Fatalf(ctx, "proposal must return either a reply or an error: %+v", proposal)
 			}
 			response.Intents = proposal.Local.detachIntents()
+			response.ResolveWSLocks = proposal.Local.detachResolveWSLocks()
+			response.GcWSLocks = proposal.Local.detachGCWSLocks()
+			response.GcRSLocks = proposal.Local.detachGCRSLocks()
+			response.TxnRecod = proposal.Local.detachTxnRecord()
+
 			lResult = proposal.Local
 		}
 

@@ -134,6 +134,15 @@ type LocalEvalResult struct {
 	// This is a pointer to allow the zero (and as an unwelcome side effect,
 	// all) values to be compared.
 	intents *[]intentsWithArg
+
+	// Write Soft locks to resolved asyncronously
+	resolvewslocks *[]roachpb.Span
+	// Write Soft Locks to be GCed asyncronously
+	gcwslocks *[]roachpb.Span
+	// Read Soft Locks to be GCed asncronously
+	gcrslocks *[]roachpb.Span
+	//Tansaction record
+	txnrecord *roachpb.Transaction
 	// Whether we successfully or non-successfully requested a lease.
 	//
 	// TODO(tschottdorf): Update this counter correctly with prop-eval'ed KV
@@ -161,6 +170,42 @@ func (lResult *LocalEvalResult) detachIntents() []intentsWithArg {
 	intents := *lResult.intents
 	lResult.intents = nil
 	return intents
+}
+
+func (lResult *LocalEvalResult) detachResolveWSLocks() []roachpb.Span {
+	if lResult == nil || lResult.resolvewslocks == nil {
+		return nil
+	}
+	resolvewslock := *lResult.resolvewslocks
+	lResult.resolvewslocks = nil
+	return resolvewslock
+}
+
+func (lResult *LocalEvalResult) detachGCWSLocks() []roachpb.Span {
+	if lResult == nil || lResult.gcwslocks == nil {
+		return nil
+	}
+	gcwslocks := *lResult.gcwslocks
+	lResult.gcwslocks = nil
+	return gcwslocks
+}
+
+func (lResult *LocalEvalResult) detachGCRSLocks() []roachpb.Span {
+	if lResult == nil || lResult.gcrslocks == nil {
+		return nil
+	}
+	gcrslocks := *lResult.gcrslocks
+	lResult.gcrslocks = nil
+	return gcrslocks
+}
+
+func (lResult *LocalEvalResult) detachTxnRecord() roachpb.Transaction {
+	if lResult == nil || lResult.txnrecord == nil {
+		return roachpb.Transaction{}
+	}
+	txnrecord := *lResult.txnrecord
+	lResult.txnrecord = nil
+	return txnrecord
 }
 
 // EvalResult is the result of evaluating a KV request. That is, the
@@ -279,6 +324,40 @@ func (p *EvalResult) MergeAndDestroy(q EvalResult) error {
 		}
 	}
 	q.Local.intents = nil
+
+	if q.Local.resolvewslocks != nil {
+		if p.Local.resolvewslocks == nil {
+			p.Local.resolvewslocks = q.Local.resolvewslocks
+		} else {
+			*p.Local.resolvewslocks = append(*p.Local.resolvewslocks, *q.Local.resolvewslocks...)
+		}
+	}
+	q.Local.resolvewslocks = nil
+
+	if q.Local.gcwslocks != nil {
+		if p.Local.gcwslocks == nil {
+			p.Local.gcwslocks = q.Local.gcwslocks
+		} else {
+			*p.Local.gcwslocks = append(*p.Local.gcwslocks, *q.Local.gcwslocks...)
+		}
+	}
+	q.Local.gcwslocks = nil
+
+	if q.Local.gcrslocks != nil {
+		if p.Local.gcrslocks == nil {
+			p.Local.gcrslocks = q.Local.gcrslocks
+		} else {
+			*p.Local.gcrslocks = append(*p.Local.gcrslocks, *q.Local.gcrslocks...)
+		}
+	}
+	q.Local.gcrslocks = nil
+
+	if p.Local.txnrecord == nil {
+		p.Local.txnrecord = q.Local.txnrecord
+	} else if q.Local.txnrecord != nil {
+		return errors.New("Conflicting Transaction record")
+	}
+	q.Local.txnrecord = nil
 
 	if p.Local.leaseMetricsResult == nil {
 		p.Local.leaseMetricsResult = q.Local.leaseMetricsResult

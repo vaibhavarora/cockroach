@@ -17,7 +17,7 @@
 package storage
 
 import (
-	//"fmt"
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -174,7 +174,7 @@ func processLocalKeyRange(
 
 	var gcKeys []roachpb.GCRequest_GCKey
 
-	/*handleOneTransaction := func(kv roachpb.KeyValue) error {
+	handleOneTransaction := func(kv roachpb.KeyValue) error {
 		var txn roachpb.Transaction
 		if err := kv.Value.GetProto(&txn); err != nil {
 			return err
@@ -209,7 +209,7 @@ func processLocalKeyRange(
 				infoMu.Unlock() // intentional
 				defer infoMu.Lock()
 				if err := resolveIntents(roachpb.AsIntents(txn.Intents, &txn),
-					true , false ); err != nil {
+					true, false); err != nil {
 					log.Warningf(ctx, "failed to resolve intents of aborted txn on gc: %s", err)
 				}
 			}()
@@ -219,7 +219,8 @@ func processLocalKeyRange(
 			if err := func() error {
 				infoMu.Unlock() // intentional
 				defer infoMu.Lock()
-				return resolveIntents(roachpb.AsIntents(txn.Intents, &txn), true , false )
+				return resolveIntents(roachpb.AsIntents(txn.Intents, &txn), true, false)
+				//return nil
 			}(); err != nil {
 				log.Warningf(ctx, "unable to resolve intents of committed txn on gc: %s", err)
 				// Returning the error here would abort the whole GC run, and
@@ -232,7 +233,7 @@ func processLocalKeyRange(
 		}
 		gcKeys = append(gcKeys, roachpb.GCRequest_GCKey{Key: kv.Key}) // zero timestamp
 		return nil
-	}*/
+	}
 
 	handleOneQueueLastProcessed := func(kv roachpb.KeyValue, rangeKey roachpb.RKey) error {
 		if !rangeKey.Equal(desc.StartKey) {
@@ -248,9 +249,9 @@ func processLocalKeyRange(
 			return err
 		}
 		if suffix.Equal(keys.LocalTransactionSuffix.AsRawKey()) {
-			/*if err := handleOneTransaction(kv); err != nil {
+			if err := handleOneTransaction(kv); err != nil {
 				return err
-			}*/
+			}
 		} else if suffix.Equal(keys.LocalQueueLastProcessedSuffix.AsRawKey()) {
 			if err := handleOneQueueLastProcessed(kv, roachpb.RKey(rangeKey)); err != nil {
 				return err
