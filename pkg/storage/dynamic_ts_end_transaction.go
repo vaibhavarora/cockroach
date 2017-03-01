@@ -22,13 +22,17 @@ func (r *Replica) ProcessDyTSEndTransaction(
 	}
 	var err error
 
-	args := Args.(*roachpb.EndTransactionRequest)
+	//args := Args.(*roachpb.EndTransactionRequest)
 	reply := resp.(*roachpb.EndTransactionResponse)
 
-	if err = sendDyTSEndTranactionRPC(ctx, r.store, batch, h, *reply.Txn, *args); err != nil {
+	/*
+		if err = sendDyTSEndTranactionRPC(ctx, r.store, batch, h, *reply.Txn, *args); err != nil {
+			return err
+		}*/
+
+	if err = sendOrigEndTransactionRPC(ctx, r.store, batch, h, *reply.Txn, Args); err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -71,6 +75,42 @@ func sendDyTSEndTranactionRPC(
 		br := b.RawResponse()
 		for _, res := range br.Responses {
 			r := res.GetInner().(*roachpb.DyTSEndTransactionResponse)
+			if log.V(2) {
+				log.Infof(ctx, "DyTSEndTransactionRequest recieved response : %v", r)
+			}
+		}
+	}
+	return nil
+}
+
+func sendOrigEndTransactionRPC(
+	ctx context.Context,
+	s *Store,
+	batch engine.ReadWriter,
+	h roachpb.Header,
+	txnrcd roachpb.Transaction,
+	args roachpb.Request,
+) error {
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In sendOrigEndTransactionRPC")
+	}
+
+	b := &client.Batch{}
+	//b.Header = cArgs.Header
+	//b.Header.Timestamp = hlc.ZeroTimestamp
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : args %v", args)
+	}
+	b.AddRawRequest(args)
+
+	if err := s.db.Run(ctx, b); err != nil {
+		_ = b.MustPErr()
+	} else {
+
+		br := b.RawResponse()
+		for _, res := range br.Responses {
+			r := res.GetInner().(*roachpb.EndTransactionResponse)
 			if log.V(2) {
 				log.Infof(ctx, "DyTSEndTransactionRequest recieved response : %v", r)
 			}

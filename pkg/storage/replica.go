@@ -1881,6 +1881,9 @@ func (r *Replica) addReadOnlyCmd(
 		// overlapping commands until this command completes.
 		log.Event(ctx, "command queue")
 		var err error
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : adding to comman queue %v", ba)
+		}
 		endCmds, err = r.beginCmds(ctx, &ba)
 		if err != nil {
 			return nil, roachpb.NewError(err)
@@ -1914,7 +1917,9 @@ func (r *Replica) addReadOnlyCmd(
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "Got chance in the queue ")
+	}
 	// Execute read-only batch command. It checks for matching key range; note
 	// that holding readMu throughout is important to avoid reads from the
 	// "wrong" key range being served after the range has been split.

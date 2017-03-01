@@ -185,7 +185,9 @@ func EvalDyTSValidatorEndTransaction(
 	} else {
 		// add write spans to garbage collect
 	}
-	// add read spans to garbage collect
+	// clear the local read locks
+
+	// add external read spans to garbage collect
 
 	//Asyncronously garbage collect soft locks
 
@@ -259,12 +261,12 @@ func EvalDyTSValidateCommitBefore(
 		return EvalResult{}, err
 	} else if !ok {
 		if log.V(2) {
-			log.Infof(ctx, "EvalDyTSValidateCommitAfter : coudnt find transaction record in this range")
+			log.Infof(ctx, "EvalDyTSValidateCommitBefore : coudnt find transaction record in this range")
 		}
 		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
 	}
 	if log.V(2) {
-		log.Infof(ctx, "EvalDyTSValidateCommitAfter : found transaction record in this range")
+		log.Infof(ctx, "EvalDyTSValidateCommitBefore : found transaction record in this range")
 	}
 	// Update the Transaction record
 	upperBound := *args.UpperBound

@@ -485,12 +485,17 @@ func transactionRecordExists(
 
 	var txnRecord roachpb.Transaction
 
-	if ok, err := engine.MVCCGetProto(
-		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
-	); err != nil {
+	ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord)
+	if err != nil || !ok {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : Coundnt find the transaction record in this range")
+		}
+
 		return false
-	} else if !ok {
-		return false
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : found the transaction record in the same range")
 	}
 	return true
 }
@@ -541,9 +546,15 @@ func updateLocalTransactionRecord(
 		txnRecord.DynamicTimestampLowerBound.Forward(rArgs.lowerbound)
 		txnRecord.DynamicTimestampUpperBound.Backward(rArgs.upperbound)
 		for _, txn := range rArgs.commitAQ {
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : updating CommitAfterThem with %v", txn)
+			}
 			txnRecord.CommitAfterThem = append(txnRecord.CommitAfterThem, txn)
 		}
 		for _, txn := range rArgs.commitBQ {
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : updating CommitBeforeThem with %v", txn)
+			}
 			txnRecord.CommitBeforeThem = append(txnRecord.CommitBeforeThem, txn)
 		}
 		// Save the updated Transaction record
@@ -915,9 +926,13 @@ func manageCommitAfterQueue(
 }
 
 func isTSIntact(
+	ctx context.Context,
 	lowerBound hlc.Timestamp,
 	upperBound hlc.Timestamp,
 ) bool {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :isTSIntact lower bound %v , upper bound %v ", lowerBound, upperBound)
+	}
 	if lowerBound.Less(upperBound) || lowerBound.Equal(upperBound) {
 		return true
 	}
@@ -944,7 +959,7 @@ func makeDecision(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In makeDecision")
 	}
-	if isTSIntact(mytxnRecord.DynamicTimestampLowerBound, mytxnRecord.DynamicTimestampUpperBound) {
+	if !isTSIntact(ctx, mytxnRecord.DynamicTimestampLowerBound, mytxnRecord.DynamicTimestampUpperBound) {
 		mytxnRecord.Status = roachpb.ABORTED
 
 	} else {

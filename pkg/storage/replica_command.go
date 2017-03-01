@@ -786,7 +786,8 @@ func updateTxnWithExternalIntents(
 		if log.V(2) {
 			log.Infof(ctx, "auto-gc'ed %s (%d intents)", txn.Short(), len(args.IntentSpans))
 		}
-		return engine.MVCCDelete(ctx, batch, ms, key, hlc.ZeroTimestamp, nil /* txn */, nil, false)
+		//return engine.MVCCDelete(ctx, batch, ms, key, hlc.ZeroTimestamp, nil /* txn */, nil, false)
+		return nil
 	}
 	txn.Intents = make([]roachpb.Span, len(externalIntents))
 	for i := range externalIntents {

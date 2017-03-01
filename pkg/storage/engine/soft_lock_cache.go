@@ -58,7 +58,7 @@ func (s *SoftLockCache) processPlaceWriteLockRequest(
 	key roachpb.Key,
 	req roachpb.RequestUnion) ([]roachpb.ReadSoftLock, []roachpb.WriteSoftLock) {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest , key %v , inetrnalkey %v", key, ToInternalKey(key))
+		log.Infof(ctx, "Ravi : In processPlaceWriteLockRequest , key %v , inetrnalkey %v", key, ToInternalKey(key))
 	}
 	writelk := roachpb.WriteSoftLock{TransactionMeta: tmeta, Request: req}
 	s.addToSoftWriteLockCache(writelk, key)
