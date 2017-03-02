@@ -1846,6 +1846,7 @@ func (r *Replica) addReadOnlyCmd(
 	// "wrong" key range being served after the range has been split.
 	var result EvalResult
 	br, result, pErr = r.executeBatch(ctx, storagebase.CmdIDKey(""), r.store.Engine(), nil, ba)
+	instrumentation.IncrementParam(instrumentation.V_Replica_addReadOnlyCmd_executeBatchCount, 1)
 
 	if pErr == nil && ba.Txn != nil {
 		r.assert5725(ba)
@@ -1879,8 +1880,6 @@ func (r *Replica) addReadOnlyCmd(
 // Updates the reponse Value.RawBytes to nil if there is conflicting intent
 func updateResponseWithIntentTimestamp(ba roachpb.BatchRequest, br *roachpb.BatchResponse,
 	intents []intentsWithArg) {
-	instrumentation.IncrementParam(instrumentation.F_updateResponseWithIntentTimestamp, 1)
-
 	tsToSpanMap := make(map[hlc.Timestamp]roachpb.Span)
 	for _, item := range intents {
 		for _, intent := range item.intents {

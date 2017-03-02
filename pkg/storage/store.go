@@ -2341,9 +2341,14 @@ func (s *Store) Send(
 ) (br *roachpb.BatchResponse, pErr *roachpb.Error) {
 	instrumentation.IncrementParam(instrumentation.F_Store_Send, 1)
 
-	numTries := 0
+	numRetriesTotal := 0
+	numRetriesWithoutBackoff := 0
 	defer func() {
-		instrumentation.IncrementParam(instrumentation.V_Store_Send_numTries, numTries)
+		if numRetriesTotal == 0 {
+			instrumentation.IncrementParam(instrumentation.V_Store_Send_returnedWithoutRetry, 1)
+		}
+		instrumentation.IncrementParam(instrumentation.V_Store_Send_numRetriesTotal, numRetriesTotal)
+		instrumentation.IncrementParam(instrumentation.V_Store_Send_numRetriesWithoutBackoff, numRetriesWithoutBackoff)
 	}()
 
 	// Attach any log tags from the store to the context (which normally
@@ -2450,7 +2455,14 @@ func (s *Store) Send(
 	// in the Trace.
 	// Increase the sequence counter to avoid getting caught in replay
 	// protection on retry.
+	firstTry := true
 	next := func(r *retry.Retry) bool {
+		if firstTry {
+			firstTry = false
+		} else {
+			numRetriesTotal++
+		}
+
 		if r.CurrentAttempt() > 0 {
 			ba.SetNewRequest()
 			log.Event(ctx, "backoff")
@@ -2463,8 +2475,6 @@ func (s *Store) Send(
 	retryOpts := s.cfg.RangeRetryOptions
 	s.mu.Unlock()
 	for r := retry.StartWithCtx(ctx, retryOpts); next(&r); {
-		numTries++
-
 		// Get range and add command to the range for execution.
 		repl, err := s.GetReplica(ba.RangeID)
 		if err != nil {
@@ -2532,6 +2542,7 @@ func (s *Store) Send(
 				clonedTxn := h.Txn.Clone()
 				h.Txn = &clonedTxn
 			}
+			instrumentation.IncrementParam(instrumentation.V_Store_Send_processWriteIntentErrorCount, 1)
 			pErr = s.intentResolver.processWriteIntentError(ctx, pErr, args, h, pushType)
 			// Preserve the error index.
 			pErr.Index = index
@@ -2547,6 +2558,7 @@ func (s *Store) Send(
 				if log.V(1) {
 					log.Warning(ctx, pErr)
 				}
+				numRetriesWithoutBackoff++
 				continue
 			}
 			if log.V(1) {

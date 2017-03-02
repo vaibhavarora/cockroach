@@ -486,6 +486,11 @@ func (e *WriteIntentError) message(_ *Error) string {
 
 var _ ErrorDetailInterface = &WriteIntentError{}
 
+// NewWriteIntentError initializes a new WriteIntentError.
+func NewWriteIntentError() *WriteIntentError {
+	return &WriteIntentError{}
+}
+
 func (e *WriteTooOldError) Error() string {
 	return e.message(nil)
 }

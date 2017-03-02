@@ -8,26 +8,27 @@ import (
 	"time"
 )
 
-var totalParams = 10
+var totalParams = 11
 
 // F_ for counting the function is called
 // V_ for accumulating the value of a var
 const (
 	// dist_sender.go params
-	F_DistSender_sendToReplicas              = "0"
-	F_DistSender_sendToAllReplicas           = "1"
-	F_DistSender_sendPartialBatch            = "2"
-	F_DistSender_sendRPC                     = "3"
-	V_DistSender_sendPartialBatch_numTries   = "4"
-	V_DistSender_sendRPC_specialRequestCount = "5"
+	F_DistSender_sendPartialBatch                       = "0"
+	V_DistSender_sendPartialBatch_numRetriesTotal       = "1"
+	V_DistSender_sendPartialBatch_returnedWithoutRetry  = "2"
+	V_DistSender_sendPartialBatch_writeIntentErrorCount = "3"
 
 	// store.go params
-	F_Store_Send          = "6"
-	V_Store_Send_numTries = "7"
+	F_Store_Send                              = "4"
+	V_Store_Send_returnedWithoutRetry         = "5"
+	V_Store_Send_numRetriesTotal              = "6"
+	V_Store_Send_numRetriesWithoutBackoff     = "7"
+	V_Store_Send_processWriteIntentErrorCount = "8"
 
 	// replica.go params
-	F_updateResponseWithIntentTimestamp       = "8"
-	V_Replica_addReadOnlyCmd_intentFoundCount = "9"
+	V_Replica_addReadOnlyCmd_executeBatchCount = "9"
+	V_Replica_addReadOnlyCmd_intentFoundCount  = "10"
 )
 
 var dumpFile = "data.dump"

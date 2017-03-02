@@ -380,8 +380,6 @@ func (ds *DistSender) getNodeDescriptor() *roachpb.NodeDescriptor {
 func (ds *DistSender) sendRPC(
 	ctx context.Context, rangeID roachpb.RangeID, replicas ReplicaSlice, ba roachpb.BatchRequest, firstAttempt bool,
 ) (*roachpb.BatchResponse, error) {
-	instrumentation.IncrementParam(instrumentation.F_DistSender_sendRPC, 1)
-
 	if len(replicas) == 0 {
 		return nil, roachpb.NewSendError(
 			fmt.Sprintf("no replica node addresses available via gossip for range %d", rangeID))
@@ -408,8 +406,6 @@ func (ds *DistSender) sendRPC(
 
 	var customReplicas ReplicaSlice
 	if roachpb.GetReadType() != roachpb.DefaultReadType && ba.HasSingleGetOrScan() {
-		instrumentation.IncrementParam(instrumentation.V_DistSender_sendRPC_specialRequestCount, 1)
-
 		switch roachpb.GetReadType() {
 		case roachpb.LocalReadType:
 			if index := getLocalReplicaIndex(ds, replicas); index != -1 {
@@ -436,7 +432,7 @@ func (ds *DistSender) sendRPC(
 				if log.V(2) {
 					log.Info(ctx, "Received BatchResponse with nil RawBytes. Should retry.")
 				}
-				return nil, roachpb.NewError(&roachpb.WriteIntentError{})
+				return nil, roachpb.NewWriteIntentError()
 			}
 		}
 	} else {
@@ -452,7 +448,7 @@ func (ds *DistSender) sendRPC(
 	return reply, nil
 }
 
-// tossCoin returns true by probability of (n-1)/n
+// tossBiasedCoin returns true by probability of (n-1)/n
 func tossBiasedCoin(n int) bool {
 	rand.Seed(time.Now().UnixNano())
 	return rand.Intn(n) != 0
@@ -1045,9 +1041,12 @@ func (ds *DistSender) sendPartialBatch(
 ) response {
 	instrumentation.IncrementParam(instrumentation.F_DistSender_sendPartialBatch, 1)
 
-	numTries := 0
+	numRetriesTotal := 0
 	defer func() {
-		instrumentation.IncrementParam(instrumentation.V_DistSender_sendPartialBatch_numTries, numTries)
+		if numRetriesTotal == 0 {
+			instrumentation.IncrementParam(instrumentation.V_DistSender_sendPartialBatch_returnedWithoutRetry, 1)
+		}
+		instrumentation.IncrementParam(instrumentation.V_DistSender_sendPartialBatch_numRetriesTotal, numRetriesTotal)
 	}()
 
 	ds.metrics.PartialBatchCount.Inc(1)
@@ -1073,10 +1072,18 @@ func (ds *DistSender) sendPartialBatch(
 		return response{pErr: roachpb.NewError(err)}
 	}
 
-	// Start a retry loop for sending the batch to the range.
-	for r := retry.StartWithCtx(ctx, ds.rpcRetryOptions); r.Next(); {
-		numTries++
+	firstTry := true
+	next := func(r *retry.Retry) bool {
+		if firstTry {
+			firstTry = false
+		} else {
+			numRetriesTotal++
+		}
+		return r.Next()
+	}
 
+	// Start a retry loop for sending the batch to the range.
+	for r := retry.StartWithCtx(ctx, ds.rpcRetryOptions); next(&r); {
 		// If we've cleared the descriptor on a send failure, re-lookup.
 		if desc == nil {
 			var descKey roachpb.RKey
@@ -1113,6 +1120,7 @@ func (ds *DistSender) sendPartialBatch(
 		case *roachpb.WriteIntentError:
 			// This scenario only occurs in case of strongly consistent quorums.
 			// The response corresponding to latest timestamp must be nil. Retry!
+			instrumentation.IncrementParam(instrumentation.V_DistSender_sendPartialBatch_writeIntentErrorCount, 1)
 			log.Event(ctx, "conflicting write intent encountered, retrying with a backoff")
 			continue
 		case *roachpb.SendError:
@@ -1368,8 +1376,6 @@ func (ds *DistSender) sendToAllReplicas(
 	args roachpb.BatchRequest,
 	rpcContext *rpc.Context,
 ) (*roachpb.BatchResponse, error) {
-	instrumentation.IncrementParam(instrumentation.F_DistSender_sendToAllReplicas, 1)
-
 	if !args.HasSingleGetOrScan() {
 		return nil, roachpb.NewSendError(
 			fmt.Sprint("sendToAllReplicas only supports single Get/Scan/ReverseScan"))
@@ -1472,8 +1478,6 @@ func (ds *DistSender) sendToReplicas(
 	args roachpb.BatchRequest,
 	rpcContext *rpc.Context,
 ) (*roachpb.BatchResponse, error) {
-	instrumentation.IncrementParam(instrumentation.F_DistSender_sendToReplicas, 1)
-
 	if len(replicas) < 1 {
 		return nil, roachpb.NewSendError(
 			fmt.Sprintf("insufficient replicas (%d) to satisfy send request of %d",
