@@ -1241,7 +1241,7 @@ func MVCCIncrement(
 		}
 
 		// Check for overflow and underflow.
-		if willOverflow(int64Val, inc) {
+		if WillOverflow(int64Val, inc) {
 			return nil, errors.Errorf("key %s with value %d incremented by %d results in overflow", key, int64Val, inc)
 		}
 
@@ -2464,7 +2464,7 @@ func MVCCFindSplitKey(
 
 // willOverflow returns true iff adding both inputs would under- or overflow
 // the 64 bit integer range.
-func willOverflow(a, b int64) bool {
+func WillOverflow(a, b int64) bool {
 	// Morally MinInt64 < a+b < MaxInt64, but without overflows.
 	// First make sure that a <= b. If not, swap them.
 	if a > b {

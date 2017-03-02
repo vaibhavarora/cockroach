@@ -2566,6 +2566,13 @@ func defaultSubmitProposalLocked(r *Replica, p *ProposalData) error {
 					ChangeReplicasTrigger: *tr,
 				}
 			}
+		} else if union, ok := p.Request.GetArg(roachpb.DyTsEndTransaction); ok {
+			ict := union.(*roachpb.DyTSEndTransactionRequest).InternalCommitTrigger
+			if tr := ict.GetChangeReplicasTrigger(); tr != nil {
+				changeReplicas = &storagebase.ChangeReplicas{
+					ChangeReplicasTrigger: *tr,
+				}
+			}
 		}
 	}
 
@@ -3729,6 +3736,21 @@ func (r *Replica) maybeAcquireSplitMergeLock(
 					SplitTrigger: *tr,
 				}
 			}
+
+			if tr := ict.GetMergeTrigger(); tr != nil {
+				merge = &storagebase.Merge{
+					MergeTrigger: *tr,
+				}
+			}
+
+		} else if union, ok := raftCmd.BatchRequest.GetArg(roachpb.DyTsEndTransaction); ok {
+			ict := union.(*roachpb.DyTSEndTransactionRequest).InternalCommitTrigger
+			if tr := ict.GetSplitTrigger(); tr != nil {
+				split = &storagebase.Split{
+					SplitTrigger: *tr,
+				}
+			}
+
 			if tr := ict.GetMergeTrigger(); tr != nil {
 				merge = &storagebase.Merge{
 					MergeTrigger: *tr,
@@ -4052,8 +4074,10 @@ func (r *Replica) executeWriteBatch(
 		clonedTxn.Status = roachpb.COMMITTED
 
 		// If the end transaction is not committed, clear the batch and mark the status aborted.
+
 		arg, _ := ba.GetArg(roachpb.EndTransaction)
 		etArg := arg.(*roachpb.EndTransactionRequest)
+
 		if !etArg.Commit {
 			clonedTxn.Status = roachpb.ABORTED
 			batch.Close()
@@ -4073,7 +4097,9 @@ func (r *Replica) executeWriteBatch(
 		br.Txn = &clonedTxn
 		// Add placeholder responses for begin & end transaction requests.
 		br.Responses = append([]roachpb.ResponseUnion{{BeginTransaction: &roachpb.BeginTransactionResponse{}}}, br.Responses...)
+
 		br.Responses = append(br.Responses, roachpb.ResponseUnion{EndTransaction: &roachpb.EndTransactionResponse{OnePhaseCommit: true}})
+
 		return batch, ms, br, result, nil
 	}
 

@@ -2,6 +2,7 @@ package storage
 
 import (
 	//"fmt"
+	"bytes"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -189,11 +190,55 @@ func EvalDyTSConditionalPut(
 		log.Infof(ctx, "Ravi : EvalDyTSConditionalPut: begin")
 	}
 	args := cArgs.Args.(*roachpb.ConditionalPutRequest)
+	h := cArgs.Header
+
+	expVal := args.ExpValue
+	check := func(existVal *roachpb.Value) error {
+		if expValPresent, existValPresent := expVal != nil, existVal != nil; expValPresent && existValPresent {
+			// Every type flows through here, so we can't use the typed getters.
+			if !bytes.Equal(expVal.RawBytes, existVal.RawBytes) {
+				return &roachpb.ConditionFailedError{
+					ActualValue: existVal.ShallowClone(),
+				}
+			}
+		} else if expValPresent != existValPresent {
+			return &roachpb.ConditionFailedError{
+				ActualValue: existVal.ShallowClone(),
+			}
+		}
+		return nil
+	}
+
+	existVal, _, wslocks, _ := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
+
+	err := check(existVal)
+	if err != nil {
+		engine.MVCCRemoveReadSoftLock(ctx, batch, *h.Txn, args.Span, cArgs.Repl.slockcache)
+		return EvalResult{}, err
+	}
+
 	var req roachpb.RequestUnion
 	req.MustSetInner(args)
 	// places write lock and returns already placed read and write locks
-	rslocks, wslocks := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
+	rslocks, wslocks1 := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
+
 	for _, each := range wslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Write locks acqurired on EvalDyTSConditionalPut %v", each)
+		}
+	}
+	// push locks collected on read
+	if len(wslocks) != 0 {
+		if err := pushSoftLocksOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+			panic("failed to place soft  locks in txn Record")
+		}
+	} else {
+		if log.V(2) {
+			log.Infof(ctx, " No Write locks acqurired on Cput ")
+		}
+	}
+
+	for _, each := range wslocks1 {
 		if log.V(2) {
 			log.Infof(ctx, "Write locks acqurired on EvalDyTSConditionalPut %v", each)
 		}
@@ -203,9 +248,9 @@ func EvalDyTSConditionalPut(
 			log.Infof(ctx, "Read locks acqurired on EvalDyTSConditionalPut %v", each)
 		}
 	}
-
-	if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+	// push locks collected on write
+	if len(wslocks1) != 0 || len(rslocks) != 0 {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -227,6 +272,29 @@ func EvalDyTSInitPut(
 		log.Infof(ctx, "Ravi : EvalDyTSInitPut: begin")
 	}
 	args := cArgs.Args.(*roachpb.InitPutRequest)
+	h := cArgs.Header
+	var errInitPutValueMatchesExisting = errors.New("the value matched the existing value")
+	value := args.Value
+	check := func(existVal *roachpb.Value) error {
+		if existVal != nil {
+			if !bytes.Equal(value.RawBytes, existVal.RawBytes) {
+				return &roachpb.ConditionFailedError{
+					ActualValue: existVal.ShallowClone(),
+				}
+			}
+			// The existing value matches the supplied value; return an error
+			// to prevent rewriting the value.
+			return errInitPutValueMatchesExisting
+		}
+		return nil
+	}
+
+	existVal, _, _, _ := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, nil, false)
+
+	err := check(existVal)
+	if err != nil {
+		return EvalResult{}, err
+	}
 	var req roachpb.RequestUnion
 	req.MustSetInner(args)
 	// places write lock and returns already placed read and write locks
@@ -266,15 +334,57 @@ func EvalDyTSIncrement(
 		log.Infof(ctx, "Ravi : EvalDyTSIncrement: begin")
 	}
 	args := cArgs.Args.(*roachpb.IncrementRequest)
-	// Place read lock
-	wslocks := engine.MVCCPlaceReadSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, false, cArgs.Repl.slockcache)
-	//Place write lock
+	inc := args.Increment
+	h := cArgs.Header
+	reply := resp.(*roachpb.IncrementResponse)
+	var int64Val int64
+	check := func(value *roachpb.Value) error {
+		if value != nil {
+			var err error
+			if int64Val, err = value.GetInt(); err != nil {
+				return errors.Errorf("key %q does not contain an integer value", args.Key)
+			}
+		}
+
+		// Check for overflow and underflow.
+		if engine.WillOverflow(int64Val, inc) {
+			return errors.Errorf("key %s with value %d incremented by %d results in overflow", args.Key, int64Val, inc)
+		}
+
+		int64Val = int64Val + inc
+
+		return nil
+	}
+	extvalue, _, wslocks, _ := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
+	err := check(extvalue)
+	if err != nil {
+		engine.MVCCRemoveReadSoftLock(ctx, batch, *h.Txn, args.Span, cArgs.Repl.slockcache)
+		return EvalResult{}, err
+	}
+	reply.NewValue = int64Val
+
 	var req roachpb.RequestUnion
 	req.MustSetInner(args)
 	// places write lock and returns already placed read and write locks
-	rslocks, wslockstmp := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
-	wslocks = append(wslocks, wslockstmp...)
+	rslocks, wslocks1 := engine.MVCCPlaceWriteSoftLock(ctx, cArgs.Header.Txn.TxnMeta, args.Key, req, cArgs.Repl.slockcache)
+
 	for _, each := range wslocks {
+		if log.V(2) {
+			log.Infof(ctx, "Write locks acqurired on EvalDyTSConditionalPut %v", each)
+		}
+	}
+	// push locks collected on read
+	if len(wslocks) != 0 {
+		if err := pushSoftLocksOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+			panic("failed to place soft  locks in txn Record")
+		}
+	} else {
+		if log.V(2) {
+			log.Infof(ctx, " No Write locks acqurired on Cput ")
+		}
+	}
+
+	for _, each := range wslocks1 {
 		if log.V(2) {
 			log.Infof(ctx, "Write locks acqurired on EvalDyTSIncrement %v", each)
 		}
@@ -284,9 +394,9 @@ func EvalDyTSIncrement(
 			log.Infof(ctx, "Read locks acqurired on EvalDyTSIncrement %v", each)
 		}
 	}
-
-	if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+	// push locks collected on write
+	if len(wslocks1) != 0 || len(rslocks) != 0 {
+		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1); err != nil {
 			panic("failed to place locks in transaction record")
 		}
 	} else {
@@ -627,7 +737,7 @@ func pushSoftLocksOnReadToTxnRecord(
 
 	var rARgs RpcArgs
 	// Modify its Lower bound based on last committed write time stamp
-	lowerbound := r.applyDyTSCache(span, true /*read*/)
+	lowerbound := r.applyDyTSCache(span, false /*write*/)
 	if h.Timestamp.Less(lowerbound) {
 		rARgs.lowerbound = h.Timestamp
 		rARgs.upperbound = h.Timestamp
@@ -666,7 +776,7 @@ func pushSoftLocksOnWriteToTxnRecord(
 	var rARgs RpcArgs
 	// Modify its Lower bound based on last committed write time stamp
 	// Temporarily
-	rARgs.lowerbound = r.applyDyTSCache(span, false /* write*/)
+	rARgs.lowerbound = r.applyDyTSCache(span, true /*read*/)
 	rARgs.upperbound = hlc.MaxTimestamp
 
 	// Place txns of all the write locks

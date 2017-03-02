@@ -195,14 +195,14 @@ func EvalDyTSValidatorEndTransaction(
 	pd.Local.txnrecord = &txnRecord
 
 	// Run triggers if successfully committed.
-	/*
-		if txnRecord.Status == roachpb.COMMITTED {
-			var err error
-			if pd, err = cArgs.Repl.runCommitTrigger(ctx, batch.(engine.Batch), cArgs.Stats, args.InternalCommitTrigger, &txnRecord); err != nil {
-				return EvalResult{}, NewReplicaCorruptionError(err)
-			}
+
+	if txnRecord.Status == roachpb.COMMITTED {
+		var err error
+		if pd, err = cArgs.Repl.runCommitTrigger(ctx, batch.(engine.Batch), cArgs.Stats, args.InternalCommitTrigger, &txnRecord); err != nil {
+			return EvalResult{}, NewReplicaCorruptionError(err)
 		}
-	*/
+	}
+
 	return pd, nil
 }
 
@@ -226,7 +226,7 @@ func EvalDyTSValidateCommitAfter(
 		return EvalResult{}, err
 	} else if !ok {
 		if log.V(2) {
-			log.Infof(ctx, "EvalDyTSValidateCommitAfter : coudnt find transaction record in this range")
+			log.Infof(ctx, "EvalDyTSValidateCommitAfter : couldnt find transaction record in this range")
 		}
 		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
 	}
