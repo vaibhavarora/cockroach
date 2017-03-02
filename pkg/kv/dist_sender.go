@@ -1111,7 +1111,8 @@ func (ds *DistSender) sendPartialBatch(
 		// to our caller.
 		switch tErr := pErr.GetDetail().(type) {
 		case *roachpb.WriteIntentError:
-			fmt.Println("conflicting write intent encountered, retrying with a backoff")
+			// This scenario only occurs in case of strongly consistent quorums.
+			// The response corresponding to latest timestamp must be nil. Retry!
 			log.Event(ctx, "conflicting write intent encountered, retrying with a backoff")
 			continue
 		case *roachpb.SendError:
