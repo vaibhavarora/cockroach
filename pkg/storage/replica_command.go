@@ -622,7 +622,7 @@ func evalEndTransaction(
 	var pd EvalResult
 	if reply.Txn.Status == roachpb.COMMITTED {
 		var err error
-		if pd, err = r.runCommitTrigger(ctx, batch.(engine.Batch), ms, *args, reply.Txn); err != nil {
+		if pd, err = r.runCommitTrigger(ctx, batch.(engine.Batch), ms, args.InternalCommitTrigger, reply.Txn); err != nil {
 			return EvalResult{}, NewReplicaCorruptionError(err)
 		}
 	}
@@ -853,10 +853,10 @@ func (r *Replica) runCommitTrigger(
 	ctx context.Context,
 	batch engine.Batch,
 	ms *enginepb.MVCCStats,
-	args roachpb.EndTransactionRequest,
+	ct *roachpb.InternalCommitTrigger,
 	txn *roachpb.Transaction,
 ) (EvalResult, error) {
-	ct := args.InternalCommitTrigger
+	//ct := args.InternalCommitTrigger
 	if ct == nil {
 		return EvalResult{}, nil
 	}

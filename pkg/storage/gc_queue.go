@@ -175,6 +175,9 @@ func processLocalKeyRange(
 	var gcKeys []roachpb.GCRequest_GCKey
 
 	handleOneTransaction := func(kv roachpb.KeyValue) error {
+		// Stoping the clearing of Transaction records Temporarily
+		return nil
+
 		var txn roachpb.Transaction
 		if err := kv.Value.GetProto(&txn); err != nil {
 			return err

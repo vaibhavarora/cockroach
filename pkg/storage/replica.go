@@ -136,6 +136,17 @@ func consultsTimestampCache(r roachpb.Request) bool {
 	return consultsTimestampCacheMethods[m]
 }
 
+var consultsDTSCacheMethods = [...]bool{
+	roachpb.Put:            true,
+	roachpb.ConditionalPut: true,
+	roachpb.Increment:      true,
+	roachpb.Delete:         true,
+	roachpb.DeleteRange:    true,
+	roachpb.Get:            true,
+	roachpb.Scan:           true,
+	roachpb.ReverseScan:    true,
+}
+
 var consultsDyTSMethods = [...]bool{
 	roachpb.Put:            true,
 	roachpb.ConditionalPut: true,
@@ -469,6 +480,8 @@ type Replica struct {
 
 		// Most recent timestamps for keys / key ranges.
 		tsCache *timestampCache
+		// Most recent commit timestamps for keys/key ranges.
+		dyTSCache *timestampCache
 		// submitProposalFn can be set to mock out the propose operation.
 		submitProposalFn func(*ProposalData) error
 		// Computed checksum at a snapshot UUID.
@@ -694,6 +707,8 @@ func (r *Replica) initLocked(
 	r.cmdQMu.Unlock()
 
 	r.mu.tsCache = newTimestampCache(clock)
+	r.mu.dyTSCache = newTimestampCache(clock)
+
 	r.mu.proposals = map[storagebase.CmdIDKey]*ProposalData{}
 	r.mu.checksums = map[uuid.UUID]replicaChecksum{}
 	// Clear the internal raft group in case we're being reset. Since we're
@@ -1806,6 +1821,46 @@ func (r *Replica) applyTimestampCache(ba *roachpb.BatchRequest) (bumped bool, _ 
 		}
 	}
 	return bumped, nil
+}
+
+// Dynamic Timestamping time cache
+func (r *Replica) applyDyTSCache(
+	span roachpb.Span,
+	read bool, // false for write
+) hlc.Timestamp {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if read {
+		rTS, _, _ := r.mu.dyTSCache.GetMaxRead(span.Key, span.EndKey)
+		return rTS
+	}
+
+	wTS, _, _ := r.mu.dyTSCache.GetMaxWrite(span.Key, span.EndKey)
+
+	return wTS
+}
+
+func (r *Replica) updateDyTSCache(
+	span roachpb.Span,
+	read bool, // false for write
+	ts hlc.Timestamp,
+) {
+
+	cr := cacheRequest{
+		timestamp: ts,
+	}
+
+	if read {
+		cr.reads = append(cr.reads, span)
+	} else {
+		cr.writes = append(cr.writes, span)
+	}
+
+	r.mu.Lock()
+	r.mu.tsCache.AddRequest(cr)
+	r.mu.Unlock()
+
 }
 
 // addAdminCmd executes the command directly. There is no interaction
@@ -4006,7 +4061,7 @@ func (r *Replica) executeWriteBatch(
 			ms = enginepb.MVCCStats{}
 		} else {
 			// Run commit trigger manually.
-			innerResult, err := r.runCommitTrigger(ctx, batch, &ms, *etArg, &clonedTxn)
+			innerResult, err := r.runCommitTrigger(ctx, batch, &ms, etArg.InternalCommitTrigger, &clonedTxn)
 			if err != nil {
 				return batch, ms, br, result, roachpb.NewErrorf("failed to run commit trigger: %s", err)
 			}
