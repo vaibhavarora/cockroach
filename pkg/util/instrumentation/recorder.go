@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -40,14 +41,13 @@ func Start() {
 	fmt.Println("ticker started")
 	go func() {
 		for t := range ticker.C {
+			result := []string{strconv.Itoa(int(t.Unix()))}
+
+			// Prepare result
 			mutex.Lock()
-			// Prepare data
-			var str string
-			str += strconv.Itoa(int(t.Unix())) + ", "
 			for i := 0; i < totalParams; i++ {
 				key := strconv.Itoa(i)
-				val := data[key]
-				str += strconv.Itoa(val) + ", "
+				result = append(result, strconv.Itoa(data[key]))
 			}
 
 			// Reset map
@@ -56,7 +56,7 @@ func Start() {
 
 			// Dump to file
 			f, _ := os.OpenFile(dumpFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-			f.WriteString(str + "\n")
+			f.WriteString(strings.Join(result, ",") + "\n")
 			f.Sync()
 			f.Close()
 		}
