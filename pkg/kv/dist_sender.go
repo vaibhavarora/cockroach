@@ -436,7 +436,7 @@ func (ds *DistSender) sendRPC(
 				if log.V(2) {
 					log.Info(ctx, "Received BatchResponse with nil RawBytes. Should retry.")
 				}
-				return nil, roachpb.NewSendError("detected conflicting writeIntent")
+				return nil, roachpb.NewError(&roachpb.WriteIntentError{})
 			}
 		}
 	} else {
@@ -1110,6 +1110,10 @@ func (ds *DistSender) sendPartialBatch(
 		// row and the range descriptor hasn't changed, return the error
 		// to our caller.
 		switch tErr := pErr.GetDetail().(type) {
+		case *roachpb.WriteIntentError:
+			fmt.Println("conflicting write intent encountered, retrying with a backoff")
+			log.Event(ctx, "conflicting write intent encountered, retrying with a backoff")
+			continue
 		case *roachpb.SendError:
 			// We've tried all the replicas without success. Either
 			// they're all down, or we're using an out-of-date range
