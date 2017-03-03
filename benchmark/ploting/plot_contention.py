@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-concurrency = 100
+concurrency = 25
 contention_range = range(50,100,10)
 trans_rate = []
 retries = []
@@ -10,7 +10,7 @@ avg_write = []
 tnx_time_wo_reties = []
 tnx_time_with_reties = []
 total = 0
-#file_name = "contention_output"
+file_name = "contention25"
 flag = 1
 
 def plot_Tnx_rate():
