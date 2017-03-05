@@ -412,6 +412,7 @@ func runStart(_ *cobra.Command, args []string) error {
 			fmt.Fprintf(tw, "clusterID:\t%s\n", s.ClusterID())
 			fmt.Fprintf(tw, "nodeID:\t%d\n", nodeID)
 			fmt.Fprintf(tw, "readType:\t%s\n", roachpb.GetReadTypeString())
+			fmt.Fprintf(tw, "LHFallbackProb:\t%f\n", roachpb.GetLHFallbackProb())
 			return tw.Flush()
 		}(); err != nil {
 			errChan <- err

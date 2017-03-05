@@ -25,6 +25,10 @@ import (
 	"github.com/gogo/protobuf/proto"
 )
 
+func GetLHFallbackProb() float64 {
+	return envutil.EnvOrDefaultFloat("COCKROACH_LHFALLBACK_PROB", 0)
+}
+
 func GetReadType() int {
 	return envutil.EnvOrDefaultInt("COCKROACH_READ_TYPE", DefaultReadType)
 }

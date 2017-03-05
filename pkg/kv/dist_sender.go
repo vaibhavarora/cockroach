@@ -413,7 +413,7 @@ func (ds *DistSender) sendRPC(
 			}
 
 		case roachpb.QuorumReadType, roachpb.StronglyConsistentQuorumReadType:
-			if tossBiasedCoin(len(replicas)) {
+			if !lhFallback() {
 				customReplicas = createQuorumReplicas(ds, ctx, rangeID, replicas)
 			}
 		}
@@ -448,10 +448,10 @@ func (ds *DistSender) sendRPC(
 	return reply, nil
 }
 
-// tossBiasedCoin returns true by probability of (n-1)/n
-func tossBiasedCoin(n int) bool {
+// returns true if lease holder fallback should be used
+func lhFallback() bool {
 	rand.Seed(time.Now().UnixNano())
-	return rand.Intn(n) != 0
+	return rand.Float64() < roachpb.GetLHFallbackProb()
 }
 
 // checks if the BatchResponse contains nil RawBytes

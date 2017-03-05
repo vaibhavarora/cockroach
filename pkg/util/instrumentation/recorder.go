@@ -38,7 +38,7 @@ var data = make(map[string]int)
 var mutex = &sync.Mutex{}
 
 func Start() {
-	fmt.Println("ticker started")
+	fmt.Println("instrumentation started...")
 	go func() {
 		for t := range ticker.C {
 			result := []string{strconv.Itoa(int(t.Unix()))}
