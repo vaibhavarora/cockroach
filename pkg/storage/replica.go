@@ -1421,7 +1421,7 @@ func (r *Replica) Send(
 
 	// Differentiate between admin, read-only and write.
 	var pErr *roachpb.Error
-	if ba.IsWrite() {
+	if ba.IsWrite() || (ba.IsPossibleNonTransaction() && ba.Txn == nil) {
 		if log.V(2) {
 			log.Infof(ctx, "Ravi : Taking read-write path")
 		}
@@ -1641,6 +1641,10 @@ func (r *Replica) beginCmds(ctx context.Context, ba *roachpb.BatchRequest) (*end
 		numChans := len(chans)
 		if numChans > 0 {
 			log.Eventf(ctx, "waiting for %d overlapping requests", len(chans))
+		}
+		if log.V(2) {
+			log.Infof(ctx, "waiting for %d overlapping requests", len(chans))
+			log.Infof(ctx, "cmdLocal %v , cmdGlobal %v", cmdLocal, cmdGlobal)
 		}
 		for _, ch := range chans {
 			select {
@@ -1941,7 +1945,7 @@ func (r *Replica) addReadOnlyCmd(
 		log.Event(ctx, "command queue")
 		var err error
 		if log.V(2) {
-			log.Infof(ctx, "Ravi : adding to comman queue %v", ba)
+			log.Infof(ctx, "Ravi : adding to command queue %v", ba)
 		}
 		endCmds, err = r.beginCmds(ctx, &ba)
 		if err != nil {
@@ -1951,7 +1955,6 @@ func (r *Replica) addReadOnlyCmd(
 
 	log.Event(ctx, "waiting for read lock")
 	r.readOnlyCmdMu.RLock()
-	defer r.readOnlyCmdMu.RUnlock()
 
 	// Guarantee we remove the commands from the command queue. It is
 	// important that this is inside the readOnlyCmdMu lock so that the
@@ -1960,13 +1963,18 @@ func (r *Replica) addReadOnlyCmd(
 	defer func() {
 		if endCmds != nil {
 			endCmds.done(br, pErr, proposalNoRetry)
+
 			if log.V(2) {
-				log.Infof(ctx, "Out of command queue pErr %v", pErr)
+				log.Infof(ctx, "Out of command queue  %v", ba)
 			}
+
+			r.readOnlyCmdMu.RUnlock()
+
 			if pErr == nil {
 				br, _ = r.handleEndTransaction(ctx, ba, br)
 			}
 		}
+
 	}()
 	// placing soft locks
 	//r.dynamicTimeStamper.processDynamicTimestamping(ctx, &ba)
@@ -2152,6 +2160,9 @@ func (r *Replica) tryAddWriteCmd(
 			if endCmds != nil {
 				endCmds.done(br, pErr, retry)
 			}
+			if log.V(2) {
+				log.Infof(ctx, "out of command queue ba %v ", ba)
+			}
 		}()
 	}
 
@@ -2245,6 +2256,7 @@ func (r *Replica) tryAddWriteCmd(
 		select {
 		case propResult := <-ch:
 			if len(propResult.Intents) > 0 {
+
 				// Semi-synchronously process any intents that need resolving here in
 				// order to apply back pressure on the client which generated them. The
 				// resolution is semi-synchronous in that there is a limited number of
@@ -2256,6 +2268,9 @@ func (r *Replica) tryAddWriteCmd(
 				// solution presents itself at the moment and such intents will be
 				// resolved on reads.
 				r.store.intentResolver.processIntentsAsync(r, propResult.Intents)
+			}
+			if log.V(2) {
+				log.Infof(ctx, "tryAddWriteCmd 1")
 			}
 			// Semi-syncronously resolve any soft locks
 			if len(propResult.ResolveWSLocks) > 0 || len(propResult.GcWSLocks) > 0 || len(propResult.GcRSLocks) > 0 {
@@ -2333,6 +2348,9 @@ func (r *Replica) requestToProposal(
 			BatchRequest: &ba,
 		}
 	}
+	if log.V(2) {
+		log.Infof(ctx, "requestToProposal 2 ba %v", ba)
+	}
 	return proposal, pErr
 }
 
@@ -2353,7 +2371,7 @@ func (r *Replica) evaluateProposal(
 	// since evaluating a proposal is expensive (at least under proposer-
 	// evaluated KV).
 	if log.V(2) {
-		log.Infof(ctx, "evaluateProposal, ba %v", ba)
+		log.Infof(ctx, "evaluateProposal, ba %v, ba.Timestamp %v", ba, ba.Timestamp)
 	}
 	var result EvalResult
 
@@ -2364,6 +2382,9 @@ func (r *Replica) evaluateProposal(
 	result = r.applyRaftCommandInBatch(ctx, idKey, ba)
 
 	if result.Local.Err != nil {
+		if log.V(2) {
+			log.Infof(ctx, "evaluateProposal 1 ")
+		}
 		// Failed proposals (whether they're failfast or not) can't have any
 		// EvalResult except what's whitelisted here.
 		result.Local = LocalEvalResult{
@@ -2391,7 +2412,9 @@ func (r *Replica) evaluateProposal(
 		}
 		return &result, result.Local.Err
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "evaluateProposal 2 ")
+	}
 	// If there is an error, it will be returned to the client when the
 	// proposal (and thus WriteBatch) applies.
 	return &result, nil
@@ -2461,6 +2484,9 @@ func (r *Replica) propose(
 		r.mu.Unlock()
 		return nil, nil, err
 	}
+	if log.V(2) {
+		log.Infof(ctx, "Propose function 1 %v", ba)
+	}
 	r.mu.Unlock()
 
 	// submitProposalLocked calls withRaftGroupLocked which requires that
@@ -2478,32 +2504,47 @@ func (r *Replica) propose(
 	// See #10084.
 	r.raftMu.Lock()
 	defer r.raftMu.Unlock()
-
+	if log.V(2) {
+		log.Infof(ctx, "Propose function 2 %v", ba)
+	}
 	idKey := makeIDKey()
 	proposal, pErr := r.requestToProposal(ctx, idKey, ba, endCmds)
 	// An error here corresponds to a failfast-proposal: The command resulted
 	// in an error and did not need to commit a batch (the common error case).
 	if pErr != nil {
+		if log.V(2) {
+			log.Infof(ctx, "Propose function 3 %v", ba)
+		}
 		if proposal.Local == nil || proposal.command.ReplicatedEvalResult == nil {
 			return nil, nil, errors.Errorf(
 				"requestToProposal returned error %s without eval results", err)
 		}
 		intents := proposal.Local.detachIntents()
+		resolvewslocks := proposal.Local.detachResolveWSLocks()
+		gcwslocks := proposal.Local.detachGCWSLocks()
+		gcrslocks := proposal.Local.detachGCRSLocks()
+		txnrcd := proposal.Local.detachTxnRecord()
+
 		r.handleEvalResult(ctx, repDesc, proposal.Local,
 			proposal.command.ReplicatedEvalResult)
 		if endCmds != nil {
 			endCmds.done(nil, pErr, proposalNoRetry)
 		}
 		ch := make(chan proposalResult, 1)
-		ch <- proposalResult{Err: pErr, Intents: intents}
+		ch <- proposalResult{Err: pErr, Intents: intents, ResolveWSLocks: resolvewslocks, GcWSLocks: gcwslocks, GcRSLocks: gcrslocks, TxnRecod: txnrcd}
 		close(ch)
 		return ch, func() bool { return false }, nil
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if log.V(2) {
+		log.Infof(ctx, "Propose function 4 %v", ba)
+	}
 	r.insertProposalLocked(proposal, repDesc, lease)
-
+	if log.V(2) {
+		log.Infof(ctx, "Propose function 5 %v", ba)
+	}
 	if err := r.submitProposalLocked(proposal); err != nil {
 		delete(r.mu.proposals, proposal.idKey)
 		return nil, nil, err
@@ -3430,7 +3471,7 @@ func (r *Replica) processRaftCommand(
 		log.Fatalf(ctx, "processRaftCommand requires a non-zero index")
 	}
 
-	if log.V(4) {
+	if log.V(2) {
 		log.Infof(ctx, "processing command %x: maxLeaseIndex=%d", idKey, raftCmd.MaxLeaseIndex)
 	}
 
@@ -3672,7 +3713,9 @@ func (r *Replica) processRaftCommand(
 				RangeID:              r.RangeID,
 			})
 		}
-
+		if log.V(2) {
+			log.Infof(ctx, "processRaftCommand 1, writebatch %v", writeBatch)
+		}
 		pErr = r.maybeSetCorrupt(ctx, pErr)
 		if pErr == nil {
 			pErr = forcedErr
@@ -3694,6 +3737,9 @@ func (r *Replica) processRaftCommand(
 			} else {
 				log.Fatalf(ctx, "proposal must return either a reply or an error: %+v", proposal)
 			}
+			if log.V(2) {
+				log.Infof(ctx, "processRaftCommand 2, response %v", response)
+			}
 			response.Intents = proposal.Local.detachIntents()
 			response.ResolveWSLocks = proposal.Local.detachResolveWSLocks()
 			response.GcWSLocks = proposal.Local.detachGCWSLocks()
@@ -3701,6 +3747,9 @@ func (r *Replica) processRaftCommand(
 			response.TxnRecod = proposal.Local.detachTxnRecord()
 
 			lResult = proposal.Local
+			if log.V(2) {
+				log.Infof(ctx, "processRaftCommand 3 response %v", response)
+			}
 		}
 
 		// Handle the EvalResult, executing any side effects of the last
@@ -3710,7 +3759,9 @@ func (r *Replica) processRaftCommand(
 		// before notifying a potentially waiting client.
 		r.handleEvalResult(ctx, raftCmd.OriginReplica, lResult, raftCmd.ReplicatedEvalResult)
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "processRaftCommand 4 response %v", response)
+	}
 	if proposedLocally {
 		proposal.finish(response)
 	} else if response.Err != nil {
@@ -3839,7 +3890,9 @@ func (r *Replica) applyRaftCommand(
 	if rResult.State.RaftAppliedIndex <= 0 {
 		log.Fatalf(ctx, "raft command index is <= 0")
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In applyRaftCommand")
+	}
 	r.mu.Lock()
 	oldRaftAppliedIndex := r.mu.state.RaftAppliedIndex
 	oldLeaseAppliedIndex := r.mu.state.LeaseAppliedIndex
@@ -3863,7 +3916,9 @@ func (r *Replica) applyRaftCommand(
 				errors.Wrap(err, "unable to apply WriteBatch")))
 		}
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In applyRaftCommand 2 rResult %v", rResult)
+	}
 	// The only remaining use of the batch is for range-local keys which we know
 	// have not been previously written within this batch. Currently the only
 	// remaining writes are the raft applied index and the updated MVCC stats.
@@ -3881,7 +3936,9 @@ func (r *Replica) applyRaftCommand(
 	}
 	rResult.Delta.SysBytes += appliedIndexNewMS.SysBytes -
 		calcAppliedIndexSysBytes(r.RangeID, oldRaftAppliedIndex, oldLeaseAppliedIndex)
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In applyRaftCommand 3 rResult %v", rResult)
+	}
 	// Special-cased MVCC stats handling to exploit commutativity of stats
 	// delta upgrades. Thanks to commutativity, the command queue does not
 	// have to serialize on the stats key.
@@ -3890,7 +3947,9 @@ func (r *Replica) applyRaftCommand(
 		return enginepb.MVCCStats{}, roachpb.NewError(NewReplicaCorruptionError(
 			errors.Wrap(err, "unable to update MVCCStats")))
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In applyRaftCommand 4 rResult %v", rResult)
+	}
 	// TODO(peter): We did not close the writer in an earlier version of
 	// the code, which went undetected even though we used the batch after
 	// (though only to commit it). We should add an assertion to prevent that in
@@ -3900,6 +3959,9 @@ func (r *Replica) applyRaftCommand(
 	if err := batch.Commit(); err != nil {
 		return enginepb.MVCCStats{}, roachpb.NewError(NewReplicaCorruptionError(
 			errors.Wrap(err, "could not commit batch")))
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In applyRaftCommand 5 rResult.delta %v", rResult.Delta)
 	}
 	return rResult.Delta, nil
 }
@@ -4001,6 +4063,9 @@ func (r *Replica) applyRaftCommandInBatch(
 	// applies, saving work on the proposer. Take care to discard batches
 	// properly whenever the command leaves `r.mu.proposals` without coming
 	// back.
+	if log.V(2) {
+		log.Infof(ctx, "applyRaftCommandInBatch, end")
+	}
 	btch.Close()
 	return result
 }
@@ -4058,9 +4123,14 @@ func (r *Replica) executeWriteBatch(
 	// will require restart or retry, execute as normal.
 	if r.store.TestingKnobs().DisableOnePhaseCommits || !isOnePhaseCommit(ba) {
 		br, result, pErr := r.executeBatch(ctx, idKey, batch, &ms, ba)
+		if log.V(2) {
+			log.Infof(ctx, "Ravi executeWriteBatch 1")
+		}
 		return batch, ms, br, result, pErr
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi executeWriteBatch 2")
+	}
 	// Try executing with transaction stripped.
 	strippedBa := ba
 	strippedBa.Txn = nil
@@ -4074,7 +4144,9 @@ func (r *Replica) executeWriteBatch(
 		clonedTxn.Status = roachpb.COMMITTED
 
 		// If the end transaction is not committed, clear the batch and mark the status aborted.
-
+		if log.V(2) {
+			log.Infof(ctx, "Ravi executeWriteBatch 3")
+		}
 		arg, _ := ba.GetArg(roachpb.EndTransaction)
 		etArg := arg.(*roachpb.EndTransactionRequest)
 
@@ -4283,15 +4355,13 @@ func (r *Replica) executeBatch(
 		if consultsDyTSValidatorCommands(args) {
 			curResult, pErr = r.executeDyTSValidatorCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 		} else {
-			//shadowing for now
 
-			if ba.Txn != nil && consultsDyTSCommands(args) {
-				curResult, pErr = r.executeDyTSCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
-			}
 			if log.V(2) {
 				log.Infof(ctx, "Ravi :before replica command : reply %v", reply)
 			}
-			if !consultsBlockCommands(args) {
+			if ba.Txn != nil && consultsDyTSCommands(args) {
+				curResult, pErr = r.executeDyTSCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
+			} else {
 				curResult, pErr = r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, maxKeys, args, reply)
 			}
 
@@ -4305,7 +4375,9 @@ func (r *Replica) executeBatch(
 				err, pretty.Diff(curResult, result),
 			)
 		}
-
+		if log.V(2) {
+			log.Infof(ctx, "Ravi executecmd 1 %v", ba)
+		}
 		if pErr != nil {
 			switch tErr := pErr.GetDetail().(type) {
 			case *roachpb.WriteTooOldError:
@@ -4368,7 +4440,9 @@ func (r *Replica) executeBatch(
 			}
 			maxKeys -= retResults
 		}
-
+		if log.V(2) {
+			log.Infof(ctx, "Ravi executecmd 2%v", ba)
+		}
 		// If transactional, we use ba.Txn for each individual command and
 		// accumulate updates to it.
 		// TODO(spencer,tschottdorf): need copy-on-write behavior for the
@@ -4388,6 +4462,9 @@ func (r *Replica) executeBatch(
 
 	if ba.Txn != nil {
 		// If transactional, send out the final transaction entry with the reply.
+		if log.V(2) {
+			log.Infof(ctx, "Ravi executecmd 3%v", ba)
+		}
 		br.Txn = ba.Txn
 	} else {
 		// When non-transactional, use the timestamp field.

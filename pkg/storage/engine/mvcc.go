@@ -1173,8 +1173,11 @@ func mvccPutInternal(
 	}
 	if nointent {
 		// Remove write soft lock
-		swlock := slcache.getWriteSoftLock(metaKey.Key, *txn.ID)
-		slcache.removeFromWriteLockCache(swlock, metaKey.Key)
+		swlock, ok := slcache.getWriteSoftLock(metaKey.Key, *txn.ID)
+		if ok {
+			slcache.removeFromWriteLockCache(swlock, metaKey.Key)
+		}
+
 	}
 	// Write the mvcc metadata now that we have sizes for the latest
 	// versioned value. For values, the size of keys is always accounted
@@ -2078,7 +2081,16 @@ func MVCCresolveWriteSoftLock(
 		log.Infof(ctx, "Ravi : In MVCCresolveWriteSoftLock")
 	}
 	var err error
-	wslock := slcache.getWriteSoftLock(span.Key, *txn.ID)
+	wslock, ok := slcache.getWriteSoftLock(span.Key, *txn.ID)
+	if !ok {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : Couldnt retrive any write lock for the key")
+		}
+		return nil
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : wslock %v", wslock)
+	}
 	args := wslock.Request.GetInner()
 	if cmd, ok := DyTSMVCCCommands[args.Method()]; ok {
 		dmArgs := DyTSmArgs{
@@ -2111,20 +2123,32 @@ func MVCCRemoveWriteSoftLock(
 	}
 	if len(span.EndKey) == 0 {
 		// getting lock from cache
-		wslock := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
-		// removing the entry from cache
-		slcache.removeFromWriteLockCache(wslock, span.Key)
+		wslock, ok := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
+		if ok {
+			// removing the entry from cache
+			slcache.removeFromWriteLockCache(wslock, span.Key)
+		}
+
 	} else {
-		wslock := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
+		wslock, ok := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
+		if !ok {
+			if log.V(2) {
+				log.Infof(ctx, "Coudnt retrive any lock")
+			}
+			return nil
+		}
 		reverse := roachpb.IsReverse(wslock.Request.GetInner())
 
 		keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, txnrcd, reverse)
 
 		for _, key := range keys {
 			// getting lock from cache
-			wslock := slcache.getWriteSoftLock(key, *txnrcd.ID)
-			// removing the entry from cache
-			slcache.removeFromWriteLockCache(wslock, span.Key)
+			wslock, ok := slcache.getWriteSoftLock(key, *txnrcd.ID)
+			if ok {
+				// removing the entry from cache
+				slcache.removeFromWriteLockCache(wslock, span.Key)
+			}
+
 		}
 	}
 

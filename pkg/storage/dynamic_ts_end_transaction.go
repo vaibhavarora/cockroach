@@ -4,6 +4,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 
 	"golang.org/x/net/context"
@@ -22,17 +23,19 @@ func (r *Replica) ProcessDyTSEndTransaction(
 	}
 	var err error
 
-	//args := Args.(*roachpb.EndTransactionRequest)
+	args := Args.(*roachpb.EndTransactionRequest)
 	reply := resp.(*roachpb.EndTransactionResponse)
 
-	/*
-		if err = sendDyTSEndTranactionRPC(ctx, r.store, batch, h, *reply.Txn, *args); err != nil {
-			return err
-		}*/
-
-	if err = sendOrigEndTransactionRPC(ctx, r.store, batch, h, *reply.Txn, Args); err != nil {
+	if err = sendDyTSEndTranactionRPC(ctx, r.store, batch, h, *reply.Txn, *args); err != nil {
 		return err
 	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : control back to EvalDyTSValidationRequestEndTransaction")
+	}
+	/*
+		if err = sendOrigEndTransactionRPC(ctx, r.store, batch, h, *reply.Txn, Args); err != nil {
+			return err
+		}*/
 	return nil
 }
 
@@ -59,10 +62,11 @@ func sendDyTSEndTranactionRPC(
 	dytsendtxnreq.Deadline = &txnrcd.OrigTimestamp
 	dytsendtxnreq.InternalCommitTrigger = args.InternalCommitTrigger
 	dytsendtxnreq.Tmeta = txnrcd.TxnMeta
+	h.Txn = &txnrcd
 
 	b := &client.Batch{}
-	//b.Header = cArgs.Header
-	//b.Header.Timestamp = hlc.ZeroTimestamp
+	b.Header = h
+	b.Header.Timestamp = hlc.ZeroTimestamp
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : dytsendtxnreq %v", dytsendtxnreq)
 	}

@@ -578,16 +578,42 @@ func EvalDyTSEndTransaction(
 			return EvalResult{}, err
 		}
 	} else {
-		txnrcd.Status = roachpb.ABORTED
+		if txnrcd, err = handleAbort(ctx, batch, cArgs.Header); err != nil {
+			return EvalResult{}, err
+		}
 	}
 
 	reply.Txn = &txnrcd
 	return EvalResult{}, nil
 }
 
+func handleAbort(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	h roachpb.Header,
+) (roachpb.Transaction, error) {
+
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In handleAbort")
+	}
+	var txnRecord roachpb.Transaction
+	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
+	ok, err := engine.MVCCGetProto(
+		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord)
+	if err != nil || !ok {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi : Coundnt find the transaction record in this range")
+		}
+
+		return txnRecord, err
+	}
+	txnRecord.Status = roachpb.ABORTED
+
+	return txnRecord, nil
+}
+
 func transactionRecordExists(
 	ctx context.Context,
-	s *Store,
 	batch engine.ReadWriter,
 	tkey roachpb.Key,
 	txnid uuid.UUID,
@@ -623,7 +649,7 @@ func updateTransactionRecord(
 		log.Infof(ctx, "Ravi : In updateTransactionrecord")
 	}
 
-	if !transactionRecordExists(ctx, s, batch, h.Txn.Key, *h.Txn.ID) {
+	if !transactionRecordExists(ctx, batch, h.Txn.Key, *h.Txn.ID) {
 		// Transaction is in different range so making a RPC call
 		return sendUpdateTransactionRecordRPC(ctx, s, h, rArgs)
 	}
@@ -829,7 +855,7 @@ func validateCommitBefore(
 	}
 	var upperBound hlc.Timestamp
 	var err error
-	if !transactionRecordExists(ctx, s, batch, othertxn.Key, *othertxn.ID) {
+	if !transactionRecordExists(ctx, batch, othertxn.Key, *othertxn.ID) {
 		// Transaction is in different range so making a RPC call
 		upperBound, err = sendValidateCommitBeforeRPC(ctx, s, mytxnRecord.DynamicTimestampLowerBound, othertxn)
 	}
@@ -934,7 +960,7 @@ func validateCommitAfter(
 	}
 	var lowerBound hlc.Timestamp
 	var err error
-	if !transactionRecordExists(ctx, s, batch, othertxn.Key, *othertxn.ID) {
+	if !transactionRecordExists(ctx, batch, othertxn.Key, *othertxn.ID) {
 		// Transaction is in different range so making a RPC call
 		lowerBound, err = sendValidateCommitAfterRPC(ctx, s, mytxnRecord.DynamicTimestampLowerBound, othertxn)
 	}
@@ -1128,6 +1154,7 @@ func executeLocalValidator(
 		}
 
 	}
+
 	return txnRecord, nil
 }
 
@@ -1154,7 +1181,7 @@ func executeValidator(
 		log.Infof(ctx, "Ravi : In executeValidator")
 	}
 
-	if !transactionRecordExists(ctx, s, batch, h.Txn.Key, *h.Txn.ID) {
+	if !transactionRecordExists(ctx, batch, h.Txn.Key, *h.Txn.ID) {
 		// Transaction is in different range so making a RPC call
 		return sendexecuteValidatorRPC(ctx, s, h)
 	}

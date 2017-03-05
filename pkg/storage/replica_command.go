@@ -860,23 +860,41 @@ func (r *Replica) runCommitTrigger(
 	if ct == nil {
 		return EvalResult{}, nil
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, "runCommitTrigger ct %v", ct)
+	}
 	if ct.GetSplitTrigger() != nil {
+
 		newMS, trigger, err := r.splitTrigger(
 			ctx, batch, *ms, ct.SplitTrigger, txn.Timestamp,
 		)
 		*ms = newMS
+		if log.V(2) {
+			log.Infof(ctx, "runCommitTrigger called splittrigger %v", trigger)
+		}
 		return trigger, err
 	}
 	if ct.GetMergeTrigger() != nil {
+		if log.V(2) {
+			log.Infof(ctx, "runCommitTrigger called mergeTrigger ")
+		}
 		return r.mergeTrigger(ctx, batch, ms, ct.MergeTrigger, txn.Timestamp)
 	}
 	if crt := ct.GetChangeReplicasTrigger(); crt != nil {
+		if log.V(2) {
+			log.Infof(ctx, "runCommitTrigger called GetChangeReplicasTrigger ")
+		}
 		return r.changeReplicasTrigger(ctx, batch, crt), nil
 	}
 	if ct.GetModifiedSpanTrigger() != nil {
+		if log.V(2) {
+			log.Infof(ctx, "runCommitTrigger inside ModifiedSpanTrigger ")
+		}
 		var pd EvalResult
 		if ct.ModifiedSpanTrigger.SystemConfigSpan {
+			if log.V(2) {
+				log.Infof(ctx, "runCommitTrigger called ModifiedSpanTrigger ")
+			}
 			// Check if we need to gossip the system config.
 			// NOTE: System config gossiping can only execute correctly if
 			// the transaction record is located on the range that contains
@@ -902,6 +920,9 @@ func (r *Replica) runCommitTrigger(
 			}
 		}
 		if nlSpan := ct.ModifiedSpanTrigger.NodeLivenessSpan; nlSpan != nil {
+			if log.V(2) {
+				log.Infof(ctx, "runCommitTrigger called ModifiedSpanTrigger ")
+			}
 			if err := pd.MergeAndDestroy(
 				EvalResult{
 					Local: LocalEvalResult{

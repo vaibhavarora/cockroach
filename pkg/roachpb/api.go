@@ -89,6 +89,8 @@ const (
 	// Requests for acquiring a lease skip the (proposal-time) check that the
 	// proposing replica has a valid lease.
 	skipLeaseCheck
+	// cmds those can be part of non transactions too
+	isNonTxn
 )
 
 // GetTxnID returns the transaction ID if the header has a transaction
@@ -120,6 +122,10 @@ func IsRange(args Request) bool {
 
 func IsReverse(args Request) bool {
 	return (args.flags() & isReverse) != 0
+}
+
+func IsPossibleNonTransaction(args Request) bool {
+	return (args.flags() & isNonTxn) != 0
 }
 
 // Request is an interface for RPC requests.
@@ -851,11 +857,11 @@ func NewReverseScan(key, endKey Key) Request {
 }
 
 func (*GetRequest) flags() int            { return isRead | isTxn }
-func (*PutRequest) flags() int            { return isWrite | isTxn | isTxnWrite }
-func (*ConditionalPutRequest) flags() int { return isRead | isWrite | isTxn | isTxnWrite }
-func (*InitPutRequest) flags() int        { return isRead | isWrite | isTxn | isTxnWrite }
-func (*IncrementRequest) flags() int      { return isRead | isWrite | isTxn | isTxnWrite }
-func (*DeleteRequest) flags() int         { return isWrite | isTxn | isTxnWrite }
+func (*PutRequest) flags() int            { return isRead | isTxn | isNonTxn }
+func (*ConditionalPutRequest) flags() int { return isRead | isTxn | isNonTxn }
+func (*InitPutRequest) flags() int        { return isRead | isTxn | isNonTxn }
+func (*IncrementRequest) flags() int      { return isRead | isTxn | isNonTxn }
+func (*DeleteRequest) flags() int         { return isRead | isTxn | isNonTxn }
 func (drr *DeleteRangeRequest) flags() int {
 	// DeleteRangeRequest has different properties if the "inline" flag is set.
 	// This flag indicates that the request is deleting inline MVCC values,
@@ -872,14 +878,14 @@ func (drr *DeleteRangeRequest) flags() int {
 	// This workaround does not preclude us from creating a separate
 	// "DeleteInlineRange" command at a later date.
 	if drr.Inline {
-		return isWrite | isRange | isAlone
+		return isRead | isRange | isAlone
 	}
-	return isWrite | isTxn | isTxnWrite | isRange
+	return isRead | isTxn | isRange | isNonTxn
 }
 func (*ScanRequest) flags() int                    { return isRead | isRange | isTxn }
 func (*ReverseScanRequest) flags() int             { return isRead | isRange | isReverse | isTxn }
 func (*BeginTransactionRequest) flags() int        { return isWrite | isTxn | isAlone }
-func (*EndTransactionRequest) flags() int          { return isWrite | isTxn | isAlone }
+func (*EndTransactionRequest) flags() int          { return isRead | isTxn | isAlone }
 func (*AdminSplitRequest) flags() int              { return isAdmin | isAlone }
 func (*AdminMergeRequest) flags() int              { return isAdmin | isAlone }
 func (*AdminTransferLeaseRequest) flags() int      { return isAdmin | isAlone }
@@ -892,8 +898,8 @@ func (*ResolveIntentRangeRequest) flags() int      { return isWrite | isRange }
 func (*NoopRequest) flags() int                    { return isRead } // slightly special
 func (*TruncateLogRequest) flags() int             { return isWrite | isNonKV }
 func (*UpdateTransactionRecordRequest) flags() int { return isRead | isTxn }
-func (*ResolveWriteSoftLocksRequest) flags() int   { return isWrite | isTxn }
-func (*DyTSEndTransactionRequest) flags() int      { return isWrite | isTxn }
+func (*ResolveWriteSoftLocksRequest) flags() int   { return isWrite | isTxn | isTxnWrite }
+func (*DyTSEndTransactionRequest) flags() int      { return isWrite | isTxn | isTxnWrite | isAlone }
 func (*ValidateCommitAfterRequest) flags() int     { return isRead | isTxn }
 func (*ValidateCommitBeforeRequest) flags() int    { return isRead | isTxn }
 func (*GCWriteSoftockRequest) flags() int          { return isRead | isTxn }

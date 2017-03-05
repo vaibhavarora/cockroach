@@ -125,6 +125,10 @@ func (ba *BatchRequest) IsPossibleTransaction() bool {
 	return ba.hasFlag(isTxn)
 }
 
+func (ba *BatchRequest) IsPossibleNonTransaction() bool {
+	return ba.hasFlag(isNonTxn)
+}
+
 // IsTransactionWrite returns true iff the BatchRequest contains a txn write.
 func (ba *BatchRequest) IsTransactionWrite() bool {
 	return ba.hasFlag(isTxnWrite)

@@ -563,6 +563,9 @@ func (r *Replica) handleReplicatedEvalResult(
 	// Fields for which no action is taken in this method are zeroed so that
 	// they don't trigger an assertion at the end of the method (which checks
 	// that all fields were handled).
+	if log.V(2) {
+		log.Infof(ctx, "handleReplicatedEvalResult 1")
+	}
 	{
 		rResult.IsLeaseRequest = false
 		rResult.IsConsistencyRelated = false
@@ -571,8 +574,14 @@ func (r *Replica) handleReplicatedEvalResult(
 	}
 
 	if rResult.BlockReads {
+		if log.V(2) {
+			log.Infof(ctx, "handleReplicatedEvalResult wants to block reads")
+		}
 		r.readOnlyCmdMu.Lock()
 		defer r.readOnlyCmdMu.Unlock()
+		if log.V(2) {
+			log.Infof(ctx, "handleReplicatedEvalResult 2")
+		}
 		rResult.BlockReads = false
 	}
 
@@ -587,16 +596,30 @@ func (r *Replica) handleReplicatedEvalResult(
 	}
 	needsSplitBySize := r.needsSplitBySizeLocked()
 	r.mu.Unlock()
-
+	if log.V(2) {
+		log.Infof(ctx, "handleReplicatedEvalResult 2 needsSplitBySize %v", needsSplitBySize)
+	}
 	r.store.metrics.addMVCCStats(rResult.Delta)
 	rResult.Delta = enginepb.MVCCStats{}
 
 	const raftLogCheckFrequency = 1 + RaftLogQueueStaleThreshold/4
 	if rResult.State.RaftAppliedIndex%raftLogCheckFrequency == 1 {
+		if log.V(2) {
+			log.Infof(ctx, "handleReplicatedEvalResult 3 ")
+		}
 		r.store.raftLogQueue.MaybeAdd(r, r.store.Clock().Now())
+		if log.V(2) {
+			log.Infof(ctx, "handleReplicatedEvalResult 4 ")
+		}
 	}
 	if needsSplitBySize {
+		if log.V(2) {
+			log.Infof(ctx, "handleReplicatedEvalResult 5 ")
+		}
 		r.store.splitQueue.MaybeAdd(r, r.store.Clock().Now())
+		if log.V(2) {
+			log.Infof(ctx, "handleReplicatedEvalResult 6 ")
+		}
 	}
 
 	rResult.State.Stats = enginepb.MVCCStats{}
@@ -606,7 +629,9 @@ func (r *Replica) handleReplicatedEvalResult(
 	// The above are always present, so we assert only if there are
 	// "nontrivial" actions below.
 	shouldAssert = (rResult != storagebase.ReplicatedEvalResult{})
-
+	if log.V(2) {
+		log.Infof(ctx, "handleReplicatedEvalResult  shouldAssert %v ", shouldAssert)
+	}
 	// Process Split or Merge. This needs to happen after stats update because
 	// of the ContainsEstimates hack.
 
@@ -837,14 +862,26 @@ func (r *Replica) handleEvalResult(
 	// Careful: `shouldAssert = f() || g()` will not run both if `f()` is true.
 	shouldAssert := false
 	if rResult != nil {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :handleEvalResult 1")
+		}
 		shouldAssert = r.handleReplicatedEvalResult(ctx, *rResult) || shouldAssert
 	}
 	if lResult != nil {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :handleEvalResult 2")
+		}
 		shouldAssert = r.handleLocalEvalResult(ctx, originReplica, *lResult) || shouldAssert
 	}
 	if shouldAssert {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :handleEvalResult 3")
+		}
 		// Assert that the on-disk state doesn't diverge from the in-memory
 		// state as a result of the side effects.
 		r.assertState(r.store.Engine())
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :handleEvalResult 4")
 	}
 }

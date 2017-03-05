@@ -143,9 +143,23 @@ func EvalDyTSValidatorEndTransaction(
 	resp roachpb.Response) (EvalResult, error) {
 
 	if log.V(2) {
-		log.Infof(ctx, "In EvalDyTSValidatorEndTransaction")
+		log.Infof(ctx, "In EvalDyTSValidatorEndTransaction ")
 	}
 	args := cArgs.Args.(*roachpb.DyTSEndTransactionRequest)
+	reply := resp.(*roachpb.DyTSEndTransactionResponse)
+	if log.V(2) {
+		log.Infof(ctx, "args %v", args)
+	}
+	if log.V(2) {
+		log.Infof(ctx, "key %v", args.Tmeta.Key)
+	}
+	if log.V(2) {
+		log.Infof(ctx, "id %v", args.Tmeta.ID)
+	}
+
+	if err := verifyTransaction(cArgs.Header, args); err != nil {
+		return EvalResult{}, err
+	}
 
 	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
 
@@ -156,12 +170,12 @@ func EvalDyTSValidatorEndTransaction(
 		return EvalResult{}, err
 	} else if !ok {
 		if log.V(2) {
-			log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : coudnt find transaction record in this range")
+			log.Infof(ctx, "EvalDyTSValidatorEndTransaction : coudnt find transaction record in this range")
 		}
 		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
 	}
 	if log.V(2) {
-		log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : found transaction record in this range")
+		log.Infof(ctx, "EvalDyTSValidatorEndTransaction : found transaction record in this range")
 	}
 	if args.Commit {
 		txnRecord.DynamicTimestampLowerBound = *args.Deadline
@@ -175,9 +189,10 @@ func EvalDyTSValidatorEndTransaction(
 	if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
 		return EvalResult{}, err
 	}
+	reply.Txn = &txnRecord
 
 	var pd EvalResult
-	if args.Commit {
+	/*if args.Commit {
 		// Resolve Local Soft locks
 		externalReadSpans, externalWriteSpans := cArgs.Repl.resolveLocalSoftLocks(ctx, batch, cArgs.Stats, *args, &txnRecord)
 		// Add external write soft locks to resolve asyncronous processing
@@ -193,17 +208,24 @@ func EvalDyTSValidatorEndTransaction(
 		pd.Local.gcrslocks = &externalReadSpans
 	}
 	pd.Local.txnrecord = &txnRecord
-
+	*/
 	// Run triggers if successfully committed.
-
+	var pdr EvalResult
 	if txnRecord.Status == roachpb.COMMITTED {
 		var err error
-		if pd, err = cArgs.Repl.runCommitTrigger(ctx, batch.(engine.Batch), cArgs.Stats, args.InternalCommitTrigger, &txnRecord); err != nil {
+		if log.V(2) {
+			log.Infof(ctx, "EvalDyTSValidatorEndTransaction : calling commit trigger")
+		}
+		if pdr, err = cArgs.Repl.runCommitTrigger(ctx, batch.(engine.Batch), cArgs.Stats, args.InternalCommitTrigger, &txnRecord); err != nil {
 			return EvalResult{}, NewReplicaCorruptionError(err)
 		}
 	}
 
-	return pd, nil
+	if err := pdr.MergeAndDestroy(pd); err != nil {
+		return EvalResult{}, err
+	}
+
+	return pdr, nil
 }
 
 func EvalDyTSValidateCommitAfter(
@@ -363,7 +385,7 @@ func (r *Replica) resolveLocalSoftLocks(
 	txn *roachpb.Transaction,
 ) ([]roachpb.Span, []roachpb.Span) {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi :resolveLocalIntents : begin ")
+		log.Infof(ctx, "Ravi :resolveLocalSoftLocks : begin ")
 	}
 	desc := r.Desc()
 	var preMergeDesc *roachpb.RangeDescriptor
@@ -377,6 +399,9 @@ func (r *Replica) resolveLocalSoftLocks(
 
 	var externalSoftWriteSpan []roachpb.Span
 	for _, span := range args.WriteSpans {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :resolving write span : %v ", span)
+		}
 		if err := func() error {
 			if len(span.EndKey) == 0 {
 				// For single-key intents, do a KeyAddress-aware check of
@@ -420,6 +445,9 @@ func (r *Replica) resolveLocalSoftLocks(
 	}
 	var externalSoftReadSpan []roachpb.Span
 	for _, span := range args.ReadSpans {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :resolving read span : %v ", span)
+		}
 		if err := func() error {
 			if len(span.EndKey) == 0 {
 				// For single-key intents, do a KeyAddress-aware check of
@@ -453,7 +481,7 @@ func (r *Replica) resolveLocalSoftLocks(
 		}
 	}
 	if log.V(2) {
-		log.Infof(ctx, "Ravi :resolveLocalIntents : end")
+		log.Infof(ctx, "Ravi :resolveLocalSoftLocks end with external spans r %v, w %w", externalSoftReadSpan, externalSoftWriteSpan)
 	}
 	return externalSoftReadSpan, externalSoftWriteSpan
 }

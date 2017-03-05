@@ -899,8 +899,16 @@ func (t *Transaction) Update(o *Transaction) {
 	if len(o.Intents) > 0 {
 		t.Intents = o.Intents
 	}
-	t.DynamicTimestampLowerBound.Backward(o.DynamicTimestampLowerBound)
-	t.DynamicTimestampUpperBound.Forward(o.DynamicTimestampUpperBound)
+	t.DynamicTimestampLowerBound.Forward(o.DynamicTimestampLowerBound)
+	t.DynamicTimestampUpperBound.Backward(o.DynamicTimestampUpperBound)
+
+	if len(o.CommitAfterThem) > 0 {
+		t.CommitAfterThem = o.CommitAfterThem
+	}
+
+	if len(o.CommitBeforeThem) > 0 {
+		t.CommitBeforeThem = o.CommitBeforeThem
+	}
 }
 
 // UpgradePriority sets transaction priority to the maximum of current
