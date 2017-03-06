@@ -2076,7 +2076,7 @@ func MVCCresolveWriteSoftLock(
 	timestamp hlc.Timestamp,
 	txn *roachpb.Transaction,
 	slcache *SoftLockCache,
-) error {
+) (bool, error) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In MVCCresolveWriteSoftLock")
 	}
@@ -2084,13 +2084,11 @@ func MVCCresolveWriteSoftLock(
 	wslock, ok := slcache.getWriteSoftLock(span.Key, *txn.ID)
 	if !ok {
 		if log.V(2) {
-			log.Infof(ctx, "Ravi : Couldnt retrive any write lock for the key")
+			log.Infof(ctx, "Couldnt retrive any lock")
 		}
-		return nil
+		return false, nil
 	}
-	if log.V(2) {
-		log.Infof(ctx, "Ravi : wslock %v", wslock)
-	}
+
 	args := wslock.Request.GetInner()
 	if cmd, ok := DyTSMVCCCommands[args.Method()]; ok {
 		dmArgs := DyTSmArgs{
@@ -2108,7 +2106,7 @@ func MVCCresolveWriteSoftLock(
 	} else {
 		err = errors.Errorf("unrecognized command %s", args.Method())
 	}
-	return err
+	return true, err
 }
 
 func MVCCRemoveWriteSoftLock(
@@ -2117,17 +2115,21 @@ func MVCCRemoveWriteSoftLock(
 	txnrcd roachpb.Transaction,
 	span roachpb.Span,
 	slcache *SoftLockCache,
-) error {
+) (bool, error) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In MVCCRemoveWriteSoftLock")
 	}
 	if len(span.EndKey) == 0 {
 		// getting lock from cache
 		wslock, ok := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
-		if ok {
-			// removing the entry from cache
-			slcache.removeFromWriteLockCache(wslock, span.Key)
+		if !ok {
+			if log.V(2) {
+				log.Infof(ctx, "Coudnt retrive any lock")
+			}
+			return false, nil
 		}
+		// removing the entry from cache
+		slcache.removeFromWriteLockCache(wslock, span.Key)
 
 	} else {
 		wslock, ok := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
@@ -2135,7 +2137,7 @@ func MVCCRemoveWriteSoftLock(
 			if log.V(2) {
 				log.Infof(ctx, "Coudnt retrive any lock")
 			}
-			return nil
+			return false, nil
 		}
 		reverse := roachpb.IsReverse(wslock.Request.GetInner())
 
@@ -2144,15 +2146,19 @@ func MVCCRemoveWriteSoftLock(
 		for _, key := range keys {
 			// getting lock from cache
 			wslock, ok := slcache.getWriteSoftLock(key, *txnrcd.ID)
-			if ok {
-				// removing the entry from cache
-				slcache.removeFromWriteLockCache(wslock, span.Key)
+			if !ok {
+				if log.V(2) {
+					log.Infof(ctx, "Coudnt retrive any lock")
+				}
+				return false, nil
 			}
+			// removing the entry from cache
+			slcache.removeFromWriteLockCache(wslock, span.Key)
 
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
 // This will remove the entry in the soft lock cache and gets the lock
@@ -2162,31 +2168,49 @@ func MVCCRemoveReadSoftLock(
 	txnrcd roachpb.Transaction,
 	span roachpb.Span,
 	slcache *SoftLockCache,
-) error {
+) (bool, error) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In MVCCRemoveReadSoftLock")
 	}
 
 	if len(span.EndKey) == 0 {
 		// getting lock from cache
-		rslock := slcache.getReadSoftLock(span.Key, *txnrcd.ID)
+		rslock, ok := slcache.getReadSoftLock(span.Key, *txnrcd.ID)
+		if !ok {
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : Couldnt retrive any read lock for the key")
+			}
+			return false, nil
+		}
 		// removing the entry from cache
 		slcache.removeFromReadLockCache(rslock, span.Key)
 
 	} else {
-		rslock := slcache.getReadSoftLock(span.Key, *txnrcd.ID)
+		rslock, ok := slcache.getReadSoftLock(span.Key, *txnrcd.ID)
+		if !ok {
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : Couldnt retrive any read lock for the key")
+			}
+			return false, nil
+		}
 		keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, txnrcd, rslock.Reverse)
 
 		for _, key := range keys {
 			// getting lock from cache
-			rslock := slcache.getReadSoftLock(key, *txnrcd.ID)
+			rslock, ok := slcache.getReadSoftLock(key, *txnrcd.ID)
+			if !ok {
+				if log.V(2) {
+					log.Infof(ctx, "Ravi : Couldnt retrive any read lock for the key")
+				}
+				return false, nil
+			}
 			// removing the entry from cache
 			slcache.removeFromReadLockCache(rslock, span.Key)
 
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
 func MVCCgetKeysUsingIter(

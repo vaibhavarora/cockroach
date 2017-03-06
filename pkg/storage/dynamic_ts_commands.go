@@ -1154,6 +1154,9 @@ func executeLocalValidator(
 		}
 
 	}
+	if err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
+		return txnRecord, err
+	}
 
 	return txnRecord, nil
 }

@@ -215,7 +215,8 @@ func (s *SoftLockCache) getWriteSoftLock(
 		if position != -1 {
 			writelk = Q.Queue[position]
 		}
-	} else {
+	}
+	if !ok || position == -1 {
 		return writelk, false
 	}
 	return writelk, true
@@ -223,9 +224,9 @@ func (s *SoftLockCache) getWriteSoftLock(
 
 func (s *SoftLockCache) getReadSoftLock(
 	key roachpb.Key,
-	txnID uuid.UUID) (readlk roachpb.ReadSoftLock) {
+	txnID uuid.UUID) (roachpb.ReadSoftLock, bool) {
 	internalkey := ToInternalKey(key)
-
+	var readlk roachpb.ReadSoftLock
 	s.ReadMu.Lock()
 	defer s.ReadMu.Unlock()
 
@@ -241,7 +242,11 @@ func (s *SoftLockCache) getReadSoftLock(
 			readlk = Q.Queue[position]
 		}
 	}
-	return readlk
+	if !ok || position == -1 {
+		return readlk, false
+	}
+	return readlk, true
+
 }
 
 func (s *SoftLockCache) getAllReadSoftLocksOnKey(

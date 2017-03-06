@@ -192,7 +192,7 @@ func EvalDyTSValidatorEndTransaction(
 	reply.Txn = &txnRecord
 
 	var pd EvalResult
-	/*if args.Commit {
+	if args.Commit {
 		// Resolve Local Soft locks
 		externalReadSpans, externalWriteSpans := cArgs.Repl.resolveLocalSoftLocks(ctx, batch, cArgs.Stats, *args, &txnRecord)
 		// Add external write soft locks to resolve asyncronous processing
@@ -208,7 +208,7 @@ func EvalDyTSValidatorEndTransaction(
 		pd.Local.gcrslocks = &externalReadSpans
 	}
 	pd.Local.txnrecord = &txnRecord
-	*/
+
 	// Run triggers if successfully committed.
 	var pdr EvalResult
 	if txnRecord.Status == roachpb.COMMITTED {
@@ -330,8 +330,13 @@ func EvalDyTSGcWriteSoftLock(
 		log.Infof(ctx, "In EvalDyTSGcWriteSoftLock")
 	}
 	args := cArgs.Args.(*roachpb.GCWriteSoftockRequest)
-	if err := engine.MVCCRemoveWriteSoftLock(ctx, batch, args.Txnrecord, args.Span, cArgs.Repl.slockcache); err != nil {
+	ok, err := engine.MVCCRemoveWriteSoftLock(ctx, batch, args.Txnrecord, args.Span, cArgs.Repl.slockcache)
+	if err != nil {
 		return EvalResult{}, err
+	} else if !ok {
+		if log.V(2) {
+			log.Infof(ctx, "In EvalDyTSGcWriteSoftLock : Couldnt retrive the write lock")
+		}
 	}
 	return EvalResult{}, nil
 }
@@ -349,8 +354,13 @@ func EvalDyTSGcReadSoftLock(
 	if args.Txnrecord.Status == roachpb.COMMITTED {
 		cArgs.Repl.updateDyTSCache(args.Span, true /*read*/, args.Txnrecord.OrigTimestamp)
 	}
-	if err := engine.MVCCRemoveReadSoftLock(ctx, batch, args.Txnrecord, args.Span, cArgs.Repl.slockcache); err != nil {
+	ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, args.Txnrecord, args.Span, cArgs.Repl.slockcache)
+	if err != nil {
 		return EvalResult{}, err
+	} else if !ok {
+		if log.V(2) {
+			log.Infof(ctx, "In EvalDyTSGcReadSoftLock : Couldnt retrive the read lock")
+		}
 	}
 	return EvalResult{}, nil
 }
@@ -362,13 +372,18 @@ func EvalDyTSResolveWriteSoftLock(
 	resp roachpb.Response) (EvalResult, error) {
 
 	if log.V(2) {
-		log.Infof(ctx, "In EvalDyTSGcReadSoftLock")
+		log.Infof(ctx, "In EvalDyTSResolveWriteSoftLock")
 	}
 	args := cArgs.Args.(*roachpb.ResolveWriteSoftLocksRequest)
 	// Update the DyTs time stamp with latest commited timestamp
 	cArgs.Repl.updateDyTSCache(args.Span, false /*write*/, args.Txnrecord.OrigTimestamp)
-	if err := engine.MVCCresolveWriteSoftLock(ctx, batch, cArgs.Stats, args.Span, args.Txnrecord.OrigTimestamp, &args.Txnrecord, cArgs.Repl.slockcache); err != nil {
+	ok, err := engine.MVCCresolveWriteSoftLock(ctx, batch, cArgs.Stats, args.Span, args.Txnrecord.OrigTimestamp, &args.Txnrecord, cArgs.Repl.slockcache)
+	if err != nil {
 		return EvalResult{}, err
+	} else if !ok {
+		if log.V(2) {
+			log.Infof(ctx, "In EvalDyTSResolveWriteSoftLock : Couldnt retrive the write lock")
+		}
 	}
 	return EvalResult{}, nil
 }
@@ -420,7 +435,11 @@ func (r *Replica) resolveLocalSoftLocks(
 				}
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, false /*write*/, *args.Deadline)
-				return engine.MVCCresolveWriteSoftLock(ctx, batch, resolveMS, span, txn.OrigTimestamp, txn, r.slockcache)
+				ok, err := engine.MVCCresolveWriteSoftLock(ctx, batch, resolveMS, span, txn.OrigTimestamp, txn, r.slockcache)
+				if !ok {
+					externalSoftWriteSpan = append(externalSoftWriteSpan, span)
+				}
+				return err
 				//return engine.MVCCResolveWriteSoftLockUsingIter(ctx, batch, iterAndBuf, resolveMS, span)
 			}
 			// For intent ranges, cut into parts inside and outside our key
@@ -433,7 +452,11 @@ func (r *Replica) resolveLocalSoftLocks(
 			if inSpan != nil {
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, false /*write*/, *args.Deadline)
-				return engine.MVCCresolveWriteSoftLock(ctx, batch, ms, span, txn.OrigTimestamp, txn, r.slockcache)
+				ok, err := engine.MVCCresolveWriteSoftLock(ctx, batch, ms, span, txn.OrigTimestamp, txn, r.slockcache)
+				if !ok {
+					externalSoftWriteSpan = append(externalSoftWriteSpan, span)
+				}
+				return err
 			}
 			return nil
 		}(); err != nil {
@@ -458,7 +481,11 @@ func (r *Replica) resolveLocalSoftLocks(
 				}
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, true /*read*/, *args.Deadline)
-				return engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				if !ok {
+					externalSoftReadSpan = append(externalSoftReadSpan, span)
+				}
+				return err
 			}
 			// For intent ranges, cut into parts inside and outside our key
 			// range. Resolve locally inside, delegate the rest. In particular,
@@ -470,7 +497,11 @@ func (r *Replica) resolveLocalSoftLocks(
 			if inSpan != nil {
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, true /*read*/, *args.Deadline)
-				return engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				if !ok {
+					externalSoftReadSpan = append(externalSoftReadSpan, span)
+				}
+				return err
 			}
 			return nil
 		}(); err != nil {
@@ -519,7 +550,11 @@ func (r *Replica) GCLocalSoftLocks(
 					return nil
 				}
 
-				return engine.MVCCRemoveWriteSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveWriteSoftLock(ctx, batch, *txn, span, r.slockcache)
+				if !ok {
+					externalSoftWriteSpan = append(externalSoftWriteSpan, span)
+				}
+				return err
 			}
 			// For intent ranges, cut into parts inside and outside our key
 			// range. Resolve locally inside, delegate the rest. In particular,
@@ -529,7 +564,11 @@ func (r *Replica) GCLocalSoftLocks(
 				externalSoftWriteSpan = append(externalSoftWriteSpan, span)
 			}
 			if inSpan != nil {
-				return engine.MVCCRemoveWriteSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveWriteSoftLock(ctx, batch, *txn, span, r.slockcache)
+				if !ok {
+					externalSoftWriteSpan = append(externalSoftWriteSpan, span)
+				}
+				return err
 			}
 			return nil
 		}(); err != nil {
@@ -550,7 +589,11 @@ func (r *Replica) GCLocalSoftLocks(
 					return nil
 				}
 
-				return engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				if !ok {
+					externalSoftReadSpan = append(externalSoftReadSpan, span)
+				}
+				return err
 			}
 			// For intent ranges, cut into parts inside and outside our key
 			// range. Resolve locally inside, delegate the rest. In particular,
@@ -560,7 +603,11 @@ func (r *Replica) GCLocalSoftLocks(
 				externalSoftReadSpan = append(externalSoftReadSpan, span)
 			}
 			if inSpan != nil {
-				return engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				if !ok {
+					externalSoftReadSpan = append(externalSoftReadSpan, span)
+				}
+				return err
 			}
 			return nil
 		}(); err != nil {
