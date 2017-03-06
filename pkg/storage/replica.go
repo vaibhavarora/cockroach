@@ -164,6 +164,7 @@ var consultsDyTSValidatorMethods = [...]bool{
 	roachpb.DyTsEndTransaction:   true,
 	roachpb.ValidateCommitAfter:  true,
 	roachpb.ValidateCommitBefore: true,
+	roachpb.ResolveWriteSlock:    true,
 	roachpb.GcWriteSoftLock:      true,
 	roachpb.GcReadSoftLock:       true,
 }

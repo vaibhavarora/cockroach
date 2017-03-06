@@ -56,8 +56,8 @@ func sendDyTSEndTranactionRPC(
 			Key: txnrcd.Key,
 		},
 	}
-	dytsendtxnreq.ReadSpans = append(dytsendtxnreq.ReadSpans, args.IntentSpans...)
-	dytsendtxnreq.WriteSpans = append(dytsendtxnreq.WriteSpans, args.ReadSpans...)
+	dytsendtxnreq.ReadSpans = append(dytsendtxnreq.ReadSpans, args.ReadSpans...)
+	dytsendtxnreq.WriteSpans = append(dytsendtxnreq.WriteSpans, args.IntentSpans...)
 	dytsendtxnreq.Commit = txnrcd.Status == roachpb.COMMITTED
 	dytsendtxnreq.Deadline = &txnrcd.OrigTimestamp
 	dytsendtxnreq.InternalCommitTrigger = args.InternalCommitTrigger

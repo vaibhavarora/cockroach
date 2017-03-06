@@ -120,7 +120,13 @@ func EvalDyTSGet(
 	reply := resp.(*roachpb.GetResponse)
 
 	// Places read locks collects already placed write locks and reads
-	val, _, wslocks, _ := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
+	val, _, wslocks, err := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
+	if err != nil {
+		if log.V(2) {
+			log.Infof(ctx, "failed to get")
+		}
+		return EvalResult{}, err
+	}
 	reply.Value = val
 
 	// check if the read is snapshot read
@@ -194,6 +200,9 @@ func EvalDyTSConditionalPut(
 
 	expVal := args.ExpValue
 	check := func(existVal *roachpb.Value) error {
+		if log.V(2) {
+			log.Infof(ctx, " EvalDyTSConditionalPut 3 : existVal %v", existVal)
+		}
 		if expValPresent, existValPresent := expVal != nil, existVal != nil; expValPresent && existValPresent {
 			// Every type flows through here, so we can't use the typed getters.
 			if !bytes.Equal(expVal.RawBytes, existVal.RawBytes) {
@@ -208,15 +217,26 @@ func EvalDyTSConditionalPut(
 		}
 		return nil
 	}
-
-	existVal, _, wslocks, _ := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
-
-	err := check(existVal)
+	if log.V(2) {
+		log.Infof(ctx, " EvalDyTSConditionalPut 1")
+	}
+	existVal, _, wslocks, err := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
 	if err != nil {
+		if log.V(2) {
+			log.Infof(ctx, " error in MVCCGet")
+		}
+		return EvalResult{}, err
+	}
+	if log.V(2) {
+		log.Infof(ctx, " EvalDyTSConditionalPut 2")
+	}
+	if err = check(existVal); err != nil {
 		engine.MVCCRemoveReadSoftLock(ctx, batch, *h.Txn, args.Span, cArgs.Repl.slockcache)
 		return EvalResult{}, err
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, " EvalDyTSConditionalPut 4")
+	}
 	var req roachpb.RequestUnion
 	req.MustSetInner(args)
 	// places write lock and returns already placed read and write locks
@@ -234,7 +254,7 @@ func EvalDyTSConditionalPut(
 		}
 	} else {
 		if log.V(2) {
-			log.Infof(ctx, " No Write locks acqurired on Cput ")
+			log.Infof(ctx, " No Write locks acqurired on EvalDyTSConditionalPut ")
 		}
 	}
 
@@ -255,7 +275,7 @@ func EvalDyTSConditionalPut(
 		}
 	} else {
 		if log.V(2) {
-			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
+			log.Infof(ctx, " No Write or Read locks acqurired on EvalDyTSConditionalPut ")
 		}
 	}
 	return EvalResult{}, nil
@@ -289,10 +309,14 @@ func EvalDyTSInitPut(
 		return nil
 	}
 
-	existVal, _, _, _ := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, nil, false)
-
-	err := check(existVal)
+	existVal, _, _, err := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, nil, false)
 	if err != nil {
+		if log.V(2) {
+			log.Infof(ctx, " error in MVCCGet")
+		}
+		return EvalResult{}, err
+	}
+	if err = check(existVal); err != nil {
 		return EvalResult{}, err
 	}
 	var req roachpb.RequestUnion
@@ -355,9 +379,14 @@ func EvalDyTSIncrement(
 
 		return nil
 	}
-	extvalue, _, wslocks, _ := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
-	err := check(extvalue)
+	extvalue, _, wslocks, err := engine.MVCCGet(ctx, batch, args.Key, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn, cArgs.Repl.slockcache, true)
 	if err != nil {
+		if log.V(2) {
+			log.Infof(ctx, " error in MVCCGet")
+		}
+		return EvalResult{}, err
+	}
+	if err = check(extvalue); err != nil {
 		engine.MVCCRemoveReadSoftLock(ctx, batch, *h.Txn, args.Span, cArgs.Repl.slockcache)
 		return EvalResult{}, err
 	}

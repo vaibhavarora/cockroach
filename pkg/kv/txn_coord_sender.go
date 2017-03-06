@@ -362,6 +362,9 @@ func (tc *TxnCoordSender) Send(
 				// spans optimization to 1pc transactions.
 				distinctSpans = len(txnMeta.Writekeys) == 0
 			}
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : TCS p0 write span %v , read span ", et.IntentSpans, et.ReadSpans)
+			}
 			// We can't pass in a batch response here to better limit the key
 			// spans as we don't know what is going to be affected. This will
 			// affect queries such as `DELETE FROM my.table LIMIT 10` when
@@ -372,12 +375,21 @@ func (tc *TxnCoordSender) Send(
 					Key:    key,
 					EndKey: endKey,
 				})
+				if log.V(2) {
+					log.Infof(ctx, "Ravi : TCS p01 write ")
+				}
 			}, func(key, endKey roachpb.Key) {
 				et.ReadSpans = append(et.ReadSpans, roachpb.Span{
 					Key:    key,
 					EndKey: endKey,
 				})
+				if log.V(2) {
+					log.Infof(ctx, "Ravi : TCS p01 read ")
+				}
 			})
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : TCS p1 write span %v , read span ", et.IntentSpans, et.ReadSpans)
+			}
 			// TODO(peter): Populate DistinctSpans on all batches, not just batches
 			// which contain an EndTransactionRequest.
 			var distinct bool
@@ -389,6 +401,9 @@ func (tc *TxnCoordSender) Send(
 
 			et.ReadSpans = append([]roachpb.Span(nil), et.ReadSpans...)
 			et.ReadSpans, _ = roachpb.MergeSpans(et.ReadSpans)
+			if log.V(2) {
+				log.Infof(ctx, "Ravi : TCS p2 write span %v , read span ", et.IntentSpans, et.ReadSpans)
+			}
 			if len(et.IntentSpans) == 0 && len(et.ReadSpans) == 0 {
 				// If there aren't any intents, then there's factually no
 				// transaction to end. Read-only txns have all of their state
@@ -404,7 +419,7 @@ func (tc *TxnCoordSender) Send(
 			return nil, pErr
 		}
 
-		if hasET && log.V(1) {
+		if hasET && log.V(2) {
 			for _, intent := range et.IntentSpans {
 				log.Eventf(ctx, "intent: [%s,%s)", intent.Key, intent.EndKey)
 			}
@@ -412,6 +427,7 @@ func (tc *TxnCoordSender) Send(
 				log.Eventf(ctx, "intent: [%s,%s)", intent.Key, intent.EndKey)
 			}
 		}
+
 	}
 
 	// Embed the trace metadata into the header for use by RPC recipients. We need
@@ -948,10 +964,12 @@ func (tc *TxnCoordSender) updateState(
 			rkeys = txnMeta.Readkeys
 		}
 		ba.IntentSpanIterate(br, func(key, endKey roachpb.Key) {
+
 			wkeys = append(wkeys, roachpb.Span{
 				Key:    key,
 				EndKey: endKey,
 			})
+
 		},
 			func(key, endKey roachpb.Key) {
 				rkeys = append(rkeys, roachpb.Span{

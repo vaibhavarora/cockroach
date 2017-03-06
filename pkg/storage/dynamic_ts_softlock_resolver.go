@@ -43,7 +43,9 @@ func (sr *softLockResolver) processWriteSoftLocksAsync(
 	now := r.store.Clock().Now()
 	ctx := context.TODO()
 	stopper := r.store.Stopper()
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :processWriteSoftLocksAsync : begin, tnxrcd %v", txnrecord)
+	}
 	if len(resolvewslocks) > 0 {
 		err := stopper.RunLimitedAsyncTask(
 			ctx, sr.sem, false /* wait */, func(ctx context.Context) {
@@ -103,6 +105,9 @@ func (sr *softLockResolver) resolveWriteSoftLocks(
 	now hlc.Timestamp,
 	wait bool,
 ) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :resolveWriteSoftLocks : begin, span %v", wslockspans)
+	}
 	// Everything here is best effort; give up rather than waiting
 	// too long (helps avoid deadlocks during test shutdown,
 	// although this is imperfect due to the use of an
@@ -158,6 +163,9 @@ func (sr *softLockResolver) gcWriteSoftLocks(
 	now hlc.Timestamp,
 	wait bool,
 ) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :gcWriteSoftLocks : begin, span %v", wslockspans)
+	}
 	// Everything here is best effort; give up rather than waiting
 	// too long (helps avoid deadlocks during test shutdown,
 	// although this is imperfect due to the use of an
@@ -213,6 +221,9 @@ func (sr *softLockResolver) gcReadSoftLocks(
 	now hlc.Timestamp,
 	wait bool,
 ) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :gcReadSoftLocks : begin, span %v", rslockspans)
+	}
 	// Everything here is best effort; give up rather than waiting
 	// too long (helps avoid deadlocks during test shutdown,
 	// although this is imperfect due to the use of an

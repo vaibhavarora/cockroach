@@ -544,6 +544,9 @@ func MVCCGet(
 ) (*roachpb.Value, []roachpb.Intent, []roachpb.WriteSoftLock, error) {
 	iter := engine.NewIterator(true)
 	defer iter.Close()
+	if log.V(2) {
+		log.Infof(ctx, " MVCCGet ")
+	}
 	return mvccGetUsingIter(ctx, iter, key, timestamp, consistent, txn, slcache, softlock)
 }
 
@@ -567,9 +570,14 @@ func mvccGetUsingIter(
 	metaKey := MakeMVCCMetadataKey(key)
 	ok, _, _, err := mvccGetMetadata(iter, metaKey, &buf.meta)
 	if !ok || err != nil {
+		if log.V(2) {
+			log.Infof(ctx, " mvccGetUsingIter: error in mvccGetMetadata ")
+		}
 		return nil, nil, nil, err
 	}
-
+	if log.V(2) {
+		log.Infof(ctx, " mvccGetUsingIter ")
+	}
 	value, intents, _, wlks, err := mvccGetInternal(ctx, iter, metaKey,
 		timestamp, consistent, safeValue, txn, buf, slcache, softlock, false)
 	if value == &buf.value {

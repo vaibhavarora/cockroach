@@ -213,7 +213,26 @@ func (br *BatchResponse) String() string {
 func (ba *BatchRequest) IntentSpanIterate(br *BatchResponse, fnw func(key, endKey Key), fnr func(key, endKey Key)) {
 	for i, arg := range ba.Requests {
 		req := arg.GetInner()
-		if IsReadOnly(req) {
+		if req.Method() == EndTransaction {
+			continue
+		}
+		readspan := false
+		writespan := false
+		if IsReadOnly(req) && !IsFutureWrite(req) {
+			readspan = true
+		}
+		if IsTransactionWrite(req) || IsFutureWrite(req) {
+			writespan = true
+			if IsReadWrite(req) {
+				if req.Method() == ConditionalPut {
+					arg := req.(*ConditionalPutRequest)
+					if !arg.Blind {
+						readspan = true
+					}
+				}
+			}
+		}
+		if readspan {
 			//continue
 			h := req.Header()
 			if br != nil {
@@ -234,7 +253,8 @@ func (ba *BatchRequest) IntentSpanIterate(br *BatchResponse, fnw func(key, endKe
 			}
 			fnr(h.Key, h.EndKey)
 
-		} else if IsTransactionWrite(req) {
+		}
+		if writespan {
 			h := req.Header()
 			if br != nil {
 				resumeSpan := br.Responses[i].GetInner().Header().ResumeSpan
