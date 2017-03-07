@@ -918,12 +918,12 @@ func (*ResolveIntentRangeRequest) flags() int      { return isWrite | isRange }
 func (*NoopRequest) flags() int                    { return isRead } // slightly special
 func (*TruncateLogRequest) flags() int             { return isWrite | isNonKV }
 func (*UpdateTransactionRecordRequest) flags() int { return isRead | isTxn }
-func (*ResolveWriteSoftLocksRequest) flags() int   { return isWrite | isTxn | isTxnWrite | isAsync }
+func (*ResolveWriteSoftLocksRequest) flags() int   { return isWrite | isAsync }
 func (*DyTSEndTransactionRequest) flags() int      { return isWrite | isTxn | isTxnWrite | isAlone }
 func (*ValidateCommitAfterRequest) flags() int     { return isRead | isTxn }
 func (*ValidateCommitBeforeRequest) flags() int    { return isRead | isTxn }
-func (*GCWriteSoftockRequest) flags() int          { return isRead | isTxn | isAsync }
-func (*GCReadSoftockRequest) flags() int           { return isRead | isTxn | isAsync }
+func (*GCWriteSoftockRequest) flags() int          { return isRead | isAsync }
+func (*GCReadSoftockRequest) flags() int           { return isRead | isAsync }
 
 // MergeRequests are considered "non KV" because they do not need to be gated
 // by the command queue (reordering is ok) and they operate on non-MVCC data so

@@ -194,18 +194,20 @@ func EvalDyTSValidatorEndTransaction(
 	var pd EvalResult
 	if args.Commit {
 		// Resolve Local Soft locks
-		externalReadSpans, externalWriteSpans := cArgs.Repl.resolveLocalSoftLocks(ctx, batch, cArgs.Stats, *args, &txnRecord)
+		externalReadSpans, externalReverseReadSpans, externalWriteSpans := cArgs.Repl.resolveLocalSoftLocks(ctx, batch, cArgs.Stats, *args, &txnRecord)
 		// Add external write soft locks to resolve asyncronous processing
 		pd.Local.resolvewslocks = &externalWriteSpans
 		// add external read spans to garbage collect asncronously
 		pd.Local.gcrslocks = &externalReadSpans
-
+		// add external reverse read spans to garbage collect asncronously
+		pd.Local.gcrevrslocks = &externalReverseReadSpans
 	} else {
 		//  garbage collect Local Soft locks
-		externalReadSpans, externalWriteSpans := cArgs.Repl.GCLocalSoftLocks(ctx, batch, *args, &txnRecord)
+		externalReadSpans, externalReverseReadSpans, externalWriteSpans := cArgs.Repl.GCLocalSoftLocks(ctx, batch, *args, &txnRecord)
 		//Add external write soft locks to GC asyncronous processing
 		pd.Local.gcwslocks = &externalWriteSpans
 		pd.Local.gcrslocks = &externalReadSpans
+		pd.Local.gcrevrslocks = &externalReverseReadSpans
 	}
 	pd.Local.txnrecord = &txnRecord
 
@@ -335,7 +337,7 @@ func EvalDyTSGcWriteSoftLock(
 		return EvalResult{}, err
 	} else if !ok {
 		if log.V(2) {
-			log.Infof(ctx, "In EvalDyTSGcWriteSoftLock : Couldnt retrive the write lock")
+			log.Infof(ctx, "In EvalDyTSGcWriteSoftLock : Couldnt retrive the write lock %v", args.Txnrecord.ID)
 		}
 	}
 	return EvalResult{}, nil
@@ -354,12 +356,12 @@ func EvalDyTSGcReadSoftLock(
 	if args.Txnrecord.Status == roachpb.COMMITTED {
 		cArgs.Repl.updateDyTSCache(args.Span, true /*read*/, args.Txnrecord.OrigTimestamp)
 	}
-	ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, args.Txnrecord, args.Span, cArgs.Repl.slockcache)
+	ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, args.Txnrecord, args.Span, cArgs.Repl.slockcache, args.Reverse)
 	if err != nil {
 		return EvalResult{}, err
 	} else if !ok {
 		if log.V(2) {
-			log.Infof(ctx, "In EvalDyTSGcReadSoftLock : Couldnt retrive the read lock")
+			log.Infof(ctx, "In EvalDyTSGcReadSoftLock : Couldnt retrive the read lock %v", args.Txnrecord.ID)
 		}
 	}
 	return EvalResult{}, nil
@@ -382,7 +384,7 @@ func EvalDyTSResolveWriteSoftLock(
 		return EvalResult{}, err
 	} else if !ok {
 		if log.V(2) {
-			log.Infof(ctx, "In EvalDyTSResolveWriteSoftLock : Couldnt retrive the write lock")
+			log.Infof(ctx, "In EvalDyTSResolveWriteSoftLock : Couldnt retrive the write lock, txn id %v", args.Txnrecord.ID)
 		}
 	}
 	return EvalResult{}, nil
@@ -398,7 +400,7 @@ func (r *Replica) resolveLocalSoftLocks(
 	ms *enginepb.MVCCStats,
 	args roachpb.DyTSEndTransactionRequest,
 	txn *roachpb.Transaction,
-) ([]roachpb.Span, []roachpb.Span) {
+) ([]roachpb.Span, []roachpb.Span, []roachpb.Span) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :resolveLocalSoftLocks : begin ")
 	}
@@ -481,7 +483,7 @@ func (r *Replica) resolveLocalSoftLocks(
 				}
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, true /*read*/, *args.Deadline)
-				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache, false)
 				if !ok {
 					externalSoftReadSpan = append(externalSoftReadSpan, span)
 				}
@@ -497,9 +499,40 @@ func (r *Replica) resolveLocalSoftLocks(
 			if inSpan != nil {
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, true /*read*/, *args.Deadline)
-				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache, false)
 				if !ok {
 					externalSoftReadSpan = append(externalSoftReadSpan, span)
+				}
+				return err
+			}
+			return nil
+		}(); err != nil {
+			// TODO(tschottdorf): any legitimate reason for this to happen?
+			// Figure that out and if not, should still be ReplicaCorruption
+			// and not a panic.
+			panic(fmt.Sprintf("error resolving Local Write Soft locks at %s on end transaction [%s]: %s", span, txn.Status, err))
+		}
+	}
+	var externalReverseSoftReadSpan []roachpb.Span
+	for _, span := range args.ReverseReadSpans {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :resolving reverse read span : %v ", span)
+		}
+		if err := func() error {
+
+			// For intent ranges, cut into parts inside and outside our key
+			// range. Resolve locally inside, delegate the rest. In particular,
+			// an intent range for range-local data is correctly considered local.
+			inSpan, outSpans := intersectSpan(span, *desc)
+			for _, span := range outSpans {
+				externalReverseSoftReadSpan = append(externalReverseSoftReadSpan, span)
+			}
+			if inSpan != nil {
+				// Update the DyTs time stamp with latest commited timestamp
+				r.updateDyTSCache(span, true /*read*/, *args.Deadline)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache, true /*reverse*/)
+				if !ok {
+					externalReverseSoftReadSpan = append(externalReverseSoftReadSpan, span)
 				}
 				return err
 			}
@@ -514,7 +547,7 @@ func (r *Replica) resolveLocalSoftLocks(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :resolveLocalSoftLocks end with external spans r %v, w %w", externalSoftReadSpan, externalSoftWriteSpan)
 	}
-	return externalSoftReadSpan, externalSoftWriteSpan
+	return externalSoftReadSpan, externalReverseSoftReadSpan, externalSoftWriteSpan
 }
 
 // GCLocalSoftLocks synchronously GCs any soft locks that are
@@ -526,7 +559,7 @@ func (r *Replica) GCLocalSoftLocks(
 	batch engine.ReadWriter,
 	args roachpb.DyTSEndTransactionRequest,
 	txn *roachpb.Transaction,
-) ([]roachpb.Span, []roachpb.Span) {
+) ([]roachpb.Span, []roachpb.Span, []roachpb.Span) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :GCLocalSoftLocks : begin ")
 	}
@@ -589,7 +622,7 @@ func (r *Replica) GCLocalSoftLocks(
 					return nil
 				}
 
-				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache, false)
 				if !ok {
 					externalSoftReadSpan = append(externalSoftReadSpan, span)
 				}
@@ -603,7 +636,7 @@ func (r *Replica) GCLocalSoftLocks(
 				externalSoftReadSpan = append(externalSoftReadSpan, span)
 			}
 			if inSpan != nil {
-				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache, false)
 				if !ok {
 					externalSoftReadSpan = append(externalSoftReadSpan, span)
 				}
@@ -617,8 +650,39 @@ func (r *Replica) GCLocalSoftLocks(
 			panic(fmt.Sprintf("error resolving Local Write Soft locks at %s on end transaction [%s]: %s", span, txn.Status, err))
 		}
 	}
-	if log.V(2) {
-		log.Infof(ctx, "Ravi :resolveLocalIntents : end")
+	var externalReverseSoftReadSpan []roachpb.Span
+	for _, span := range args.ReverseReadSpans {
+		if log.V(2) {
+			log.Infof(ctx, "Ravi :resolving reverse read span : %v ", span)
+		}
+		if err := func() error {
+
+			// For intent ranges, cut into parts inside and outside our key
+			// range. Resolve locally inside, delegate the rest. In particular,
+			// an intent range for range-local data is correctly considered local.
+			inSpan, outSpans := intersectSpan(span, *desc)
+			for _, span := range outSpans {
+				externalReverseSoftReadSpan = append(externalReverseSoftReadSpan, span)
+			}
+			if inSpan != nil {
+				// Update the DyTs time stamp with latest commited timestamp
+				r.updateDyTSCache(span, true /*read*/, *args.Deadline)
+				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache, true /*reverse*/)
+				if !ok {
+					externalReverseSoftReadSpan = append(externalReverseSoftReadSpan, span)
+				}
+				return err
+			}
+			return nil
+		}(); err != nil {
+			// TODO(tschottdorf): any legitimate reason for this to happen?
+			// Figure that out and if not, should still be ReplicaCorruption
+			// and not a panic.
+			panic(fmt.Sprintf("error resolving Local Write Soft locks at %s on end transaction [%s]: %s", span, txn.Status, err))
+		}
 	}
-	return externalSoftReadSpan, externalSoftWriteSpan
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :GCLocalSoftLocks : end")
+	}
+	return externalSoftReadSpan, externalReverseSoftReadSpan, externalSoftWriteSpan
 }

@@ -35,11 +35,11 @@ func (s *SoftLockCache) processPlaceReadLockRequest(
 	ctx context.Context,
 	tmeta enginepb.TxnMeta,
 	key roachpb.Key,
-	reverse bool) []roachpb.WriteSoftLock {
+) []roachpb.WriteSoftLock {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In processPlaceReadLockRequest , key %v , inetrnalkey %v", key, ToInternalKey(key))
 	}
-	readlk := roachpb.ReadSoftLock{TransactionMeta: tmeta, Reverse: reverse}
+	readlk := roachpb.ReadSoftLock{TransactionMeta: tmeta}
 	s.addToSoftReadLockCache(readlk, key)
 	wlks := s.getAllWriteSoftLocksOnKey(key)
 	if log.V(2) {

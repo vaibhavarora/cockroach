@@ -210,7 +210,7 @@ func (br *BatchResponse) String() string {
 // contained in the requests are used, but when a response contains a
 // ResumeSpan the ResumeSpan is subtracted from the request span to provide a
 // more minimal span of keys affected by the request.
-func (ba *BatchRequest) IntentSpanIterate(br *BatchResponse, fnw func(key, endKey Key), fnr func(key, endKey Key)) {
+func (ba *BatchRequest) IntentSpanIterate(br *BatchResponse, fnw func(key, endKey Key), fnr func(key, endKey Key), fnrr func(key, endKey Key)) {
 	for i, arg := range ba.Requests {
 		req := arg.GetInner()
 		if req.Method() == EndTransaction {
@@ -218,15 +218,22 @@ func (ba *BatchRequest) IntentSpanIterate(br *BatchResponse, fnw func(key, endKe
 		}
 		readspan := false
 		writespan := false
+		reverseReadspan := false
+
 		if IsReadOnly(req) && !IsFutureWrite(req) {
-			readspan = true
+			if IsReverse(req) {
+				reverseReadspan = true
+			} else {
+				readspan = true
+			}
+
 		}
 		if IsTransactionWrite(req) || IsFutureWrite(req) {
 			writespan = true
 			if IsReadWrite(req) {
 				if req.Method() == ConditionalPut {
 					arg := req.(*ConditionalPutRequest)
-					if !arg.Blind {
+					if !arg.Blind && arg.ExpValue != nil {
 						readspan = true
 					}
 				}
@@ -273,6 +280,26 @@ func (ba *BatchRequest) IntentSpanIterate(br *BatchResponse, fnw func(key, endKe
 				}
 			}
 			fnw(h.Key, h.EndKey)
+		}
+		if reverseReadspan {
+			h := req.Header()
+			if br != nil {
+				resumeSpan := br.Responses[i].GetInner().Header().ResumeSpan
+				// If a resume span exists we need to cull the span.
+				if resumeSpan != nil {
+					if bytes.Equal(resumeSpan.Key, h.Key) {
+						if bytes.Equal(resumeSpan.EndKey, h.EndKey) {
+							// Nothing was written.
+							continue
+						}
+						fnrr(resumeSpan.EndKey, h.EndKey)
+					} else {
+						fnrr(h.Key, resumeSpan.Key)
+					}
+					continue
+				}
+			}
+			fnrr(h.Key, h.EndKey)
 		}
 	}
 }

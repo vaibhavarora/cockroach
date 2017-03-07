@@ -260,6 +260,7 @@ type proposalResult struct {
 	ResolveWSLocks []roachpb.Span
 	GcWSLocks      []roachpb.Span
 	GcRSLocks      []roachpb.Span
+	GcRevRSLocks   []roachpb.Span
 	TxnRecod       roachpb.Transaction
 }
 
@@ -2274,8 +2275,8 @@ func (r *Replica) tryAddWriteCmd(
 				log.Infof(ctx, "tryAddWriteCmd 1")
 			}
 			// Semi-syncronously resolve any soft locks
-			if len(propResult.ResolveWSLocks) > 0 || len(propResult.GcWSLocks) > 0 || len(propResult.GcRSLocks) > 0 {
-				r.store.softLockResolver.processWriteSoftLocksAsync(r, propResult.ResolveWSLocks, propResult.GcWSLocks, propResult.GcRSLocks, propResult.TxnRecod)
+			if len(propResult.ResolveWSLocks) > 0 || len(propResult.GcWSLocks) > 0 || len(propResult.GcRSLocks) > 0 || len(propResult.GcRevRSLocks) > 0 {
+				r.store.softLockResolver.processWriteSoftLocksAsync(r, propResult.ResolveWSLocks, propResult.GcWSLocks, propResult.GcRSLocks, propResult.GcRevRSLocks, propResult.TxnRecod)
 			}
 			return propResult.Reply, propResult.Err, propResult.ProposalRetry
 		case <-slowTimer:
@@ -2393,6 +2394,7 @@ func (r *Replica) evaluateProposal(
 			resolvewslocks:     result.Local.resolvewslocks,
 			gcwslocks:          result.Local.gcwslocks,
 			gcrslocks:          result.Local.gcrslocks,
+			gcrevrslocks:       result.Local.gcrevrslocks,
 			txnrecord:          result.Local.txnrecord,
 			Err:                r.maybeSetCorrupt(ctx, result.Local.Err),
 			leaseMetricsResult: result.Local.leaseMetricsResult,
@@ -2524,6 +2526,7 @@ func (r *Replica) propose(
 		resolvewslocks := proposal.Local.detachResolveWSLocks()
 		gcwslocks := proposal.Local.detachGCWSLocks()
 		gcrslocks := proposal.Local.detachGCRSLocks()
+		gcrevrslocks := proposal.Local.detachGCRevRSLocks()
 		txnrcd := proposal.Local.detachTxnRecord()
 
 		r.handleEvalResult(ctx, repDesc, proposal.Local,
@@ -2532,7 +2535,7 @@ func (r *Replica) propose(
 			endCmds.done(nil, pErr, proposalNoRetry)
 		}
 		ch := make(chan proposalResult, 1)
-		ch <- proposalResult{Err: pErr, Intents: intents, ResolveWSLocks: resolvewslocks, GcWSLocks: gcwslocks, GcRSLocks: gcrslocks, TxnRecod: txnrcd}
+		ch <- proposalResult{Err: pErr, Intents: intents, ResolveWSLocks: resolvewslocks, GcWSLocks: gcwslocks, GcRSLocks: gcrslocks, GcRevRSLocks: gcrevrslocks, TxnRecod: txnrcd}
 		close(ch)
 		return ch, func() bool { return false }, nil
 	}
@@ -3745,6 +3748,7 @@ func (r *Replica) processRaftCommand(
 			response.ResolveWSLocks = proposal.Local.detachResolveWSLocks()
 			response.GcWSLocks = proposal.Local.detachGCWSLocks()
 			response.GcRSLocks = proposal.Local.detachGCRSLocks()
+			response.GcRevRSLocks = proposal.Local.detachGCRevRSLocks()
 			response.TxnRecod = proposal.Local.detachTxnRecord()
 
 			lResult = proposal.Local

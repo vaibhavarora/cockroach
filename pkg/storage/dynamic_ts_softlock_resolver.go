@@ -38,6 +38,7 @@ func (sr *softLockResolver) processWriteSoftLocksAsync(
 	resolvewslocks []roachpb.Span,
 	gcwslockspans []roachpb.Span,
 	gcrslockspans []roachpb.Span,
+	gcrevrslockspans []roachpb.Span,
 	txnrecord roachpb.Transaction) {
 
 	now := r.store.Clock().Now()
@@ -81,20 +82,35 @@ func (sr *softLockResolver) processWriteSoftLocksAsync(
 	if len(gcrslockspans) > 0 {
 		err := stopper.RunLimitedAsyncTask(
 			ctx, sr.sem, false /* wait */, func(ctx context.Context) {
-				sr.gcReadSoftLocks(ctx, r, gcrslockspans, txnrecord, now, true /* wait */)
+				sr.gcReadSoftLocks(ctx, r, gcrslockspans, false, txnrecord, now, true /* wait */)
 			})
 		if err != nil {
 			if err == stop.ErrThrottled {
 				// A limited task was not available. Rather than waiting for one, we
 				// reuse the current goroutine.
-				sr.gcReadSoftLocks(ctx, r, gcrslockspans, txnrecord, now, true /* wait */)
+				sr.gcReadSoftLocks(ctx, r, gcrslockspans, false, txnrecord, now, true /* wait */)
 			} else {
 				log.Warningf(ctx, "failed to resolve intents: %s", err)
 				return
 			}
 		}
 	}
-
+	if len(gcrevrslockspans) > 0 {
+		err := stopper.RunLimitedAsyncTask(
+			ctx, sr.sem, false /* wait */, func(ctx context.Context) {
+				sr.gcReadSoftLocks(ctx, r, gcrevrslockspans, true /*reverse*/, txnrecord, now, true /* wait */)
+			})
+		if err != nil {
+			if err == stop.ErrThrottled {
+				// A limited task was not available. Rather than waiting for one, we
+				// reuse the current goroutine.
+				sr.gcReadSoftLocks(ctx, r, gcrevrslockspans, true /*reverse*/, txnrecord, now, true /* wait */)
+			} else {
+				log.Warningf(ctx, "failed to resolve intents: %s", err)
+				return
+			}
+		}
+	}
 }
 
 func (sr *softLockResolver) resolveWriteSoftLocks(
@@ -217,6 +233,7 @@ func (sr *softLockResolver) gcReadSoftLocks(
 	ctx context.Context,
 	r *Replica,
 	rslockspans []roachpb.Span,
+	reverse bool,
 	txnrecord roachpb.Transaction,
 	now hlc.Timestamp,
 	wait bool,
@@ -239,6 +256,7 @@ func (sr *softLockResolver) gcReadSoftLocks(
 
 			resolveArgs = &roachpb.GCReadSoftockRequest{
 				Span:      rslockspan,
+				Reverse:   reverse,
 				Txnrecord: txnrecord,
 			}
 

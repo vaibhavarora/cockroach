@@ -14,7 +14,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-var history = flag.String("history", "b1 w1(x) c1 b2 r2(x) c2 ", "history to execute.")
+var history = flag.String("history", "b1 r1(x) w1(x) b2 w2(x) c1 c2", "history to execute.")
 
 func read(key int, tx *sql.Tx) int {
 

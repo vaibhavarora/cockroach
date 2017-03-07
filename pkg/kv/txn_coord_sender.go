@@ -67,6 +67,10 @@ type txnMetadata struct {
 	// Keys read by the transaction. This will be helpful to remove the
 	// soft read locks placed on it.
 	Readkeys []roachpb.Span
+
+	// Keys read by the transaction by iteraring in reverse.
+	ReverseReadkeys []roachpb.Span
+
 	// lastUpdateNanos is the latest wall time in nanos the client sent
 	// transaction operations to this coordinator. Accessed and updated
 	// atomically.
@@ -357,6 +361,7 @@ func (tc *TxnCoordSender) Send(
 			if txnMeta != nil {
 				et.IntentSpans = txnMeta.Writekeys
 				et.ReadSpans = txnMeta.Readkeys
+				et.ReverseReadSpans = txnMeta.ReverseReadkeys
 				// Defensively set distinctSpans to false if we had any previous
 				// requests in this transaction. This effectively limits the distinct
 				// spans optimization to 1pc transactions.
@@ -386,6 +391,14 @@ func (tc *TxnCoordSender) Send(
 				if log.V(2) {
 					log.Infof(ctx, "Ravi : TCS p01 read ")
 				}
+			}, func(key, endKey roachpb.Key) {
+				et.ReverseReadSpans = append(et.ReverseReadSpans, roachpb.Span{
+					Key:    key,
+					EndKey: endKey,
+				})
+				if log.V(2) {
+					log.Infof(ctx, "Ravi : TCS p01 reverse read ")
+				}
 			})
 			if log.V(2) {
 				log.Infof(ctx, "Ravi : TCS p1 write span %v , read span ", et.IntentSpans, et.ReadSpans)
@@ -413,6 +426,7 @@ func (tc *TxnCoordSender) Send(
 			if txnMeta != nil {
 				txnMeta.Writekeys = et.IntentSpans
 				txnMeta.Readkeys = et.ReadSpans
+				txnMeta.ReverseReadkeys = et.ReverseReadSpans
 			}
 			return nil
 		}(); pErr != nil {
@@ -648,6 +662,7 @@ func (tc *TxnCoordSender) unregisterTxnLocked(
 
 	txnMeta.Writekeys = nil
 	txnMeta.Readkeys = nil
+	txnMeta.ReverseReadkeys = nil
 	delete(tc.txnMu.txns, txnID)
 
 	return duration, restarts, status
@@ -729,8 +744,10 @@ func (tc *TxnCoordSender) tryAsyncAbort(txnID uuid.UUID) {
 	// Clone the intents and the txn to avoid data races.
 	intentSpans, _ := roachpb.MergeSpans(append([]roachpb.Span(nil), txnMeta.Writekeys...))
 	readSpans, _ := roachpb.MergeSpans(append([]roachpb.Span(nil), txnMeta.Readkeys...))
+	reverseReadSpans, _ := roachpb.MergeSpans(append([]roachpb.Span(nil), txnMeta.ReverseReadkeys...))
 	txnMeta.Writekeys = nil
 	txnMeta.Readkeys = nil
+	txnMeta.ReverseReadkeys = nil
 
 	txn := txnMeta.txn.Clone()
 	tc.txnMu.Unlock()
@@ -749,9 +766,10 @@ func (tc *TxnCoordSender) tryAsyncAbort(txnID uuid.UUID) {
 		Span: roachpb.Span{
 			Key: txn.Key,
 		},
-		Commit:      false,
-		IntentSpans: intentSpans,
-		ReadSpans:   readSpans,
+		Commit:           false,
+		IntentSpans:      intentSpans,
+		ReadSpans:        readSpans,
+		ReverseReadSpans: reverseReadSpans,
 	}
 	ba.Add(et)
 	ctx := tc.AnnotateCtx(context.TODO())
@@ -959,9 +977,12 @@ func (tc *TxnCoordSender) updateState(
 		// See #3346.
 		var wkeys []roachpb.Span
 		var rkeys []roachpb.Span
+		var rrkeys []roachpb.Span
+
 		if txnMeta != nil {
 			wkeys = txnMeta.Writekeys
 			rkeys = txnMeta.Readkeys
+			rrkeys = txnMeta.ReverseReadkeys
 		}
 		ba.IntentSpanIterate(br, func(key, endKey roachpb.Key) {
 
@@ -976,14 +997,21 @@ func (tc *TxnCoordSender) updateState(
 					Key:    key,
 					EndKey: endKey,
 				})
+			},
+			func(key, endKey roachpb.Key) {
+				rrkeys = append(rkeys, roachpb.Span{
+					Key:    key,
+					EndKey: endKey,
+				})
 			})
 		if log.V(2) {
-			log.Infof(ctx, "Ravi : TCS keys : %v", wkeys, rkeys)
+			log.Infof(ctx, "Ravi : TCS keys : %v, %v , %v", wkeys, rkeys, rrkeys)
 		}
 
 		if txnMeta != nil {
 			txnMeta.Writekeys = wkeys
 			txnMeta.Readkeys = rkeys
+			txnMeta.ReverseReadkeys = rrkeys
 			// Ravi : work around for passing through read only transaction
 			//} else if len(keys) >= 0 {
 		} else if len(wkeys) > 0 || len(rkeys) > 0 {
@@ -1012,6 +1040,7 @@ func (tc *TxnCoordSender) updateState(
 					txn:              newTxn,
 					Writekeys:        wkeys,
 					Readkeys:         rkeys,
+					ReverseReadkeys:  rrkeys,
 					firstUpdateNanos: startNS,
 					lastUpdateNanos:  tc.clock.PhysicalNow(),
 					timeoutDuration:  tc.clientTimeout,

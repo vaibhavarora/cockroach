@@ -820,7 +820,7 @@ func mvccGetInternal(
 	var wslocks []roachpb.WriteSoftLock
 	if softlock {
 		// placing read soft
-		wslocks = slcache.processPlaceReadLockRequest(ctx, txn.TxnMeta, metaKey.Key, reverse)
+		wslocks = slcache.processPlaceReadLockRequest(ctx, txn.TxnMeta, metaKey.Key)
 	}
 	value := &buf.value
 	if allowedSafety == unsafeValue {
@@ -1559,6 +1559,9 @@ func mvccScanInternal(
 	slcache *SoftLockCache,
 	softlock bool,
 ) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, []roachpb.WriteSoftLock, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : mvccScanInternal: begin ")
+	}
 	var res []roachpb.KeyValue
 	if max == 0 {
 		return nil, &roachpb.Span{Key: key, EndKey: endKey}, nil, nil, nil
@@ -1601,6 +1604,9 @@ func MVCCScan(
 	slcache *SoftLockCache,
 	softlock bool,
 ) ([]roachpb.KeyValue, *roachpb.Span, []roachpb.Intent, []roachpb.WriteSoftLock, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : MVCCScan: begin ")
+	}
 	return mvccScanInternal(ctx, engine, key, endKey, max, timestamp,
 		consistent, txn, false /* !reverse */, slcache, softlock)
 }
@@ -1642,6 +1648,9 @@ func MVCCIterate(
 	slcache *SoftLockCache,
 	softlock bool,
 ) ([]roachpb.Intent, []roachpb.WriteSoftLock, error) {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : MVCCIterate: begin ")
+	}
 	if !consistent && txn != nil {
 		return nil, nil, errors.Errorf("cannot allow inconsistent reads within a transaction")
 	}
@@ -2068,10 +2077,9 @@ func MVCCPlaceReadSoftLock(
 	ctx context.Context,
 	tmeta enginepb.TxnMeta,
 	key roachpb.Key,
-	reverse bool,
 	slcache *SoftLockCache,
 ) []roachpb.WriteSoftLock {
-	return slcache.processPlaceReadLockRequest(ctx, tmeta, key, reverse)
+	return slcache.processPlaceReadLockRequest(ctx, tmeta, key)
 
 }
 
@@ -2092,7 +2100,7 @@ func MVCCresolveWriteSoftLock(
 	wslock, ok := slcache.getWriteSoftLock(span.Key, *txn.ID)
 	if !ok {
 		if log.V(2) {
-			log.Infof(ctx, "Couldnt retrive any lock")
+			log.Infof(ctx, "Couldnt retrive write lock %v", span.Key)
 		}
 		return false, nil
 	}
@@ -2132,7 +2140,7 @@ func MVCCRemoveWriteSoftLock(
 		wslock, ok := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
 		if !ok {
 			if log.V(2) {
-				log.Infof(ctx, "Coudnt retrive any lock")
+				log.Infof(ctx, "Coudnt retrive write lock")
 			}
 			return false, nil
 		}
@@ -2143,7 +2151,7 @@ func MVCCRemoveWriteSoftLock(
 		wslock, ok := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
 		if !ok {
 			if log.V(2) {
-				log.Infof(ctx, "Coudnt retrive any lock")
+				log.Infof(ctx, "Coudnt retrive write lock")
 			}
 			return false, nil
 		}
@@ -2161,7 +2169,7 @@ func MVCCRemoveWriteSoftLock(
 				return false, nil
 			}
 			// removing the entry from cache
-			slcache.removeFromWriteLockCache(wslock, span.Key)
+			slcache.removeFromWriteLockCache(wslock, key)
 
 		}
 	}
@@ -2176,6 +2184,7 @@ func MVCCRemoveReadSoftLock(
 	txnrcd roachpb.Transaction,
 	span roachpb.Span,
 	slcache *SoftLockCache,
+	reverse bool,
 ) (bool, error) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In MVCCRemoveReadSoftLock")
@@ -2194,26 +2203,20 @@ func MVCCRemoveReadSoftLock(
 		slcache.removeFromReadLockCache(rslock, span.Key)
 
 	} else {
-		rslock, ok := slcache.getReadSoftLock(span.Key, *txnrcd.ID)
-		if !ok {
-			if log.V(2) {
-				log.Infof(ctx, "Ravi : Couldnt retrive any read lock for the key")
-			}
-			return false, nil
-		}
-		keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, txnrcd, rslock.Reverse)
+
+		keys := MVCCgetKeysUsingIter(ctx, span.Key, span.EndKey, engine, txnrcd, reverse)
 
 		for _, key := range keys {
 			// getting lock from cache
 			rslock, ok := slcache.getReadSoftLock(key, *txnrcd.ID)
 			if !ok {
 				if log.V(2) {
-					log.Infof(ctx, "Ravi : Couldnt retrive any read lock for the key")
+					log.Infof(ctx, "Ravi : Couldnt retrive any read lock for the key %v", key)
 				}
 				return false, nil
 			}
 			// removing the entry from cache
-			slcache.removeFromReadLockCache(rslock, span.Key)
+			slcache.removeFromReadLockCache(rslock, key)
 
 		}
 	}

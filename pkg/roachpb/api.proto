@@ -275,7 +275,8 @@ message GCWriteSoftockResponse{
 // Grabage collect read soft locks
 message GCReadSoftockRequest{
   optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
-  optional Transaction txnrecord = 2 [(gogoproto.nullable) = false];
+  optional bool reverse = 2 [(gogoproto.nullable) = false];
+  optional Transaction txnrecord = 3 [(gogoproto.nullable) = false];
 }
 
 message GCReadSoftockResponse{
@@ -296,7 +297,9 @@ message DyTSEndTransactionRequest{
   repeated Span write_spans = 5 [(gogoproto.nullable) = false];
   // List of keys read by the transaction.
   repeated Span read_spans = 6 [(gogoproto.nullable) = false];
-  optional storage.engine.enginepb.TxnMeta tmeta = 7 [(gogoproto.nullable) = false];
+  // List of keys read by the transaction in reverse.
+  repeated Span reverse_read_spans = 7 [(gogoproto.nullable) = false];
+  optional storage.engine.enginepb.TxnMeta tmeta = 8 [(gogoproto.nullable) = false];
 }
 
 message DyTSEndTransactionResponse{
@@ -396,6 +399,8 @@ message EndTransactionRequest {
   repeated Span intent_spans = 5 [(gogoproto.nullable) = false];
   // List of keys read by the transaction.
   repeated Span read_spans = 6 [(gogoproto.nullable) = false];
+   // List of keys read by the transaction in reverse.
+  repeated Span reverse_read_spans = 7 [(gogoproto.nullable) = false];
 }
 
 // An EndTransactionResponse is the return value from the
@@ -965,7 +970,6 @@ message BatchRequest {
 //A Read Soft Lock placed on each read for Dynamic Time stamping
 message ReadSoftLock{
   optional storage.engine.enginepb.TxnMeta TransactionMeta = 1 [(gogoproto.nullable) = false];
-  optional bool Reverse = 2 [(gogoproto.nullable) = false];
 }
 
 //A Write Lock placed on each write fir Dynamic Time stamping

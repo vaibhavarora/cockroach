@@ -231,7 +231,7 @@ func EvalDyTSConditionalPut(
 		log.Infof(ctx, " EvalDyTSConditionalPut 2")
 	}
 	if err = check(existVal); err != nil {
-		engine.MVCCRemoveReadSoftLock(ctx, batch, *h.Txn, args.Span, cArgs.Repl.slockcache)
+		engine.MVCCRemoveReadSoftLock(ctx, batch, *h.Txn, args.Span, cArgs.Repl.slockcache, false)
 		return EvalResult{}, err
 	}
 	if log.V(2) {
@@ -387,7 +387,7 @@ func EvalDyTSIncrement(
 		return EvalResult{}, err
 	}
 	if err = check(extvalue); err != nil {
-		engine.MVCCRemoveReadSoftLock(ctx, batch, *h.Txn, args.Span, cArgs.Repl.slockcache)
+		engine.MVCCRemoveReadSoftLock(ctx, batch, *h.Txn, args.Span, cArgs.Repl.slockcache, false)
 		return EvalResult{}, err
 	}
 	reply.NewValue = int64Val
@@ -543,7 +543,7 @@ func EvalDyTSScan(
 		}
 	} else {
 		if log.V(2) {
-			log.Infof(ctx, " No Write locks acqurired on Get ")
+			log.Infof(ctx, " No Write locks acqurired on Scan ")
 		}
 	}
 

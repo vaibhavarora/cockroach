@@ -141,6 +141,9 @@ type LocalEvalResult struct {
 	gcwslocks *[]roachpb.Span
 	// Read Soft Locks to be GCed asncronously
 	gcrslocks *[]roachpb.Span
+	// Reverse Read's Soft Locks to be GCed asncronously
+	gcrevrslocks *[]roachpb.Span
+
 	//Tansaction record
 	txnrecord *roachpb.Transaction
 	// Whether we successfully or non-successfully requested a lease.
@@ -188,6 +191,15 @@ func (lResult *LocalEvalResult) detachGCWSLocks() []roachpb.Span {
 	gcwslocks := *lResult.gcwslocks
 	lResult.gcwslocks = nil
 	return gcwslocks
+}
+
+func (lResult *LocalEvalResult) detachGCRevRSLocks() []roachpb.Span {
+	if lResult == nil || lResult.gcrevrslocks == nil {
+		return nil
+	}
+	gcrevrslocks := *lResult.gcrevrslocks
+	lResult.gcrevrslocks = nil
+	return gcrevrslocks
 }
 
 func (lResult *LocalEvalResult) detachGCRSLocks() []roachpb.Span {
@@ -351,6 +363,15 @@ func (p *EvalResult) MergeAndDestroy(q EvalResult) error {
 		}
 	}
 	q.Local.gcrslocks = nil
+
+	if q.Local.gcrevrslocks != nil {
+		if p.Local.gcrevrslocks == nil {
+			p.Local.gcrevrslocks = q.Local.gcrevrslocks
+		} else {
+			*p.Local.gcrevrslocks = append(*p.Local.gcrevrslocks, *q.Local.gcrevrslocks...)
+		}
+	}
+	q.Local.gcrevrslocks = nil
 
 	if p.Local.txnrecord == nil {
 		p.Local.txnrecord = q.Local.txnrecord
