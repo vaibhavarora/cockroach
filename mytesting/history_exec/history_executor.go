@@ -14,7 +14,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-var history = flag.String("history", "b1 r1(x) w1(x) b2 w2(x) c1 c2", "history to execute.")
+var history = flag.String("history", "b1 b2 r1(x) w2(x) w1(x) c2 c1", "history to execute.")
 
 func read(key int, tx *sql.Tx) int {
 
@@ -26,13 +26,14 @@ func read(key int, tx *sql.Tx) int {
 		log.Println(err)
 	}
 
-	/*
-		for rows.Next() {
-			if err = rows.Scan(&id, &balance); err != nil {
-				log.Println(err)
-			}
+	/*for rows.Next() {
+		if err = rows.Scan(&id, &balance); err != nil {
+			log.Println(err)
 		}
-	*/
+		fmt.Println("id ", id, "balance ", balance)
+	}*/
+	fmt.Println(balance)
+
 	return balance
 }
 
@@ -42,6 +43,7 @@ func write(key int, value int, tx *sql.Tx) {
 	if _, err := tx.Exec(update, value, key); err != nil {
 		log.Println(err)
 	}
+	fmt.Println(value)
 }
 
 func commit_tnx(tx *sql.Tx) {
@@ -90,7 +92,7 @@ func execute_history(history string, db *sql.DB) {
 			_ = read(x, tx2)
 		case element == "w1(x)":
 			fmt.Println("tnx1 writing x")
-			write(x, 102, tx1)
+			write(x, 104, tx1)
 		case element == "w1(y)":
 			fmt.Println("tnx1 writing y")
 			write(y, 102, tx1)

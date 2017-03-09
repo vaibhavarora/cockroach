@@ -1034,7 +1034,7 @@ func mvccPutInternal(
 	if len(key) == 0 {
 		return emptyKeyError()
 	}
-
+	skipPut := false
 	metaKey := MakeMVCCMetadataKey(key)
 	ok, origMetaKeySize, origMetaValSize, err := mvccGetMetadata(iter, metaKey, &buf.meta)
 	if err != nil {
@@ -1049,6 +1049,7 @@ func mvccPutInternal(
 			return value, nil
 		}
 		var exVal *roachpb.Value
+		var lastComiitedVal *roachpb.Value
 		if exists {
 			getBuf := newGetBuffer()
 			defer getBuf.release()
@@ -1056,6 +1057,13 @@ func mvccPutInternal(
 			if exVal, _, _, _, err = mvccGetInternal(
 				ctx, iter, metaKey, readTS, true /* consistent */, safeValue, txn, getBuf, nil, false, false); err != nil {
 				return nil, err
+			}
+			if lastComiitedVal, _, _, _, err = mvccGetInternal(
+				ctx, iter, metaKey, hlc.MaxTimestamp, true /* consistent */, safeValue, txn, getBuf, nil, false, false); err != nil {
+				return nil, err
+			}
+			if readTS.Less(lastComiitedVal.Timestamp) {
+				skipPut = true
 			}
 		}
 		return valueFn(exVal)
@@ -1176,9 +1184,12 @@ func mvccPutInternal(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : mvccPutInternal: calling put version key %v, value %v", versionKey, value)
 	}
-	if err := engine.Put(versionKey, value); err != nil {
-		return err
+	if !skipPut {
+		if err := engine.Put(versionKey, value); err != nil {
+			return err
+		}
 	}
+
 	if nointent {
 		// Remove write soft lock
 		swlock, ok := slcache.getWriteSoftLock(metaKey.Key, *txn.ID)

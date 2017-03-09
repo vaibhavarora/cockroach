@@ -31,11 +31,20 @@ func (r *Replica) ProcessDyTSEndTransaction(
 	}
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : control back to EvalDyTSValidationRequestEndTransaction")
+		log.Infof(ctx, "Ravi :EvalDyTSValidationRequestEndTransaction replying as back %v", reply)
 	}
+
+	if args.Commit {
+		if reply.Txn.Status == roachpb.ABORTED {
+			return roachpb.NewTransactionRetryError()
+		}
+	}
+
 	/*
 		if err = sendOrigEndTransactionRPC(ctx, r.store, batch, h, *reply.Txn, Args); err != nil {
 			return err
 		}*/
+
 	return nil
 }
 
@@ -75,16 +84,17 @@ func sendDyTSEndTranactionRPC(
 
 	if err := s.db.Run(ctx, b); err != nil {
 		_ = b.MustPErr()
-	} else {
+	}
+	br := b.RawResponse()
 
-		br := b.RawResponse()
-		for _, res := range br.Responses {
-			r := res.GetInner().(*roachpb.DyTSEndTransactionResponse)
-			if log.V(2) {
-				log.Infof(ctx, "DyTSEndTransactionRequest recieved response : %v", r)
-			}
+	for _, res := range br.Responses {
+		r := res.GetInner().(*roachpb.DyTSEndTransactionResponse)
+		//r := res.GetInner().(*roachpb.DyTSEndTransactionResponse)
+		if log.V(2) {
+			log.Infof(ctx, "DyTSEndTransactionRequest recieved response : %v", r)
 		}
 	}
+
 	return nil
 }
 

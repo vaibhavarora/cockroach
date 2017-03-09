@@ -138,13 +138,12 @@ func EvalDyTSGet(
 		}
 	}
 	if len(wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
-			panic("failed to place soft  locks in txn Record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write locks acqurired on Get ")
 		}
+	}
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+		panic("failed to place soft  locks in txn Record")
 	}
 
 	return EvalResult{}, nil
@@ -175,13 +174,12 @@ func EvalDyTSPut(
 	}
 
 	if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
+	}
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
 }
@@ -248,14 +246,14 @@ func EvalDyTSConditionalPut(
 		}
 	}
 	// push locks collected on read
+
 	if len(wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
-			panic("failed to place soft  locks in txn Record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write locks acqurired on EvalDyTSConditionalPut ")
 		}
+	}
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+		panic("failed to place soft  locks in txn Record")
 	}
 
 	for _, each := range wslocks1 {
@@ -269,14 +267,14 @@ func EvalDyTSConditionalPut(
 		}
 	}
 	// push locks collected on write
+
 	if len(wslocks1) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write or Read locks acqurired on EvalDyTSConditionalPut ")
 		}
+	}
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1); err != nil {
+		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
 
@@ -335,13 +333,12 @@ func EvalDyTSInitPut(
 	}
 
 	if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
+	}
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
 
@@ -403,14 +400,14 @@ func EvalDyTSIncrement(
 		}
 	}
 	// push locks collected on read
+
 	if len(wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
-			panic("failed to place soft  locks in txn Record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write locks acqurired on Cput ")
 		}
+	}
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+		panic("failed to place soft  locks in txn Record")
 	}
 
 	for _, each := range wslocks1 {
@@ -424,14 +421,14 @@ func EvalDyTSIncrement(
 		}
 	}
 	// push locks collected on write
+
 	if len(wslocks1) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
+	}
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1); err != nil {
+		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
 
@@ -463,13 +460,12 @@ func EvalDyTSDelete(
 	}
 
 	if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
+	}
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
 
@@ -500,13 +496,12 @@ func EvalDyTSDeleteRange(
 	}
 
 	if len(wslocks) != 0 || len(rslocks) != 0 {
-		if err := pushSoftLocksOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
-			panic("failed to place locks in transaction record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
+	}
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
 
@@ -538,15 +533,13 @@ func EvalDyTSScan(
 	}
 
 	if len(wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
-			panic("failed to place soft  locks in txn Record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write locks acqurired on Scan ")
 		}
 	}
-
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+		panic("failed to place soft  locks in txn Record")
+	}
 	return EvalResult{}, nil
 }
 
@@ -576,15 +569,13 @@ func EvalDyTSReverseScan(
 	}
 
 	if len(wslocks) != 0 {
-		if err := pushSoftLocksOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
-			panic("failed to place soft  locks in txn Record")
-		}
-	} else {
 		if log.V(2) {
 			log.Infof(ctx, " No Write locks acqurired on Get ")
 		}
 	}
-
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+		panic("failed to place soft  locks in txn Record")
+	}
 	return EvalResult{}, nil
 }
 
@@ -709,8 +700,16 @@ func updateLocalTransactionRecord(
 		return err
 	} else if ok {
 		// Update the Transaction record
+		if log.V(2) {
+			log.Infof(ctx, "Transaction record before updating %v with lb %v, ub %v", *txnRecord.ID, txnRecord.DynamicTimestampLowerBound, txnRecord.DynamicTimestampUpperBound)
+		}
 		txnRecord.DynamicTimestampLowerBound.Forward(rArgs.lowerbound)
 		txnRecord.DynamicTimestampUpperBound.Backward(rArgs.upperbound)
+
+		if log.V(2) {
+			log.Infof(ctx, "Updating Transaction %v with lb %v, ub %v", *txnRecord.ID, txnRecord.DynamicTimestampLowerBound, txnRecord.DynamicTimestampUpperBound)
+		}
+
 		for _, txn := range rArgs.commitAQ {
 			if log.V(2) {
 				log.Infof(ctx, "Ravi : updating CommitAfterThem with %v", txn)
@@ -775,7 +774,7 @@ func sendUpdateTransactionRecordRPC(
 	return nil
 }
 
-func pushSoftLocksOnReadToTxnRecord(
+func pushUpdatesOnReadToTxnRecord(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
@@ -787,18 +786,23 @@ func pushSoftLocksOnReadToTxnRecord(
 ) error {
 
 	if log.V(2) {
-		log.Infof(ctx, "Ravi :pushSoftLocksOnReadToTxnRecord ")
+		log.Infof(ctx, "Ravi :pushUpdatesOnReadToTxnRecord ")
 	}
 
 	var rARgs RpcArgs
 	// Modify its Lower bound based on last committed write time stamp
 	lowerbound := r.applyDyTSCache(span, false /*write*/)
+	if log.V(2) {
+		log.Infof(ctx, "In Timstampcache : retrived last commited write %v on span %v ", lowerbound, span)
+	}
+	// Forwards are used just to assign the values
 	if h.Timestamp.Less(lowerbound) {
-		rARgs.lowerbound = h.Timestamp
-		rARgs.upperbound = h.Timestamp
+		rARgs.lowerbound.Forward(h.Timestamp)
+		rARgs.upperbound.Forward(h.Timestamp)
 	} else {
-		rARgs.lowerbound = lowerbound
-		rARgs.upperbound = hlc.MaxTimestamp
+		rARgs.lowerbound.Forward(lowerbound)
+		rARgs.upperbound.Forward(hlc.MaxTimestamp)
+
 	}
 
 	// Place txns of all the write locks
@@ -814,7 +818,7 @@ func pushSoftLocksOnReadToTxnRecord(
 	return nil
 }
 
-func pushSoftLocksOnWriteToTxnRecord(
+func pushUpdatesOnWriteToTxnRecord(
 	ctx context.Context,
 	s *Store,
 	batch engine.ReadWriter,
@@ -826,13 +830,17 @@ func pushSoftLocksOnWriteToTxnRecord(
 	wslocks []roachpb.WriteSoftLock,
 ) error {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi :pushSoftLocksOnWriteToTxnRecord ")
+		log.Infof(ctx, "Ravi :pushUpdatesOnWriteToTxnRecord ")
 	}
 	var rARgs RpcArgs
 	// Modify its Lower bound based on last committed write time stamp
-	// Temporarily
-	rARgs.lowerbound = r.applyDyTSCache(span, true /*read*/)
-	rARgs.upperbound = hlc.MaxTimestamp
+	lowerbound := r.applyDyTSCache(span, true /*read*/)
+	if log.V(2) {
+		log.Infof(ctx, "In Timstampcache : retrived last commited read %von span %v ", lowerbound, span)
+	}
+	// Forwards are used just to assign the values
+	rARgs.lowerbound.Forward(lowerbound)
+	rARgs.upperbound.Forward(hlc.MaxTimestamp)
 
 	// Place txns of all the write locks
 	for _, lock := range wslocks {
@@ -882,14 +890,14 @@ func validateCommitBefore(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In validateCommitBefore")
 	}
-	var upperBound hlc.Timestamp
+	upperBound := hlc.MaxTimestamp
 	var err error
 	if !transactionRecordExists(ctx, batch, othertxn.Key, *othertxn.ID) {
 		// Transaction is in different range so making a RPC call
 		upperBound, err = sendValidateCommitBeforeRPC(ctx, s, mytxnRecord.DynamicTimestampLowerBound, othertxn)
 	}
 
-	upperBound, err = executelocalValidateCommitBefore(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampLowerBound, othertxn)
+	upperBound, err = executelocalValidateCommitBefore(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampUpperBound, othertxn)
 
 	mytxnRecord.DynamicTimestampUpperBound.Backward(upperBound)
 
@@ -987,7 +995,7 @@ func validateCommitAfter(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In validateCommitAfter")
 	}
-	var lowerBound hlc.Timestamp
+	lowerBound := hlc.MinTimestamp
 	var err error
 	if !transactionRecordExists(ctx, batch, othertxn.Key, *othertxn.ID) {
 		// Transaction is in different range so making a RPC call
@@ -1145,7 +1153,7 @@ func makeDecision(
 		mytxnRecord.Status = roachpb.COMMITTED
 	}
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : In decision %v", mytxnRecord.Status)
+		log.Infof(ctx, "Ravi : In decision id %v, decision %v, timestamp %v", *mytxnRecord.ID, mytxnRecord.Status, mytxnRecord.OrigTimestamp)
 	}
 	return nil
 }

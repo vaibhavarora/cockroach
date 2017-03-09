@@ -243,6 +243,9 @@ func EvalDyTSValidateCommitAfter(
 
 	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
 
+	cArgs.Repl.txnlockcache.getAccess(key)
+	defer cArgs.Repl.txnlockcache.releaseAccess(key)
+
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
@@ -289,6 +292,9 @@ func EvalDyTSValidateCommitBefore(
 	args := cArgs.Args.(*roachpb.ValidateCommitBeforeRequest)
 
 	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
+
+	cArgs.Repl.txnlockcache.getAccess(key)
+	defer cArgs.Repl.txnlockcache.releaseAccess(key)
 
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
@@ -354,6 +360,9 @@ func EvalDyTSGcReadSoftLock(
 	args := cArgs.Args.(*roachpb.GCReadSoftockRequest)
 
 	if args.Txnrecord.Status == roachpb.COMMITTED {
+		if log.V(2) {
+			log.Infof(ctx, "In Timstampcache updating read %v for span %v", args.Txnrecord.OrigTimestamp, args.Span)
+		}
 		cArgs.Repl.updateDyTSCache(args.Span, true /*read*/, args.Txnrecord.OrigTimestamp)
 	}
 	ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, args.Txnrecord, args.Span, cArgs.Repl.slockcache, args.Reverse)
@@ -379,6 +388,9 @@ func EvalDyTSResolveWriteSoftLock(
 	args := cArgs.Args.(*roachpb.ResolveWriteSoftLocksRequest)
 	// Update the DyTs time stamp with latest commited timestamp
 	cArgs.Repl.updateDyTSCache(args.Span, false /*write*/, args.Txnrecord.OrigTimestamp)
+	if log.V(2) {
+		log.Infof(ctx, "In Timstampcache updating write %v for span %v", args.Txnrecord.OrigTimestamp, args.Span)
+	}
 	ok, err := engine.MVCCresolveWriteSoftLock(ctx, batch, cArgs.Stats, args.Span, args.Txnrecord.OrigTimestamp, &args.Txnrecord, cArgs.Repl.slockcache)
 	if err != nil {
 		return EvalResult{}, err
@@ -437,6 +449,9 @@ func (r *Replica) resolveLocalSoftLocks(
 				}
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, false /*write*/, *args.Deadline)
+				if log.V(2) {
+					log.Infof(ctx, "In Timstampcache updating write %v for span %v", *args.Deadline, span)
+				}
 				ok, err := engine.MVCCresolveWriteSoftLock(ctx, batch, resolveMS, span, txn.OrigTimestamp, txn, r.slockcache)
 				if !ok {
 					externalSoftWriteSpan = append(externalSoftWriteSpan, span)
@@ -454,6 +469,9 @@ func (r *Replica) resolveLocalSoftLocks(
 			if inSpan != nil {
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, false /*write*/, *args.Deadline)
+				if log.V(2) {
+					log.Infof(ctx, "In Timstampcache updating write %v for span %v", *args.Deadline, span)
+				}
 				ok, err := engine.MVCCresolveWriteSoftLock(ctx, batch, ms, span, txn.OrigTimestamp, txn, r.slockcache)
 				if !ok {
 					externalSoftWriteSpan = append(externalSoftWriteSpan, span)
@@ -483,6 +501,9 @@ func (r *Replica) resolveLocalSoftLocks(
 				}
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, true /*read*/, *args.Deadline)
+				if log.V(2) {
+					log.Infof(ctx, "In Timstampcache updating read %v for span %v", *args.Deadline, span)
+				}
 				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache, false)
 				if !ok {
 					externalSoftReadSpan = append(externalSoftReadSpan, span)
@@ -499,6 +520,9 @@ func (r *Replica) resolveLocalSoftLocks(
 			if inSpan != nil {
 				// Update the DyTs time stamp with latest commited timestamp
 				r.updateDyTSCache(span, true /*read*/, *args.Deadline)
+				if log.V(2) {
+					log.Infof(ctx, "In Timstampcache updating read %v for span %v", *args.Deadline, span)
+				}
 				ok, err := engine.MVCCRemoveReadSoftLock(ctx, batch, *txn, span, r.slockcache, false)
 				if !ok {
 					externalSoftReadSpan = append(externalSoftReadSpan, span)

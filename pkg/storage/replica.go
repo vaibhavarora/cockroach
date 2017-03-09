@@ -1746,6 +1746,12 @@ func (r *Replica) beginCmds(ctx context.Context, ba *roachpb.BatchRequest) (*end
 // will inform the batch response timestamp or batch response txn
 // timestamp.
 func (r *Replica) applyTimestampCache(ba *roachpb.BatchRequest) (bumped bool, _ *roachpb.Error) {
+	// Bypassing this function due to dynamic timestamping
+
+	if ba.Txn != nil {
+		return false, nil
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1864,7 +1870,8 @@ func (r *Replica) updateDyTSCache(
 	}
 
 	r.mu.Lock()
-	r.mu.tsCache.AddRequest(cr)
+	r.mu.dyTSCache.AddRequest(cr)
+	r.mu.dyTSCache.ExpandRequests(ts)
 	r.mu.Unlock()
 
 }
@@ -1973,13 +1980,12 @@ func (r *Replica) addReadOnlyCmd(
 			r.readOnlyCmdMu.RUnlock()
 
 			if pErr == nil {
-				br, _ = r.handleEndTransaction(ctx, ba, br)
+				br, pErr = r.handleEndTransaction(ctx, ba, br)
 			}
 		}
 
 	}()
-	// placing soft locks
-	//r.dynamicTimeStamper.processDynamicTimestamping(ctx, &ba)
+
 	r.mu.Lock()
 	err := r.mu.destroyed
 	r.mu.Unlock()
@@ -2020,16 +2026,21 @@ func (r *Replica) addReadOnlyCmd(
 func (r *Replica) handleEndTransaction(
 	ctx context.Context,
 	ba roachpb.BatchRequest,
-	br *roachpb.BatchResponse) (*roachpb.BatchResponse, error) {
-
+	br *roachpb.BatchResponse) (*roachpb.BatchResponse, *roachpb.Error) {
+	var pErr *roachpb.Error
 	for index, union := range ba.Requests {
 		args := union.GetInner()
 		reply := br.Responses[index].GetInner()
 		if ba.Txn != nil && args.Method() == roachpb.EndTransaction {
-			r.ProcessDyTSEndTransaction(ctx, args, r.store.Engine(), ba.Header, reply)
+			err := r.ProcessDyTSEndTransaction(ctx, args, r.store.Engine(), ba.Header, reply)
+			if err != nil {
+				txn := reply.Header().Txn
+				pErr = roachpb.NewErrorWithTxn(err, txn)
+			}
 		}
 	}
-	return br, nil
+
+	return br, pErr
 }
 
 // TODO(tschottdorf): temporary assertion for #5725, which saw batches with
