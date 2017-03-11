@@ -36,7 +36,7 @@ func (r *Replica) ProcessDyTSEndTransaction(
 
 	if args.Commit {
 		if reply.Txn.Status == roachpb.ABORTED {
-			return roachpb.NewTransactionRetryError()
+			return roachpb.NewTransactionAbortedError()
 		}
 	}
 

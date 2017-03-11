@@ -689,10 +689,14 @@ func updateLocalTransactionRecord(
 		log.Infof(ctx, "Ravi : In updateLocalTransactionRecord")
 	}
 	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In getting access to tnx Id %v", *h.Txn.ID)
+	}
 	txncache.getAccess(key)
 	defer txncache.releaseAccess(key)
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : got access to tnx Id %v", *h.Txn.ID)
+	}
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
@@ -761,16 +765,16 @@ func sendUpdateTransactionRecordRPC(
 
 	if err := s.db.Run(ctx, b); err != nil {
 		_ = b.MustPErr()
-	} else {
+	}
 
-		br := b.RawResponse()
-		for _, res := range br.Responses {
-			r := res.GetInner().(*roachpb.UpdateTransactionRecordResponse)
-			if log.V(2) {
-				log.Infof(ctx, "updateTransactionrecord recieved response : %v", r)
-			}
+	br := b.RawResponse()
+	for _, res := range br.Responses {
+		r := res.GetInner().(*roachpb.UpdateTransactionRecordResponse)
+		if log.V(2) {
+			log.Infof(ctx, "updateTransactionrecord recieved response : %v", r)
 		}
 	}
+
 	return nil
 }
 
@@ -932,16 +936,15 @@ func sendValidateCommitBeforeRPC(
 
 	if err := s.db.Run(ctx, b); err != nil {
 		_ = b.MustPErr()
-	} else {
+	}
 
-		br := b.RawResponse()
-		for _, res := range br.Responses {
-			ub := res.GetInner().(*roachpb.ValidateCommitBeforeResponse).UpperBound
-			if log.V(2) {
-				log.Infof(ctx, "updateTransactionrecord recieved response : %v", *ub)
-			}
-			upperBound = *ub
+	br := b.RawResponse()
+	for _, res := range br.Responses {
+		ub := res.GetInner().(*roachpb.ValidateCommitBeforeResponse).UpperBound
+		if log.V(2) {
+			log.Infof(ctx, "updateTransactionrecord recieved response : %v", *ub)
 		}
+		upperBound = *ub
 	}
 
 	return upperBound, nil
@@ -956,13 +959,18 @@ func executelocalValidateCommitBefore(
 	txn enginepb.TxnMeta,
 ) (hlc.Timestamp, error) {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : In executelocalValidateCommitBefore")
+		log.Infof(ctx, "Ravi :VCB In executelocalValidateCommitBefore")
 	}
 	key := keys.TransactionKey(txn.Key, *txn.ID)
 
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :VCB In getting access to tnx Id %v", *txn.ID)
+	}
 	txncache.getAccess(key)
 	defer txncache.releaseAccess(key)
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : got access to tnx Id %v", *txn.ID)
+	}
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
@@ -1036,16 +1044,15 @@ func sendValidateCommitAfterRPC(
 
 	if err := s.db.Run(ctx, b); err != nil {
 		_ = b.MustPErr()
-	} else {
+	}
 
-		br := b.RawResponse()
-		for _, res := range br.Responses {
-			lb := res.GetInner().(*roachpb.ValidateCommitAfterResponse).LowerBound
-			if log.V(2) {
-				log.Infof(ctx, "updateTransactionrecord recieved response : %v", *lb)
-			}
-			lowerBound = *lb
+	br := b.RawResponse()
+	for _, res := range br.Responses {
+		lb := res.GetInner().(*roachpb.ValidateCommitAfterResponse).LowerBound
+		if log.V(2) {
+			log.Infof(ctx, "updateTransactionrecord recieved response : %v", *lb)
 		}
+		lowerBound = *lb
 	}
 
 	return lowerBound, nil
@@ -1063,10 +1070,15 @@ func executelocalValidateCommitAfter(
 		log.Infof(ctx, "Ravi : In executelocalValidateCommitAfter")
 	}
 	key := keys.TransactionKey(txn.Key, *txn.ID)
-
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : VCA In getting access to tnx Id %v", *txn.ID)
+	}
 	txncache.getAccess(key)
 	defer txncache.releaseAccess(key)
 
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :VCA  got access to tnx Id %v", *txn.ID)
+	}
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
@@ -1170,10 +1182,16 @@ func executeLocalValidator(
 		log.Infof(ctx, "Ravi : In executeLocalValidator")
 	}
 	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In getting access to tnx Id %v", *h.Txn.ID)
+	}
 
 	txncache.getAccess(key)
 	defer txncache.releaseAccess(key)
 
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : Got access to tnx Id %v", *h.Txn.ID)
+	}
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,

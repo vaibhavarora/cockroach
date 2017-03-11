@@ -40,9 +40,9 @@ const systemAccountID = 0
 const initialBalance = 1000
 
 var maxTransfer = flag.Int("max-transfer", 100, "Maximum amount to transfer in one transaction.")
-var numTransfers = flag.Int("num-transfers", 5000, "Number of transfers (0 to continue indefinitely).")
-var numAccounts = flag.Int("num-accounts", 10000, "Number of accounts.")
-var concurrency = flag.Int("concurrency", 16, "Number of concurrent actors moving money.")
+var numTransfers = flag.Int("num-transfers", 10, "Number of transfers (0 to continue indefinitely).")
+var numAccounts = flag.Int("num-accounts", 3, "Number of accounts.")
+var concurrency = flag.Int("concurrency", 10, "Number of concurrent actors moving money.")
 var contention = flag.String("contention", "low", "Contention model {low | high}.")
 var balanceCheckInterval = flag.Duration("balance-check-interval", time.Second, "Interval of balance check.")
 var contentionratio = flag.String("contention-ratio", "50:50", "AccountPercentage:Contention percentage")
@@ -58,6 +58,7 @@ var contentionAccounts int
 var contentionPercentage int
 
 var warmupcounts int32
+var id int32
 
 type measurement struct {
 	read, write, total, totalWithRetries, commit int64
@@ -115,6 +116,8 @@ func warm_up_tnxs(db *sql.DB, number_of_tnx int32) {
 }
 
 func moveMoney(db *sql.DB, aggr *measurement) {
+	log.Printf("In move Money")
+
 	useSystemAccount := *contention == "high"
 	for !transfersComplete() {
 		var readDuration, writeDuration time.Duration
@@ -136,7 +139,8 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 				to = systemAccountID
 			}
 		}
-		amount := rand.Intn(*maxTransfer)
+		//amount := rand.Intn(*maxTransfer)
+		amount := 10
 		start := time.Now()
 		startTransaction := time.Now()
 		attempts := 0
@@ -144,9 +148,16 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 
 		if err, committimetaken := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
 			attempts++
+			var localid int32
+			if attempts == 1 {
+				localid = atomic.LoadInt32(&id)
+				atomic.AddInt32(&id, 1)
 
+			}
+
+			log.Printf("Transaction")
 			if attempts > 1 {
-				//log.Printf("retry attempt %d for tnx %v", attempts, tx)
+				log.Printf("Transaction retry id %v", localid)
 				atomic.AddInt32(&aggr.retries, 1)
 				startTransaction = time.Now()
 			}
@@ -162,7 +173,7 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 			for rows.Next() {
 				var id, balance int
 				if err = rows.Scan(&id, &balance); err != nil {
-					log.Printf("here is th error")
+					log.Printf("here is the error")
 					log.Fatal(err)
 				}
 				switch id {
@@ -178,7 +189,8 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 			if fromBalance < amount {
 				return nil
 			}
-
+			log.Printf("tx %v : Before update: From Account %v, balance %v", localid, from, fromBalance)
+			log.Printf("tx %v : Before update: To Account %v, balance %v", localid, to, toBalance)
 			update := `UPDATE account SET balance = $1 WHERE id = $2;`
 			if _, err = tx.Exec(update, toBalance+amount, to); err != nil {
 				//atomic.AddInt32(&aggr.aborts, 1)
@@ -190,6 +202,8 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 				//log.Printf("write error %v, tnx %v", err, tx)
 				return err
 			}
+			log.Printf("tx %v : After update: From Account %v, balance %v", localid, from, fromBalance-amount)
+			log.Printf("tx %v : After update: To Account %v, balance %v", localid, to, toBalance+amount)
 			writeDuration = time.Since(startWrite)
 			return nil
 		}); err != nil {
@@ -197,8 +211,10 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 
 			continue
 		} else {
+			log.Printf("transaction successful")
 			atomic.AddInt64(&commitDuration, committimetaken)
 		}
+
 		atomic.AddInt32(&successCount, 1)
 		if fromBalance >= amount {
 			atomic.AddInt64(&aggr.read, readDuration.Nanoseconds())
@@ -211,6 +227,7 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 }
 
 func verifyTotalBalance(db *sql.DB) {
+	log.Printf("Verifying Balance")
 	var sum int
 	if err := db.QueryRow("SELECT SUM(balance) FROM account").Scan(&sum); err != nil {
 		log.Fatal(err)
@@ -352,6 +369,7 @@ CREATE TABLE IF NOT EXISTS account (
 	lastTime := start
 	lastretries := time.Duration(0)
 	totaltime := time.Duration(0)
+
 	for range time.NewTicker(*balanceCheckInterval).C {
 		now := time.Now()
 		elapsed := now.Sub(lastTime)
@@ -386,6 +404,8 @@ CREATE TABLE IF NOT EXISTS account (
 			break
 		}
 	}
+
+	verifyTotalBalance(db)
 	log.Printf("completed %d transfers in %s with %d retries", atomic.LoadInt32(&successCount),
 		time.Since(start), atomic.LoadInt32(&aggr.retries))
 

@@ -2,21 +2,17 @@ package main
 
 import (
 	"fmt"
+	//"time"
 )
 
-
-func main() {
-
-   fmt.Println(example()) 
+func passtime() (*int, bool) {
+	return nil, true
 }
 
-func example() (a int) {
-
-    defer func() {
-        a = 5
-    }()
-
-    a = 3
-
-    return a
+func main() {
+	if err, ok := passtime(); err != nil {
+		fmt.Print("error")
+	} else if ok {
+		fmt.Print("fine")
+	}
 }

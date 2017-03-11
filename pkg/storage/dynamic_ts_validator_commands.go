@@ -177,6 +177,7 @@ func EvalDyTSValidatorEndTransaction(
 	if log.V(2) {
 		log.Infof(ctx, "EvalDyTSValidatorEndTransaction : found transaction record in this range")
 	}
+	
 	if args.Commit {
 		txnRecord.DynamicTimestampLowerBound = *args.Deadline
 		txnRecord.DynamicTimestampUpperBound = *args.Deadline

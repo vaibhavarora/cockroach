@@ -2111,7 +2111,7 @@ func MVCCresolveWriteSoftLock(
 	wslock, ok := slcache.getWriteSoftLock(span.Key, *txn.ID)
 	if !ok {
 		if log.V(2) {
-			log.Infof(ctx, "Couldnt retrive write lock %v", span.Key)
+			log.Infof(ctx, "Couldnt retrive write lock %v, id %v", span.Key, *txn.ID)
 		}
 		return false, nil
 	}
@@ -2151,7 +2151,7 @@ func MVCCRemoveWriteSoftLock(
 		wslock, ok := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
 		if !ok {
 			if log.V(2) {
-				log.Infof(ctx, "Coudnt retrive write lock")
+				log.Infof(ctx, "Coudnt retrive write lock %v", *txnrcd.ID)
 			}
 			return false, nil
 		}
@@ -2162,7 +2162,7 @@ func MVCCRemoveWriteSoftLock(
 		wslock, ok := slcache.getWriteSoftLock(span.Key, *txnrcd.ID)
 		if !ok {
 			if log.V(2) {
-				log.Infof(ctx, "Coudnt retrive write lock")
+				log.Infof(ctx, "Coudnt retrive write lock %v", *txnrcd.ID)
 			}
 			return false, nil
 		}
@@ -2175,7 +2175,7 @@ func MVCCRemoveWriteSoftLock(
 			wslock, ok := slcache.getWriteSoftLock(key, *txnrcd.ID)
 			if !ok {
 				if log.V(2) {
-					log.Infof(ctx, "Coudnt retrive any lock")
+					log.Infof(ctx, "Coudnt retrive write lock %v", *txnrcd.ID)
 				}
 				return false, nil
 			}
@@ -2206,7 +2206,7 @@ func MVCCRemoveReadSoftLock(
 		rslock, ok := slcache.getReadSoftLock(span.Key, *txnrcd.ID)
 		if !ok {
 			if log.V(2) {
-				log.Infof(ctx, "Ravi : Couldnt retrive any read lock for the key")
+				log.Infof(ctx, "Ravi : Couldnt retrive read lock %v ", *txnrcd.ID)
 			}
 			return false, nil
 		}
@@ -2222,7 +2222,7 @@ func MVCCRemoveReadSoftLock(
 			rslock, ok := slcache.getReadSoftLock(key, *txnrcd.ID)
 			if !ok {
 				if log.V(2) {
-					log.Infof(ctx, "Ravi : Couldnt retrive any read lock for the key %v", key)
+					log.Infof(ctx, "Ravi : Couldnt retrive read lock for the key %v, id %v", key, *txnrcd.ID)
 				}
 				return false, nil
 			}

@@ -73,6 +73,7 @@ func NewTxn(ctx context.Context, db DB) *Txn {
 // Note that Commit() always leaves the transaction finalized, since it attempts
 // to rollback on error.
 func (txn *Txn) IsFinalized() bool {
+
 	return txn.finalized
 }
 
@@ -399,10 +400,13 @@ func (txn *Txn) GetDeadline() *hlc.Timestamp {
 // The txn's status is set to ABORTED in case of error. txn is
 // considered finalized and cannot be used to send any more commands.
 func (txn *Txn) Rollback() error {
+	if log.V(2) {
+		log.Infof(txn.Context, "Calling Rollback")
+	}
 	log.VEventf(txn.Context, 2, "rolling back transaction")
-	err := txn.sendEndTxnReq(false /* commit */, nil)
+	//err := txn.sendEndTxnReq(false /* commit */, nil)
 	txn.finalized = true
-	return err
+	return nil
 }
 
 // AddCommitTrigger adds a closure to be executed on successful commit
@@ -652,7 +656,7 @@ func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.
 
 	if txn.Proto.Status != roachpb.PENDING || txn.IsFinalized() {
 		return nil, roachpb.NewErrorf(
-			"attempting to use transaction with wrong status or finalized: %s", txn.Proto.Status)
+			"attempting to use transaction with wrong status or finalized: %s, ba %v", txn.Proto.Status, ba)
 	}
 
 	// It doesn't make sense to use inconsistent reads in a transaction. However,
