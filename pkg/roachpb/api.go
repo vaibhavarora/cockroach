@@ -25,6 +25,10 @@ import (
 	"github.com/gogo/protobuf/proto"
 )
 
+func GetMaxTxnRetries() int {
+	return envutil.EnvOrDefaultInt("COCKROACH_MAX_TXN_RETRIES", 3)
+}
+
 func GetLHFallbackProb() float64 {
 	return envutil.EnvOrDefaultFloat("COCKROACH_LHFALLBACK_PROB", 0)
 }

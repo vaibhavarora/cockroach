@@ -504,7 +504,10 @@ func (txn *Txn) Exec(opt TxnExecOptions, fn func(txn *Txn, opt *TxnExecOptions) 
 		retryOptions = txn.db.ctx.TxnRetryOptions
 	}
 
+	totalTries := 0
 	for r := retry.Start(retryOptions); r.Next(); {
+		totalTries++
+
 		if txn != nil {
 			// If we're looking at a brand new transaction, then communicate
 			// what should be used as initial timestamp for the KV txn created
@@ -556,6 +559,10 @@ func (txn *Txn) Exec(opt TxnExecOptions, fn func(txn *Txn, opt *TxnExecOptions) 
 			}
 		}
 		txn.commitTriggers = nil
+
+		if totalTries > roachpb.GetMaxTxnRetries() {
+			break
+		}
 
 		log.VEventf(txn.Context, 2, "automatically retrying transaction: %s because of error: %s",
 			txn.DebugName(), err)
