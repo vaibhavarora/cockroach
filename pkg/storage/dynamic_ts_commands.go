@@ -692,7 +692,10 @@ func updateLocalTransactionRecord(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In getting access to tnx Id %v", *h.Txn.ID)
 	}
-	txncache.getAccess(key)
+	if !txncache.getAccess(key, false /*wait until you get lock*/) {
+
+		// should never be this case
+	}
 	defer txncache.releaseAccess(key)
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : got access to tnx Id %v", *h.Txn.ID)
@@ -765,6 +768,7 @@ func sendUpdateTransactionRecordRPC(
 
 	if err := s.db.Run(ctx, b); err != nil {
 		_ = b.MustPErr()
+		return err
 	}
 
 	br := b.RawResponse()
@@ -898,14 +902,18 @@ func validateCommitBefore(
 	var err error
 	if !transactionRecordExists(ctx, batch, othertxn.Key, *othertxn.ID) {
 		// Transaction is in different range so making a RPC call
-		upperBound, err = sendValidateCommitBeforeRPC(ctx, s, mytxnRecord.DynamicTimestampLowerBound, othertxn)
+		if upperBound, err = sendValidateCommitBeforeRPC(ctx, s, mytxnRecord.DynamicTimestampLowerBound, othertxn); err != nil {
+			return err
+		}
 	}
 
-	upperBound, err = executelocalValidateCommitBefore(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampUpperBound, othertxn)
+	if upperBound, err = executelocalValidateCommitBefore(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampUpperBound, othertxn); err != nil {
+		return err
+	}
 
 	mytxnRecord.DynamicTimestampUpperBound.Backward(upperBound)
 
-	return err
+	return nil
 }
 
 func sendValidateCommitBeforeRPC(
@@ -936,6 +944,7 @@ func sendValidateCommitBeforeRPC(
 
 	if err := s.db.Run(ctx, b); err != nil {
 		_ = b.MustPErr()
+		return upperBound, err
 	}
 
 	br := b.RawResponse()
@@ -966,7 +975,9 @@ func executelocalValidateCommitBefore(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :VCB In getting access to tnx Id %v", *txn.ID)
 	}
-	txncache.getAccess(key)
+	if !txncache.getAccess(key, true /*timed wait*/) {
+		return upperBound, roachpb.NewTransactionAbortedError()
+	}
 	defer txncache.releaseAccess(key)
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : got access to tnx Id %v", *txn.ID)
@@ -978,9 +989,15 @@ func executelocalValidateCommitBefore(
 		return hlc.MaxTimestamp, err
 	} else if ok {
 		// Update the Transaction record
-		if txnRecord.Status == roachpb.PENDING && !upperBound.Equal(hlc.MaxTimestamp) {
-			txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
-		} else {
+		switch txnRecord.Status {
+		case roachpb.ABORTED:
+		case roachpb.PENDING:
+			if upperBound.Equal(hlc.MaxTimestamp) {
+				upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+			} else {
+				txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+			}
+		case roachpb.COMMITTED:
 			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
 		}
 
@@ -1073,7 +1090,9 @@ func executelocalValidateCommitAfter(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : VCA In getting access to tnx Id %v", *txn.ID)
 	}
-	txncache.getAccess(key)
+	if !txncache.getAccess(key, true /*timed wait*/) {
+		return lowerBound, roachpb.NewTransactionAbortedError()
+	}
 	defer txncache.releaseAccess(key)
 
 	if log.V(2) {
@@ -1088,12 +1107,19 @@ func executelocalValidateCommitAfter(
 		// should never be this case
 		return hlc.ZeroTimestamp, roachpb.NewTransactionStatusError("does not exist")
 	}
-	// Update the Transaction record
-	if txnRecord.Status == roachpb.PENDING && !txnRecord.DynamicTimestampLowerBound.Equal(hlc.MaxTimestamp) {
-		txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
-	} else {
+
+	switch txnRecord.Status {
+	case roachpb.ABORTED:
+	case roachpb.PENDING:
+		if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
+			txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
+		} else {
+			lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+		}
+	case roachpb.COMMITTED:
 		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 	}
+
 	// Save the updated Transaction record
 	err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
 
@@ -1170,6 +1196,22 @@ func makeDecision(
 	return nil
 }
 
+func markAsAbort(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	key roachpb.Key,
+	mytxnRecord *roachpb.Transaction,
+) error {
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : In decideAsAbort")
+	}
+	mytxnRecord.Status = roachpb.ABORTED
+
+	if err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, mytxnRecord); err != nil {
+		return err
+	}
+	return nil
+}
 func executeLocalValidator(
 	ctx context.Context,
 	s *Store,
@@ -1181,28 +1223,40 @@ func executeLocalValidator(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In executeLocalValidator")
 	}
+	var txnRecord roachpb.Transaction
 	key := keys.TransactionKey(h.Txn.Key, *h.Txn.ID)
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In getting access to tnx Id %v", *h.Txn.ID)
 	}
 
-	txncache.getAccess(key)
+	if !txncache.getAccess(key, true /*timed wait*/) {
+		if err := markAsAbort(ctx, batch, key, &txnRecord); err != nil {
+			return txnRecord, err
+		}
+		return txnRecord, nil
+	}
 	defer txncache.releaseAccess(key)
 
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : Got access to tnx Id %v", *h.Txn.ID)
 	}
-	var txnRecord roachpb.Transaction
+
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
 	); err != nil {
 		return txnRecord, err
 	} else if ok {
 		if err := manageCommitBeforeQueue(ctx, s, batch, txncache, &txnRecord); err != nil {
-			return txnRecord, err
+			if err = markAsAbort(ctx, batch, key, &txnRecord); err != nil {
+				return txnRecord, err
+			}
+			return txnRecord, nil
 		}
 		if err := manageCommitAfterQueue(ctx, s, batch, txncache, &txnRecord); err != nil {
-			return txnRecord, err
+			if err = markAsAbort(ctx, batch, key, &txnRecord); err != nil {
+				return txnRecord, err
+			}
+			return txnRecord, nil
 		}
 		if err := makeDecision(ctx, &txnRecord); err != nil {
 			return txnRecord, err

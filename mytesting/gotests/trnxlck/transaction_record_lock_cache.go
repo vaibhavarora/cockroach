@@ -1,10 +1,12 @@
 package main
 
 import (
-	"fmt"
+	//"fmt"
+	//deadlock "github.com/cockroachdb/cockroach/mytesting/gotests/trnxlck/deadlock"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"reflect"
+	//"time"
 	"unsafe"
 )
 
@@ -18,7 +20,7 @@ type TransactionRecordLockCache struct {
 }
 
 type TransactionRecordMutex struct {
-	syncutil.Mutex
+	*DyTSMutex
 }
 
 func (t *TransactionRecordLockCache) getMutex(k roachpb.Key) *TransactionRecordMutex {
@@ -32,16 +34,15 @@ func (t *TransactionRecordLockCache) getMutex(k roachpb.Key) *TransactionRecordM
 	return t.CacheMu.Cache[ikey]
 }
 
-func (t *TransactionRecordLockCache) getAccess(k roachpb.Key) {
+func (t *TransactionRecordLockCache) getAccess(k roachpb.Key) bool {
 
 	mutex := t.getMutex(k)
-	mutex.Lock()
-	fmt.Println("Granted access to ", k)
+	return mutex.Lock()
+
 }
 
 func (t *TransactionRecordLockCache) releaseAccess(k roachpb.Key) {
 	mutex := t.getMutex(k)
-	fmt.Println("Access released by ", k)
 	mutex.Unlock()
 }
 
@@ -53,7 +54,9 @@ func ToInternalKey(b []byte) Key {
 }
 
 func NewTransactionRecordMutex() *TransactionRecordMutex {
-	return &TransactionRecordMutex{}
+	t := TransactionRecordMutex{}
+	t.DyTSMutex = NewDyTSMutex()
+	return &t
 }
 
 func NewTransactionRecordLockCache() *TransactionRecordLockCache {

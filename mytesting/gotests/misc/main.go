@@ -5,14 +5,14 @@ import (
 	//"time"
 )
 
-func passtime() (*int, bool) {
-	return nil, true
-}
-
 func main() {
-	if err, ok := passtime(); err != nil {
-		fmt.Print("error")
-	} else if ok {
-		fmt.Print("fine")
+	a := 1
+	switch a {
+	case 0:
+	case 1:
+		fmt.Println("1")
+	case 2:
+		fmt.Println("2")
 	}
+
 }

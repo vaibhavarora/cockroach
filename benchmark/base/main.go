@@ -42,7 +42,7 @@ const initialBalance = 1000
 var maxTransfer = flag.Int("max-transfer", 100, "Maximum amount to transfer in one transaction.")
 var numTransfers = flag.Int("num-transfers", 10, "Number of transfers (0 to continue indefinitely).")
 var numAccounts = flag.Int("num-accounts", 3, "Number of accounts.")
-var concurrency = flag.Int("concurrency", 10, "Number of concurrent actors moving money.")
+var concurrency = flag.Int("concurrency", 4, "Number of concurrent actors moving money.")
 var contention = flag.String("contention", "low", "Contention model {low | high}.")
 var balanceCheckInterval = flag.Duration("balance-check-interval", time.Second, "Interval of balance check.")
 var contentionratio = flag.String("contention-ratio", "50:50", "AccountPercentage:Contention percentage")
@@ -148,16 +148,16 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 
 		if err, committimetaken := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
 			attempts++
-			var localid int32
+			//			var localid int32
 			if attempts == 1 {
-				localid = atomic.LoadInt32(&id)
-				atomic.AddInt32(&id, 1)
+				//				localid = atomic.LoadInt32(&id)
+				//				atomic.AddInt32(&id, 1)
 
 			}
 
-			log.Printf("Transaction")
+			//log.Printf("Transaction")
 			if attempts > 1 {
-				log.Printf("Transaction retry id %v", localid)
+				//	log.Printf("Transaction retry id %v", localid)
 				atomic.AddInt32(&aggr.retries, 1)
 				startTransaction = time.Now()
 			}
@@ -189,8 +189,8 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 			if fromBalance < amount {
 				return nil
 			}
-			log.Printf("tx %v : Before update: From Account %v, balance %v", localid, from, fromBalance)
-			log.Printf("tx %v : Before update: To Account %v, balance %v", localid, to, toBalance)
+			//	log.Printf("tx %v : Before update: From Account %v, balance %v", localid, from, fromBalance)
+			//	log.Printf("tx %v : Before update: To Account %v, balance %v", localid, to, toBalance)
 			update := `UPDATE account SET balance = $1 WHERE id = $2;`
 			if _, err = tx.Exec(update, toBalance+amount, to); err != nil {
 				//atomic.AddInt32(&aggr.aborts, 1)
@@ -202,8 +202,8 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 				//log.Printf("write error %v, tnx %v", err, tx)
 				return err
 			}
-			log.Printf("tx %v : After update: From Account %v, balance %v", localid, from, fromBalance-amount)
-			log.Printf("tx %v : After update: To Account %v, balance %v", localid, to, toBalance+amount)
+			//	log.Printf("tx %v : After update: From Account %v, balance %v", localid, from, fromBalance-amount)
+			//	log.Printf("tx %v : After update: To Account %v, balance %v", localid, to, toBalance+amount)
 			writeDuration = time.Since(startWrite)
 			return nil
 		}); err != nil {
@@ -211,7 +211,7 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 
 			continue
 		} else {
-			log.Printf("transaction successful")
+			//log.Printf("transaction successful")
 			atomic.AddInt64(&commitDuration, committimetaken)
 		}
 
@@ -357,7 +357,7 @@ CREATE TABLE IF NOT EXISTS account (
 			// waiting for warming up to finish
 		}
 	}
-	verifyTotalBalance(db)
+	//verifyTotalBalance(db)
 
 	var aggr measurement
 	var lastSuccesses int32
@@ -399,7 +399,7 @@ CREATE TABLE IF NOT EXISTS account (
 
 		lastretries = retries
 
-		verifyTotalBalance(db)
+		//verifyTotalBalance(db)
 		if transfersComplete() {
 			break
 		}

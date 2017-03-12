@@ -177,7 +177,7 @@ func EvalDyTSValidatorEndTransaction(
 	if log.V(2) {
 		log.Infof(ctx, "EvalDyTSValidatorEndTransaction : found transaction record in this range")
 	}
-	
+
 	if args.Commit {
 		txnRecord.DynamicTimestampLowerBound = *args.Deadline
 		txnRecord.DynamicTimestampUpperBound = *args.Deadline
@@ -244,7 +244,9 @@ func EvalDyTSValidateCommitAfter(
 
 	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
 
-	cArgs.Repl.txnlockcache.getAccess(key)
+	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
+		return EvalResult{}, roachpb.NewTransactionAbortedError()
+	}
 	defer cArgs.Repl.txnlockcache.releaseAccess(key)
 
 	var txnRecord roachpb.Transaction
@@ -263,9 +265,15 @@ func EvalDyTSValidateCommitAfter(
 	}
 	lowerBound := *args.LowerBound
 	// Update the Transaction record
-	if txnRecord.Status == roachpb.PENDING && !txnRecord.DynamicTimestampLowerBound.Equal(hlc.MaxTimestamp) {
-		txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
-	} else {
+	switch txnRecord.Status {
+	case roachpb.ABORTED:
+	case roachpb.PENDING:
+		if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
+			txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
+		} else {
+			lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+		}
+	case roachpb.COMMITTED:
 		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 	}
 
@@ -294,7 +302,9 @@ func EvalDyTSValidateCommitBefore(
 
 	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
 
-	cArgs.Repl.txnlockcache.getAccess(key)
+	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
+		return EvalResult{}, roachpb.NewTransactionAbortedError()
+	}
 	defer cArgs.Repl.txnlockcache.releaseAccess(key)
 
 	var txnRecord roachpb.Transaction
@@ -314,10 +324,15 @@ func EvalDyTSValidateCommitBefore(
 	// Update the Transaction record
 	upperBound := *args.UpperBound
 
-	// Update the Transaction record
-	if txnRecord.Status == roachpb.PENDING && !upperBound.Equal(hlc.MaxTimestamp) {
-		txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
-	} else {
+	switch txnRecord.Status {
+	case roachpb.ABORTED:
+	case roachpb.PENDING:
+		if upperBound.Equal(hlc.MaxTimestamp) {
+			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+		} else {
+			txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+		}
+	case roachpb.COMMITTED:
 		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
 	}
 
