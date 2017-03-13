@@ -1204,7 +1204,7 @@ func markAsAbort(
 	mytxnRecord *roachpb.Transaction,
 ) error {
 	if log.V(2) {
-		log.Infof(ctx, "Ravi : In decideAsAbort")
+		log.Infof(ctx, "Ravi : In markAsAbort")
 	}
 	mytxnRecord.Status = roachpb.ABORTED
 
@@ -1230,7 +1230,7 @@ func executeLocalValidator(
 		log.Infof(ctx, "Ravi : In getting access to tnx Id %v", *h.Txn.ID)
 	}
 
-	if !txncache.getAccess(key, true /*timed wait*/) {
+	if !txncache.getAccess(key, false /*wait until you get*/) {
 		if err := markAsAbort(ctx, batch, key, &txnRecord); err != nil {
 			return txnRecord, err
 		}

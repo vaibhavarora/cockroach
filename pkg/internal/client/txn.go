@@ -400,9 +400,9 @@ func (txn *Txn) GetDeadline() *hlc.Timestamp {
 // The txn's status is set to ABORTED in case of error. txn is
 // considered finalized and cannot be used to send any more commands.
 func (txn *Txn) Rollback() error {
-	if log.V(2) {
+	/*if log.V(2) {
 		log.Infof(txn.Context, "Calling Rollback")
-	}
+	}*/
 	log.VEventf(txn.Context, 2, "rolling back transaction")
 	var err error
 	if !txn.IsFinalized() {
@@ -660,7 +660,7 @@ func (txn *Txn) send(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.
 
 	if txn.Proto.Status != roachpb.PENDING || txn.IsFinalized() {
 		return nil, roachpb.NewErrorf(
-			"attempting to use transaction with wrong status or finalized: %s, ba %v", txn.Proto.Status, ba)
+			"attempting to use transaction with wrong status or finalized: %s", txn.Proto.Status)
 	}
 
 	// It doesn't make sense to use inconsistent reads in a transaction. However,

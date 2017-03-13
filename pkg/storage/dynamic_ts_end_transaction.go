@@ -84,6 +84,7 @@ func sendDyTSEndTranactionRPC(
 
 	if err := s.db.Run(ctx, b); err != nil {
 		_ = b.MustPErr()
+		return err
 	}
 	br := b.RawResponse()
 

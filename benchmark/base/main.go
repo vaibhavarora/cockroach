@@ -390,6 +390,9 @@ CREATE TABLE IF NOT EXISTS account (
 		//aborts := time.Duration(atomic.LoadInt32(&aggr.aborts))
 		retries := time.Duration(atomic.LoadInt32(&aggr.retries))
 		commit := time.Duration(atomic.LoadInt64(&aggr.commit))
+		if d == 0 {
+			d = 1
+		}
 		log.Printf("Average time taken for read: %v", read/d)
 		log.Printf("Average time taken for write: %v", write/d)
 		log.Printf("Average time taken for commit: %v", commit/d)
