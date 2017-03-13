@@ -45,13 +45,14 @@ type AmbiguousCommitError struct {
 //
 // NOTE: the supplied exec closure should not have external side
 // effects beyond changes to the database.
-func ExecuteTx(db *sql.DB, fn func(*sql.Tx) error) (err error, commitduration int64) {
+func ExecuteTx(db *sql.DB, fn func(*sql.Tx) error) (
+	err error, commitduration int64, tid int32) {
 	// Start a transaction.
 	var tx *sql.Tx
 	tx, err = db.Begin()
 	if err != nil {
 		fmt.Println("error on begin()")
-		return err, 0
+		return err, 0, -1
 	}
 
 	defer func() {
@@ -69,12 +70,12 @@ func ExecuteTx(db *sql.DB, fn func(*sql.Tx) error) (err error, commitduration in
 	// Specify that we intend to retry this txn in case of CockroachDB retryable
 	// errors.
 	if _, err = tx.Exec("SAVEPOINT cockroach_restart"); err != nil {
-		return err, 0
+		return err, 0, -1
 	}
 
 	for {
 		released := false
-		err = fn(tx)
+		err, tid = fn(tx)
 		if err == nil {
 			// RELEASE acts like COMMIT in CockroachDB. We use it since it gives us an
 			// opportunity to react to retryable errors, whereas tx.Commit() doesn't.
@@ -82,7 +83,7 @@ func ExecuteTx(db *sql.DB, fn func(*sql.Tx) error) (err error, commitduration in
 			start := time.Now()
 			if _, err = tx.Exec("RELEASE SAVEPOINT cockroach_restart"); err == nil {
 				atomic.AddInt64(&commitduration, time.Since(start).Nanoseconds())
-				return nil, commitduration
+				return nil, commitduration, tid
 			}
 		}
 
@@ -95,10 +96,10 @@ func ExecuteTx(db *sql.DB, fn func(*sql.Tx) error) (err error, commitduration in
 			if released {
 				err = &AmbiguousCommitError{err}
 			}
-			return err, 0
+			return err, 0, tid
 		}
 		if _, err = tx.Exec("ROLLBACK TO SAVEPOINT cockroach_restart"); err != nil {
-			return err, 0
+			return err, 0, tid
 		}
 	}
 }

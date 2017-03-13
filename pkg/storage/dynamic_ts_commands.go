@@ -1154,7 +1154,8 @@ func isTSIntact(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :isTSIntact lower bound %v , upper bound %v ", lowerBound, upperBound)
 	}
-	if lowerBound.Less(upperBound) || lowerBound.Equal(upperBound) {
+	//if lowerBound.Less(upperBound) || lowerBound.Equal(upperBound) {
+	if lowerBound.Less(upperBound) {
 		return true
 	}
 	return false
@@ -1165,9 +1166,9 @@ func pickCommitTimeStamp(
 	upperBound hlc.Timestamp,
 ) hlc.Timestamp {
 
-	if upperBound == lowerBound {
+	/*if upperBound == lowerBound {
 		return lowerBound
-	}
+	}*/
 
 	return lowerBound.Next()
 

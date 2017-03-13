@@ -404,9 +404,13 @@ func (txn *Txn) Rollback() error {
 		log.Infof(txn.Context, "Calling Rollback")
 	}
 	log.VEventf(txn.Context, 2, "rolling back transaction")
-	//err := txn.sendEndTxnReq(false /* commit */, nil)
+	var err error
+	if !txn.IsFinalized() {
+		err = txn.sendEndTxnReq(false /* commit */, nil)
+	}
+
 	txn.finalized = true
-	return nil
+	return err
 }
 
 // AddCommitTrigger adds a closure to be executed on successful commit

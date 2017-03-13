@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/cockroachdb/cockroach/benchmark/pkg/stats"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"log"
 	"math/rand"
 	"net/rpc"
@@ -42,7 +43,7 @@ const initialBalance = 1000
 var maxTransfer = flag.Int("max-transfer", 100, "Maximum amount to transfer in one transaction.")
 var numTransfers = flag.Int("num-transfers", 10, "Number of transfers (0 to continue indefinitely).")
 var numAccounts = flag.Int("num-accounts", 3, "Number of accounts.")
-var concurrency = flag.Int("concurrency", 4, "Number of concurrent actors moving money.")
+var concurrency = flag.Int("concurrency", 6, "Number of concurrent actors moving money.")
 var contention = flag.String("contention", "low", "Contention model {low | high}.")
 var balanceCheckInterval = flag.Duration("balance-check-interval", time.Second, "Interval of balance check.")
 var contentionratio = flag.String("contention-ratio", "50:50", "AccountPercentage:Contention percentage")
@@ -58,7 +59,11 @@ var contentionAccounts int
 var contentionPercentage int
 
 var warmupcounts int32
-var id int32
+
+type txnid struct {
+	syncutil.Mutex
+	id int32
+}
 
 type measurement struct {
 	read, write, total, totalWithRetries, commit int64
@@ -115,7 +120,7 @@ func warm_up_tnxs(db *sql.DB, number_of_tnx int32) {
 
 }
 
-func moveMoney(db *sql.DB, aggr *measurement) {
+func moveMoney(db *sql.DB, aggr *measurement, tid *txnid) {
 	log.Printf("In move Money")
 
 	useSystemAccount := *contention == "high"
@@ -145,19 +150,18 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 		startTransaction := time.Now()
 		attempts := 0
 		var commitDuration int64
+		var localid int32
+		tid.Lock()
+		tid.id += 1
+		localid = tid.id
+		tid.Unlock()
 
 		if err, committimetaken := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
 			attempts++
-			//			var localid int32
-			if attempts == 1 {
-				//				localid = atomic.LoadInt32(&id)
-				//				atomic.AddInt32(&id, 1)
 
-			}
-
-			//log.Printf("Transaction")
+			log.Printf("Transaction start/restart %v", localid)
 			if attempts > 1 {
-				//	log.Printf("Transaction retry id %v", localid)
+				log.Printf("Transaction retry id %v", localid)
 				atomic.AddInt32(&aggr.retries, 1)
 				startTransaction = time.Now()
 			}
@@ -165,8 +169,7 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 			startRead := time.Now()
 			rows, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1, $2)`, from, to)
 			if err != nil {
-				//log.Printf("read error %v , tnx %v", err, tx)
-				//atomic.AddInt32(&aggr.aborts, 1)
+
 				return err
 			}
 			readDuration = time.Since(startRead)
@@ -189,29 +192,27 @@ func moveMoney(db *sql.DB, aggr *measurement) {
 			if fromBalance < amount {
 				return nil
 			}
-			//	log.Printf("tx %v : Before update: From Account %v, balance %v", localid, from, fromBalance)
-			//	log.Printf("tx %v : Before update: To Account %v, balance %v", localid, to, toBalance)
+			log.Printf("tx %v : Before update: From Account %v, balance %v", localid, from, fromBalance)
+			log.Printf("tx %v : Before update: To Account %v, balance %v", localid, to, toBalance)
 			update := `UPDATE account SET balance = $1 WHERE id = $2;`
 			if _, err = tx.Exec(update, toBalance+amount, to); err != nil {
-				//atomic.AddInt32(&aggr.aborts, 1)
-				//log.Printf("write error %v, tnx %v", err, tx)
+
 				return err
 			}
 			if _, err = tx.Exec(update, fromBalance-amount, from); err != nil {
-				//atomic.AddInt32(&aggr.aborts, 1)
-				//log.Printf("write error %v, tnx %v", err, tx)
+
 				return err
 			}
-			//	log.Printf("tx %v : After update: From Account %v, balance %v", localid, from, fromBalance-amount)
-			//	log.Printf("tx %v : After update: To Account %v, balance %v", localid, to, toBalance+amount)
+			log.Printf("tx %v : After update: From Account %v, balance %v", localid, from, fromBalance-amount)
+			log.Printf("tx %v : After update: To Account %v, balance %v", localid, to, toBalance+amount)
 			writeDuration = time.Since(startWrite)
 			return nil
 		}); err != nil {
-			log.Printf("failed transaction: %v", err)
+			log.Printf("failed transaction: id %v, err %v", localid, err)
 
 			continue
 		} else {
-			//log.Printf("transaction successful")
+			log.Printf("transaction successful %v", localid)
 			atomic.AddInt64(&commitDuration, committimetaken)
 		}
 
@@ -358,11 +359,11 @@ CREATE TABLE IF NOT EXISTS account (
 		}
 	}
 	//verifyTotalBalance(db)
-
+	tid := &txnid{id: 0}
 	var aggr measurement
 	var lastSuccesses int32
 	for i := 0; i < *concurrency; i++ {
-		go moveMoney(db, &aggr)
+		go moveMoney(db, &aggr, tid)
 	}
 
 	start := time.Now()
