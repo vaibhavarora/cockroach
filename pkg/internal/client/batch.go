@@ -242,6 +242,7 @@ func (b *Batch) fillResults() error {
 				// any rows.
 			case *roachpb.BeginTransactionRequest:
 			case *roachpb.EndTransactionRequest:
+			case *roachpb.DyTSEndTransactionRequest:
 			case *roachpb.AdminMergeRequest:
 			case *roachpb.AdminSplitRequest:
 			case *roachpb.AdminTransferLeaseRequest:
@@ -251,6 +252,9 @@ func (b *Batch) fillResults() error {
 			case *roachpb.RangeLookupRequest:
 			case *roachpb.ResolveIntentRequest:
 			case *roachpb.ResolveIntentRangeRequest:
+			case *roachpb.ResolveWriteSoftLocksRequest:
+			case *roachpb.GCReadSoftockRequest:
+			case *roachpb.GCWriteSoftockRequest:
 			case *roachpb.MergeRequest:
 			case *roachpb.TruncateLogRequest:
 			case *roachpb.RequestLeaseRequest:
