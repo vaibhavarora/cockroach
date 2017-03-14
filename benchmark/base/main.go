@@ -40,7 +40,7 @@ const systemAccountID = 0
 const initialBalance = 1000
 
 var maxTransfer = flag.Int("max-transfer", 100, "Maximum amount to transfer in one transaction.")
-var numTransfers = flag.Int("num-transfers", 0, "Number of transfers (0 to continue indefinitely).")
+var numTransfers = flag.Int("num-transfers", 500, "Number of transfers (0 to continue indefinitely).")
 var numAccounts = flag.Int("num-accounts", 100, "Number of accounts.")
 var concurrency = flag.Int("concurrency", 16, "Number of concurrent actors moving money.")
 var contention = flag.String("contention", "low", "Contention model {low | high}.")
@@ -77,7 +77,7 @@ func getAccount() int {
 
 	dice := random(1, 100)
 	if dice <= contentionPercentage {
-		return random(0, contentionAccounts)
+		return random(1, contentionAccounts)
 	} else {
 		return random(contentionAccounts, *numAccounts)
 	}
@@ -128,6 +128,113 @@ func do_warm_up_tnxs(db *sql.DB) {
 	}
 	//fmt.Printf("Done with Warm up reads")
 
+}
+
+func randomMoney(db *sql.DB, aggr *measurement) {
+	//log.Printf("In movemoney")
+	useSystemAccount := *contention == "high"
+	for !transfersComplete() {
+		var readDuration, writeDuration time.Duration
+		var fromBalance, toBalance int
+		from := getAccount()
+		to := getAccount()
+		//from, to := rand.Intn(*numAccounts)+1, rand.Intn(*numAccounts)+1
+		//log.Printf("from %v to %v", from, to)
+		if from == to {
+			continue
+		}
+		if useSystemAccount {
+			// Use the first account number we generated as a coin flip to
+			// determine whether we're transferring money into or out of
+			// the system account.
+			if from > *numAccounts/2 {
+				from = systemAccountID
+			} else {
+				to = systemAccountID
+			}
+		}
+		//amount := rand.Intn(*maxTransfer)
+		start := time.Now()
+		startTransaction := time.Now()
+		attempts := 0
+		var commitDuration int64
+
+		if err, committimetaken := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
+			attempts++
+
+			if attempts > 1 {
+				//log.Printf("retry attempt %d for tnx %v", attempts, tx)
+				atomic.AddInt32(&aggr.retries, 1)
+				startTransaction = time.Now()
+			}
+
+			startRead := time.Now()
+			rows, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1, $2)`, from, to)
+			if err != nil {
+				//log.Printf("read error %v , tnx %v", err, tx)
+				//atomic.AddInt32(&aggr.aborts, 1)
+				return err
+			}
+			readDuration = time.Since(startRead)
+			for rows.Next() {
+				var id, balance int
+				if err = rows.Scan(&id, &balance); err != nil {
+					log.Printf("here is th error")
+					log.Fatal(err)
+				}
+				switch id {
+				case from:
+					fromBalance = balance
+				case to:
+					toBalance = balance
+				default:
+					panic(fmt.Sprintf("got unexpected account %d", id))
+				}
+			}
+			dice := random(0, 100)
+			if dice > 25 {
+				to += 10
+				to %= (*numAccounts)
+				from += 10
+				from %= (*numAccounts)
+				if to == 0 {
+					to += 1
+				}
+				if from == 0 {
+					from += 1
+				}
+			}
+			startWrite := time.Now()
+
+			update := `UPDATE account SET balance = $1 WHERE id = $2;`
+			if _, err = tx.Exec(update, toBalance, to); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			if _, err = tx.Exec(update, fromBalance, from); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration = time.Since(startWrite)
+			return nil
+		}); err != nil {
+			log.Printf("failed transaction: %v", err)
+
+			continue
+		} else {
+			atomic.AddInt64(&commitDuration, committimetaken)
+		}
+		atomic.AddInt32(&successCount, 1)
+
+		atomic.AddInt64(&aggr.read, readDuration.Nanoseconds())
+		atomic.AddInt64(&aggr.write, writeDuration.Nanoseconds())
+		atomic.AddInt64(&aggr.commit, commitDuration)
+		atomic.AddInt64(&aggr.totalWithRetries, time.Since(start).Nanoseconds())
+		atomic.AddInt64(&aggr.total, time.Since(startTransaction).Nanoseconds())
+
+	}
 }
 
 func moveMoney(db *sql.DB, aggr *measurement) {
@@ -248,8 +355,8 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
+	dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
+	//dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
 		dbURL = flag.Arg(0)
@@ -366,7 +473,7 @@ CREATE TABLE IF NOT EXISTS account (
 	var aggr measurement
 	var lastSuccesses int32
 	for i := 0; i < *concurrency; i++ {
-		go moveMoney(db, &aggr)
+		go randomMoney(db, &aggr)
 	}
 
 	start := time.Now()

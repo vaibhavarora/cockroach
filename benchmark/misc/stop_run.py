@@ -51,7 +51,6 @@ def run_local_task(cmd, time_to_sleep):
   os.killpg(pro.pid, signal.SIGTERM)  # Send the signal to all the process groups
 
 def concurrency_experiment():
-
   start=1 
   end=5
   step=5 
@@ -63,7 +62,7 @@ def concurrency_experiment():
     arg4 =" 2>> concurrencynew"
     cmd = arg0 + arg1 + arg2 + arg3 + arg4
     time_to_sleep = 5400 
-    for each in range(0,5):
+    for each in range(0,3):
         stop_crdb_on_all_hosts()
         time.sleep(3)
         start_crdb_on_all_hosts()
@@ -89,7 +88,7 @@ def contention_experiment():
     arg4 =" 2>> contention100"
     cmd = arg0 + arg1 + ratio + " "+ arg2 + ratio + arg3 +arg4
     time_to_sleep = 800 
-    for each in range(0,5):
+    for each in range(0,3):
         stop_crdb_on_all_hosts()
         time.sleep(3)
         start_crdb_on_all_hosts()
