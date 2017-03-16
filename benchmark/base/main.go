@@ -40,9 +40,9 @@ const systemAccountID = 0
 const initialBalance = 1000
 
 var maxTransfer = flag.Int("max-transfer", 100, "Maximum amount to transfer in one transaction.")
-var numTransfers = flag.Int("num-transfers", 500, "Number of transfers (0 to continue indefinitely).")
-var numAccounts = flag.Int("num-accounts", 100, "Number of accounts.")
-var concurrency = flag.Int("concurrency", 16, "Number of concurrent actors moving money.")
+var numTransfers = flag.Int("num-transfers", 100000, "Number of transfers (0 to continue indefinitely).")
+var numAccounts = flag.Int("num-accounts", 100000, "Number of accounts.")
+var concurrency = flag.Int("concurrency", 50, "Number of concurrent actors moving money.")
 var contention = flag.String("contention", "low", "Contention model {low | high}.")
 var balanceCheckInterval = flag.Duration("balance-check-interval", time.Second, "Interval of balance check.")
 var contentionratio = flag.String("contention-ratio", "50:50", "AccountPercentage:Contention percentage")
@@ -192,17 +192,8 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 				}
 			}
 			dice := random(0, 100)
-			if dice > 25 {
-				to += 10
-				to %= (*numAccounts)
-				from += 10
-				from %= (*numAccounts)
-				if to == 0 {
-					to += 1
-				}
-				if from == 0 {
-					from += 1
-				}
+			if dice > 50 {
+				return nil
 			}
 			startWrite := time.Now()
 
@@ -212,11 +203,12 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 				//log.Printf("write error %v, tnx %v", err, tx)
 				return err
 			}
-			if _, err = tx.Exec(update, fromBalance, from); err != nil {
-				//atomic.AddInt32(&aggr.aborts, 1)
-				//log.Printf("write error %v, tnx %v", err, tx)
-				return err
-			}
+			/*
+				if _, err = tx.Exec(update, fromBalance, from); err != nil {
+					//atomic.AddInt32(&aggr.aborts, 1)
+					//log.Printf("write error %v, tnx %v", err, tx)
+					return err
+				}*/
 			writeDuration = time.Since(startWrite)
 			return nil
 		}); err != nil {
@@ -355,7 +347,8 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
+	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
+	dbURL := "postgresql://root@ip-172-31-0-243:26257?sslmode=disable"
 	//dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
@@ -471,17 +464,17 @@ CREATE TABLE IF NOT EXISTS account (
 	verifyTotalBalance(db)
 
 	var aggr measurement
-	var lastSuccesses int32
+	//var lastSuccesses int32
 	for i := 0; i < *concurrency; i++ {
 		go randomMoney(db, &aggr)
 	}
 
 	start := time.Now()
 	lastTime := start
-	lastretries := time.Duration(0)
+	//lastretries := time.Duration(0)
 	totaltime := time.Duration(0)
 	for range time.NewTicker(*balanceCheckInterval).C {
-		now := time.Now()
+		/*now := time.Now()
 		elapsed := now.Sub(lastTime)
 		lastTime = now
 		totaltime += elapsed
@@ -509,13 +502,17 @@ CREATE TABLE IF NOT EXISTS account (
 
 		lastretries = retries
 
-		verifyTotalBalance(db)
+		verifyTotalBalance(db) */
 		if transfersComplete() {
 			break
 		}
 	}
-	log.Printf("completed %d transfers in %s with %d retries", atomic.LoadInt32(&successCount),
-		time.Since(start), atomic.LoadInt32(&aggr.retries))
+	//log.Printf("completed %d transfers in %s with %d retries", atomic.LoadInt32(&successCount),
+	//	time.Since(start), atomic.LoadInt32(&aggr.retries))
+
+	now := time.Now()
+	elapsed := now.Sub(lastTime)
+	totaltime += elapsed
 
 	if *reportConcurrency {
 		client, err := rpc.Dial("tcp", "localhost:42586")

@@ -53,7 +53,7 @@ func callbenchmark() {
 
 	// everything is set to its default values as in main program
 	maxTransfer := 100
-	numTransfers := 250000
+	numTransfers := 100000
 	numAccounts := 100000
 	contention := "low"
 	c_s := strings.Split(*contention_start, ":")
@@ -64,7 +64,7 @@ func callbenchmark() {
 	contentiona := strconv.Itoa(contention1)
 	contentionb := strconv.Itoa(contention2)
 	contentionratio := contentiona + ":" + contentionb
-	warm_up_tnxs := 100000
+	warm_up_tnxs := 25000
 
 	err := os.Chdir("../")
 	if err != nil {
