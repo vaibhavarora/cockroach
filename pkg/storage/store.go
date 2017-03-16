@@ -93,7 +93,7 @@ const (
 
 	defaultGossipWhenCapacityDeltaExceedsFraction = 0.01
 
-	defaultStoreMutexWarnThreshold = 100 * time.Millisecond
+	defaultStoreMutexWarnThreshold = 25 * time.Second
 
 	// systemDataGossipInterval is the interval at which range lease
 	// holders verify that the most recent system data is gossiped.
