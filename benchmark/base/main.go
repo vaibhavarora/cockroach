@@ -348,7 +348,7 @@ func main() {
 	flag.Parse()
 
 	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	dbURL := "postgresql://root@ip-172-31-0-243:26257?sslmode=disable"
+	dbURL := "postgresql://root@ip-172-31-4-97:26257?sslmode=disable"
 	//dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
