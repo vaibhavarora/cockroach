@@ -13,4 +13,3 @@
 2017/03/17 01:11:36 Contention 90:10 : Transaction rate 551.8539731761723 ,Total Success 100024 , Total Retries 628, Average read time 2.329921ms, Average write time 26.389141ms, Average time for transaction(without retires) 44.606231ms Average time for transaction ( with retries ) 45.402492ms
 2017/03/17 01:14:48 Contention 90:10 : Transaction rate 558.3497934957401 ,Total Success 100024 , Total Retries 590, Average read time 2.313756ms, Average write time 25.839717ms, Average time for transaction(without retires) 44.071557ms Average time for transaction ( with retries ) 44.808752ms
 2017/03/17 01:17:58 Contention 90:10 : Transaction rate 560.6955832744986 ,Total Success 100024 , Total Retries 632, Average read time 2.346595ms, Average write time 25.838261ms, Average time for transaction(without retires) 43.988824ms Average time for transaction ( with retries ) 44.764711ms
-2017/03/17 01:18:00 done!

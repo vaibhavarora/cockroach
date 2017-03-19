@@ -8,10 +8,20 @@ avg_read = []
 avg_write = []
 tnx_time_wo_reties = []
 tnx_time_with_reties = []
+
+trans_rate1 = []
+retries1 = []
+avg_read1 = []
+avg_write1 = []
+tnx_time_wo_reties1 = []
+tnx_time_with_reties1 = []
+
 total = 0
 #file_name = "test"
-#file_name = "output"
-file_name = "concurrencynew"
+#file_name = "statconcurrency1"
+#file_name = "final/concurrency/baseline2"
+file_name = "final/concurrency/baseline3"
+file_name1 = "final/concurrency/dyts"
 flag = 1
 
 def plot_Tnx_rate():
@@ -19,15 +29,16 @@ def plot_Tnx_rate():
 
     plt.figure(1)
    # plt.subplot(211)
-    plt.plot(concurrency, trans_rate, label="Transaction rate")
-    plt.xlabel('Concurrent Threads', fontsize=16)
+    plt.plot(concurrency, trans_rate, label="Fixed TimeStamp Ordering",ls="--",lw=2.0)
+    plt.plot(concurrency, trans_rate1, label="Dynamic TimeStamp Ordering",lw=2.0)
+    plt.xlabel('Concurrent Transactions', fontsize=16)
     plt.ylabel('Transactions per second', fontsize=16)
-    plt.text(30, 1200, 'Total number of transactions  = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    #plt.text(30, 1200, 'Total number of transactions  = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
-    plt.yticks(np.arange(min(trans_rate), max(trans_rate)+1, 50 ))
+    plt.yticks(np.arange(min(min(trans_rate),min(trans_rate1)), max(max(trans_rate),max(trans_rate1))+1, 50 ))
 
     plt.title('Transaction rate', fontsize=26)
-
+    plt.legend(loc='upper right', bbox_to_anchor=(1, 0.5))
     plt.tight_layout()
     plt.show()
 
@@ -36,42 +47,45 @@ def plot_total_reties():
     global total
     plt.figure(1)
     #plt.subplot(212)
-    plt.plot(concurrency, retries, label="Total number of Retries") 
-    plt.xlabel('Concurrent Threads', fontsize=16)
-    plt.ylabel('Total Retries', fontsize=16)
-    plt.text(20, 1800, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    plt.plot(concurrency, retries, label="Fixed TimeStamp Ordering",ls="--",lw=2.0) 
+    plt.plot(concurrency, retries1, label="Dynamic TimeStamp Ordering",lw=2.0)
+    plt.xlabel('Concurrent Transactions', fontsize=16)
+    plt.ylabel('Total Retries/Aborts', fontsize=16)
+    #plt.text(20, 1800, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
-    plt.yticks(np.arange(min(retries), max(retries)+1, 100 ))    
+    plt.yticks(np.arange(min(min(retries),min(retries1)), max(max(retries),max(retries1))+1, 10 ))    
     plt.title('Total number of Retries', fontsize=26)
-    #plt.legend() 
+    plt.legend() 
     plt.tight_layout()
     plt.show()
 
 def plot_avg_read_time():
     global total
     plt.figure(1)
-    plt.plot(concurrency, avg_read, label="Average read time ") 
-    plt.xlabel('Concurrent Threads', fontsize=16)
+    plt.plot(concurrency, avg_read, label="Fixed TimeStamp Ordering",ls="--",lw=2.0) 
+    plt.plot(concurrency, avg_read1, label="Dynamic TimeStamp Ordering",lw=2.0)
+    plt.xlabel('Concurrent Transactions', fontsize=16)
     plt.ylabel('( in milli seconds )', fontsize=16)
-    plt.text(11, 20, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    #plt.text(11, 20, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
-    plt.yticks(np.arange(min(avg_read), max(avg_read)+1, 1.0 ))    
+    plt.yticks(np.arange(min(min(avg_read),min(avg_read1)), max(max(avg_read),max(avg_read1))+1, 10.0 ))    
     plt.title('Average read time', fontsize=26)
-    #plt.legend() 
+    plt.legend(loc='upper right', bbox_to_anchor=(0.5, 1)) 
     plt.tight_layout()
     plt.show()
    
 def plot_avg_write_time():
     global total
     plt.figure(1)
-    plt.plot(concurrency, avg_write, label="Average write time ") 
-    plt.xlabel('Concurrent Threads', fontsize=16)
+    plt.plot(concurrency, avg_write, label="Fixed TimeStamp Ordering",ls="--",lw=2.0) 
+    plt.plot(concurrency, avg_write1, label="Dynamic TimeStamp Ordering",lw=2.0) 
+    plt.xlabel('Concurrent Transactions', fontsize=16)
     plt.ylabel('( in milli seconds )', fontsize=16)
-    plt.text(11, 60, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    #plt.text(11, 60, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
-    plt.yticks(np.arange(min(avg_write), max(avg_write)+1, 5.0 ))    
+    plt.yticks(np.arange(min(min(avg_write),min(avg_write1)), max(max(avg_write),max(avg_write1))+1, 1.0 ))    
     plt.title('Average write time', fontsize=26)
-    #plt.legend() 
+    plt.legend() 
     plt.tight_layout()
     plt.show()
 
@@ -79,14 +93,15 @@ def plot_avg_write_time():
 def plot_avg_time_wo_retries():
     global total
     plt.figure(1)
-    plt.plot(concurrency, tnx_time_wo_reties, label="Average transaction time excluding retries ") 
-    plt.xlabel('Concurrent Threads', fontsize=16)
+    plt.plot(concurrency, tnx_time_wo_reties, label="Fixed TimeStamp Ordering",ls="--",lw=2.0) 
+    plt.plot(concurrency, tnx_time_wo_reties1, label="Dynamic TimeStamp Ordering",lw=2.0) 
+    plt.xlabel('Concurrent Transactions', fontsize=16)
     plt.ylabel('( in milli seconds )', fontsize=16)
-    plt.text(20, 104, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    #plt.text(20, 104, 'Total number of transactions = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
-    plt.yticks(np.arange(min(tnx_time_wo_reties), max(tnx_time_wo_reties)+1, 10.0 ))    
+    plt.yticks(np.arange(min(min(tnx_time_wo_reties),min(tnx_time_wo_reties1)), max(max(tnx_time_wo_reties),max(tnx_time_wo_reties1))+1, 10.0 ))    
     plt.title('Average transaction time excluding retries', fontsize=26)
-    #plt.legend() 
+    plt.legend(loc='upper right', bbox_to_anchor=(0.5, 1)) 
     plt.tight_layout()
     plt.show()
 
@@ -94,14 +109,15 @@ def plot_avg_time_wo_retries():
 def plot_avg_time_with_retries():
     global total
     plt.figure(1)
-    plt.plot(concurrency, tnx_time_with_reties, label="Average transaction time including retries ") 
-    plt.xlabel('Concurrent Threads', fontsize=16)
+    plt.plot(concurrency, tnx_time_with_reties, label="Fixed TimeStamp Ordering",ls="--",lw=2.0)
+    plt.plot(concurrency, tnx_time_with_reties1, label="Dynamic TimeStamp Ordering",lw=2.0) 
+    plt.xlabel('Concurrent Transactions', fontsize=16)
     plt.ylabel('( in milli seconds )', fontsize=16)
-    plt.text(20, 104, 'Total number of transactions  = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
+    #plt.text(20, 104, 'Total number of transactions  = ' + str(total), style='italic', verticalalignment='top', horizontalalignment='left', fontsize=15, bbox={'facecolor':'wheat', 'alpha':0.5, 'pad':10})
     plt.xticks(np.arange(min(concurrency), max(concurrency)+1, 10.0))
-    plt.yticks(np.arange(min(tnx_time_with_reties ), max(tnx_time_with_reties)+1, 10.0 ))    
+    plt.yticks(np.arange(min(min(tnx_time_with_reties),min(tnx_time_with_reties1)), max(max(tnx_time_with_reties),max(tnx_time_with_reties1))+1, 10.0 ))    
     plt.title('Average transaction time including retries', fontsize=26)
-    #plt.legend() 
+    plt.legend(loc='upper right', bbox_to_anchor=(0.5, 1))
     plt.tight_layout()
     plt.show()
 
@@ -124,15 +140,15 @@ def take_average(values):
     output = []
 
     start = 0
-    end = 5
+    end = 3
     
     while start < len(values):
         total = 0
         for each in values[start:end]:
             total += each
-        output.append(total / 5)
+        output.append(total / 3)
         start = end
-        end += 5
+        end += 3
     return output
 
 def take_average_of_all():
@@ -151,6 +167,20 @@ def take_average_of_all():
     global tnx_time_with_reties
     tnx_time_with_reties = take_average(tnx_time_with_reties)
 
+def take_average_of_all1():
+    global trans_rate1
+    trans_rate1 = take_average(trans_rate1)
+    global retries1
+    retries1 = take_average(retries1)
+    global avg_read1
+    avg_read1 = take_average(avg_read1)
+    global avg_write1
+    avg_write1 = take_average(avg_write1)
+    global tnx_time_wo_reties1
+    tnx_time_wo_reties1 = take_average(tnx_time_wo_reties1)
+    global tnx_time_with_reties1
+    tnx_time_with_reties1 = take_average(tnx_time_with_reties1)
+
 def getdata(line):
     line = line.split() 
     #print line
@@ -168,16 +198,39 @@ def getdata(line):
     tnx_time_wo_reties.append(time(line[28]))
     tnx_time_with_reties.append(time(line[37]))
 
+def getdata1(line):
+    line = line.split() 
+    #print line
+    global flag
+    global total
+    if flag:
+        total = int(line[10])
+        flag = 0
+    #contention_range.append((line[3]))
+    trans_rate1.append(float(line[7]))
+    retries1.append(int(sanitize(line[14])))
+    avg_read1.append(time(line[18]))
+    avg_write1.append(time(line[22]))
+    tnx_time_wo_reties1.append(time(line[28]))
+    tnx_time_with_reties1.append(time(line[37]))
+
+
 with open(file_name) as f:
     for line in f:
         getdata(line)
 
-total = 250000
+with open(file_name1) as f:
+    for line in f:
+        getdata1(line)
+
+total = 100000
 take_average_of_all()
-#print concurrency
-plot_Tnx_rate()
-plot_total_reties()
+take_average_of_all1()
+#print trans_rate1
+#print trans_rate
+#plot_Tnx_rate()
+#plot_total_reties()
 plot_avg_read_time()
-plot_avg_write_time()
+#plot_avg_write_time()
 plot_avg_time_wo_retries()
 plot_avg_time_with_retries()

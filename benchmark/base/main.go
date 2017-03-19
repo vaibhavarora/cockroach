@@ -203,12 +203,18 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 				//log.Printf("write error %v, tnx %v", err, tx)
 				return err
 			}
-			/*
-				if _, err = tx.Exec(update, fromBalance, from); err != nil {
-					//atomic.AddInt32(&aggr.aborts, 1)
-					//log.Printf("write error %v, tnx %v", err, tx)
-					return err
-				}*/
+
+			if _, err = tx.Exec(update, fromBalance, from); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+
+			if _, err = tx.Exec(update, fromBalance, from); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
 			writeDuration = time.Since(startWrite)
 			return nil
 		}); err != nil {
@@ -348,7 +354,8 @@ func main() {
 	flag.Parse()
 
 	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	dbURL := "postgresql://root@ip-172-31-4-97:26257?sslmode=disable"
+	//dbURL := "postgresql://root@ip-172-31-4-97:26257?sslmode=disable"
+	dbURL := "postgresql://root@ip-172-31-0-243:26257?sslmode=disable"
 	//dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
