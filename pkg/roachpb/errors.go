@@ -100,7 +100,7 @@ func NewError(err error) *Error {
 		// RetryableTxnError to pErr should do it explicitly through
 		// RetryableTxnErrorToPErr().
 		//panic("RetryableTxnError being converted back to pErr.")
-		return nil
+		return e
 	} else {
 		e.setGoError(err)
 	}
