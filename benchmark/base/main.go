@@ -169,32 +169,43 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 			}
 
 			startRead := time.Now()
-			rows, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1, $2)`, from, to)
+			rows1, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, from)
 			if err != nil {
 				//log.Printf("read error %v , tnx %v", err, tx)
 				//atomic.AddInt32(&aggr.aborts, 1)
 				return err
 			}
 			readDuration = time.Since(startRead)
-			for rows.Next() {
+			for rows1.Next() {
 				var id, balance int
-				if err = rows.Scan(&id, &balance); err != nil {
+				if err = rows1.Scan(&id, &balance); err != nil {
 					log.Printf("here is th error")
 					log.Fatal(err)
 				}
-				switch id {
-				case from:
-					fromBalance = balance
-				case to:
-					toBalance = balance
-				default:
-					panic(fmt.Sprintf("got unexpected account %d", id))
-				}
+				fromBalance = balance
 			}
 			dice := random(0, 100)
 			if dice > 50 {
 				return nil
 			}
+			startRead = time.Now()
+			rows2, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, to)
+			if err != nil {
+				//log.Printf("read error %v , tnx %v", err, tx)
+				//atomic.AddInt32(&aggr.aborts, 1)
+				return err
+			}
+			readDuration += time.Since(startRead)
+			for rows2.Next() {
+				var id, balance int
+				if err = rows2.Scan(&id, &balance); err != nil {
+					log.Printf("here is th error")
+					log.Fatal(err)
+				}
+				fromBalance = balance
+				toBalance = balance
+			}
+
 			startWrite := time.Now()
 
 			update := `UPDATE account SET balance = $1 WHERE id = $2;`
@@ -203,19 +214,14 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 				//log.Printf("write error %v, tnx %v", err, tx)
 				return err
 			}
-
-			if _, err = tx.Exec(update, fromBalance, from); err != nil {
-				//atomic.AddInt32(&aggr.aborts, 1)
-				//log.Printf("write error %v, tnx %v", err, tx)
-				return err
-			}
-
-			if _, err = tx.Exec(update, fromBalance, from); err != nil {
-				//atomic.AddInt32(&aggr.aborts, 1)
-				//log.Printf("write error %v, tnx %v", err, tx)
-				return err
-			}
 			writeDuration = time.Since(startWrite)
+			startWrite = time.Now()
+			if _, err = tx.Exec(update, fromBalance, from); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration += time.Since(startWrite)
 			return nil
 		}); err != nil {
 			log.Printf("failed transaction: %v", err)
@@ -355,7 +361,7 @@ func main() {
 
 	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@ip-172-31-4-97:26257?sslmode=disable"
-	dbURL := "postgresql://root@ip-172-31-0-243:26257?sslmode=disable"
+	dbURL := "postgresql://root@ip-172-31-15-117:26257?sslmode=disable"
 	//dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
@@ -434,7 +440,7 @@ CREATE TABLE IF NOT EXISTS account (
 		}
 
 	}
-
+	log.Printf("done Inserting ")
 	verifyTotalBalance(db)
 	contentioninfo := strings.Split(*contentionratio, ":")
 	accountpercent, err := strconv.Atoi(contentioninfo[0])
