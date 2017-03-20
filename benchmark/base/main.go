@@ -52,6 +52,8 @@ var warmuptnxs = flag.Int("warm-up-tnx", 0, "Number of Transactions(2 reads each
 
 var txnCount int32
 var successCount int32
+var readcount int32
+var writecount int32
 var initialSystemBalance int
 
 var contentionAccounts int
@@ -136,6 +138,7 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 	for !transfersComplete() {
 		var readDuration, writeDuration time.Duration
 		var fromBalance, toBalance int
+
 		from := getAccount()
 		to := getAccount()
 		//from, to := rand.Intn(*numAccounts)+1, rand.Intn(*numAccounts)+1
@@ -161,7 +164,7 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 
 		if err, committimetaken := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
 			attempts++
-
+			skip := true
 			if attempts > 1 {
 				//log.Printf("retry attempt %d for tnx %v", attempts, tx)
 				atomic.AddInt32(&aggr.retries, 1)
@@ -176,6 +179,7 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 				return err
 			}
 			readDuration = time.Since(startRead)
+			atomic.AddInt32(&readcount, 1)
 			for rows1.Next() {
 				var id, balance int
 				if err = rows1.Scan(&id, &balance); err != nil {
@@ -183,29 +187,37 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 					log.Fatal(err)
 				}
 				fromBalance = balance
+				toBalance = balance
+			}
+			//dice := random(0, 100)
+			//if dice > 50 {
+			skip = false
+			//}
+			if !skip {
+				startRead = time.Now()
+				rows2, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, to)
+				if err != nil {
+					//log.Printf("read error %v , tnx %v", err, tx)
+					//atomic.AddInt32(&aggr.aborts, 1)
+					return err
+				}
+				readDuration += time.Since(startRead)
+				atomic.AddInt32(&readcount, 1)
+				for rows2.Next() {
+					var id, balance int
+					if err = rows2.Scan(&id, &balance); err != nil {
+						log.Printf("here is th error")
+						log.Fatal(err)
+					}
+					fromBalance = balance
+					toBalance = balance
+				}
+				//return nil
 			}
 			dice := random(0, 100)
 			if dice > 50 {
 				return nil
 			}
-			startRead = time.Now()
-			rows2, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, to)
-			if err != nil {
-				//log.Printf("read error %v , tnx %v", err, tx)
-				//atomic.AddInt32(&aggr.aborts, 1)
-				return err
-			}
-			readDuration += time.Since(startRead)
-			for rows2.Next() {
-				var id, balance int
-				if err = rows2.Scan(&id, &balance); err != nil {
-					log.Printf("here is th error")
-					log.Fatal(err)
-				}
-				fromBalance = balance
-				toBalance = balance
-			}
-
 			startWrite := time.Now()
 
 			update := `UPDATE account SET balance = $1 WHERE id = $2;`
@@ -215,17 +227,18 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 				return err
 			}
 			writeDuration = time.Since(startWrite)
-			startWrite = time.Now()
+			atomic.AddInt32(&writecount, 1)
+			/*startWrite = time.Now()
 			if _, err = tx.Exec(update, fromBalance, from); err != nil {
 				//atomic.AddInt32(&aggr.aborts, 1)
 				//log.Printf("write error %v, tnx %v", err, tx)
 				return err
 			}
 			writeDuration += time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)*/
 			return nil
 		}); err != nil {
 			log.Printf("failed transaction: %v", err)
-
 			continue
 		} else {
 			atomic.AddInt64(&commitDuration, committimetaken)
@@ -360,8 +373,8 @@ func main() {
 	flag.Parse()
 
 	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	//dbURL := "postgresql://root@ip-172-31-4-97:26257?sslmode=disable"
-	dbURL := "postgresql://root@ip-172-31-15-117:26257?sslmode=disable"
+	dbURL := "postgresql://root@ip-172-31-4-97:26257?sslmode=disable"
+	//dbURL := "postgresql://root@ip-172-31-15-117:26257?sslmode=disable"
 	//dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
@@ -520,8 +533,8 @@ CREATE TABLE IF NOT EXISTS account (
 			break
 		}
 	}
-	//log.Printf("completed %d transfers in %s with %d retries", atomic.LoadInt32(&successCount),
-	//	time.Since(start), atomic.LoadInt32(&aggr.retries))
+	log.Printf("completed %d transfers in %s with %d retries", atomic.LoadInt32(&successCount),
+		time.Since(start), atomic.LoadInt32(&aggr.retries))
 
 	now := time.Now()
 	elapsed := now.Sub(lastTime)
@@ -538,8 +551,9 @@ CREATE TABLE IF NOT EXISTS account (
 		write := time.Duration(atomic.LoadInt64(&aggr.write))
 		totalWithRetries := time.Duration(atomic.LoadInt64(&aggr.totalWithRetries))
 		total := time.Duration(atomic.LoadInt64(&aggr.total))
-
-		stat := &stats.Data{*concurrency, int(atomic.LoadInt32(&successCount)), int(atomic.LoadInt32(&aggr.retries)), *contentionratio, time.Duration(read / d), time.Duration(write / d), time.Duration(totalWithRetries / d), time.Duration(total / d), float64(atomic.LoadInt32(&successCount)) / totaltime.Seconds()}
+		rc := time.Duration(readcount)
+		wc := time.Duration(writecount)
+		stat := &stats.Data{*concurrency, int(atomic.LoadInt32(&successCount)), int(atomic.LoadInt32(&aggr.retries)), *contentionratio, time.Duration(read / rc), time.Duration(write / wc), time.Duration(totalWithRetries / d), time.Duration(total / d), float64(atomic.LoadInt32(&successCount)) / totaltime.Seconds()}
 
 		var reply bool
 		err = client.Call("Listener.CollectStats", stat, &reply)
