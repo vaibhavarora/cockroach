@@ -132,7 +132,7 @@ func do_warm_up_tnxs(db *sql.DB) {
 
 }
 
-func randomMoney(db *sql.DB, aggr *measurement) {
+func randomMoney4060(db *sql.DB, aggr *measurement) {
 	//log.Printf("In movemoney")
 	useSystemAccount := *contention == "high"
 	for !transfersComplete() {
@@ -189,10 +189,10 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 				fromBalance = balance
 				toBalance = balance
 			}
-			//dice := random(0, 100)
-			//if dice > 50 {
-			skip = false
-			//}
+			dice := random(0, 100)
+			if dice > 50 {
+				skip = false
+			}
 			if !skip {
 				startRead = time.Now()
 				rows2, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, to)
@@ -212,8 +212,373 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 					fromBalance = balance
 					toBalance = balance
 				}
-				//return nil
+				return nil
 			}
+			/*dice := random(0, 100)
+			if dice > 50 {
+				return nil
+			}*/
+			startWrite := time.Now()
+
+			update := `UPDATE account SET balance = $1 WHERE id = $2;`
+			if _, err = tx.Exec(update, toBalance, to); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration = time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)
+			startWrite = time.Now()
+			if _, err = tx.Exec(update, fromBalance, from); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration += time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)
+			return nil
+		}); err != nil {
+			log.Printf("failed transaction: %v", err)
+			continue
+		} else {
+			atomic.AddInt64(&commitDuration, committimetaken)
+		}
+		atomic.AddInt32(&successCount, 1)
+
+		atomic.AddInt64(&aggr.read, readDuration.Nanoseconds())
+		atomic.AddInt64(&aggr.write, writeDuration.Nanoseconds())
+		atomic.AddInt64(&aggr.commit, commitDuration)
+		atomic.AddInt64(&aggr.totalWithRetries, time.Since(start).Nanoseconds())
+		atomic.AddInt64(&aggr.total, time.Since(startTransaction).Nanoseconds())
+
+	}
+}
+
+func randomMoney6040(db *sql.DB, aggr *measurement) {
+	//log.Printf("In movemoney")
+	useSystemAccount := *contention == "high"
+	for !transfersComplete() {
+		var readDuration, writeDuration time.Duration
+		fromBalance := initialBalance
+		toBalance := initialBalance
+
+		from := getAccount()
+		to := getAccount()
+		//from, to := rand.Intn(*numAccounts)+1, rand.Intn(*numAccounts)+1
+		//log.Printf("from %v to %v", from, to)
+		if from == to {
+			continue
+		}
+		if useSystemAccount {
+			// Use the first account number we generated as a coin flip to
+			// determine whether we're transferring money into or out of
+			// the system account.
+			if from > *numAccounts/2 {
+				from = systemAccountID
+			} else {
+				to = systemAccountID
+			}
+		}
+		//amount := rand.Intn(*maxTransfer)
+		start := time.Now()
+		startTransaction := time.Now()
+		attempts := 0
+		var commitDuration int64
+
+		if err, committimetaken := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
+			attempts++
+			skip := true
+			if attempts > 1 {
+				//log.Printf("retry attempt %d for tnx %v", attempts, tx)
+				atomic.AddInt32(&aggr.retries, 1)
+				startTransaction = time.Now()
+			}
+
+			dice := random(0, 100)
+			if dice > 50 {
+				skip = false
+			}
+			if !skip {
+				startRead := time.Now()
+				rows1, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, from)
+				if err != nil {
+					//log.Printf("read error %v , tnx %v", err, tx)
+					//atomic.AddInt32(&aggr.aborts, 1)
+					return err
+				}
+				readDuration = time.Since(startRead)
+				atomic.AddInt32(&readcount, 1)
+				for rows1.Next() {
+					var id, balance int
+					if err = rows1.Scan(&id, &balance); err != nil {
+						log.Printf("here is th error")
+						log.Fatal(err)
+					}
+					fromBalance = balance
+					toBalance = balance
+				}
+				startRead = time.Now()
+				rows2, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, to)
+				if err != nil {
+					//log.Printf("read error %v , tnx %v", err, tx)
+					//atomic.AddInt32(&aggr.aborts, 1)
+					return err
+				}
+				readDuration += time.Since(startRead)
+				atomic.AddInt32(&readcount, 1)
+				for rows2.Next() {
+					var id, balance int
+					if err = rows2.Scan(&id, &balance); err != nil {
+						log.Printf("here is th error")
+						log.Fatal(err)
+					}
+					fromBalance = balance
+					toBalance = balance
+				}
+				return nil
+			}
+
+			startWrite := time.Now()
+			update := `UPDATE account SET balance = $1 WHERE id = $2;`
+			if _, err := tx.Exec(update, toBalance, to); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration = time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)
+			startWrite = time.Now()
+			if _, err := tx.Exec(update, fromBalance, from); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration += time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)
+			onemore := getAccount()
+			startWrite = time.Now()
+			if _, err := tx.Exec(update, fromBalance, onemore); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration += time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)
+			return nil
+		}); err != nil {
+			log.Printf("failed transaction: %v", err)
+			continue
+		} else {
+			atomic.AddInt64(&commitDuration, committimetaken)
+		}
+		atomic.AddInt32(&successCount, 1)
+
+		atomic.AddInt64(&aggr.read, readDuration.Nanoseconds())
+		atomic.AddInt64(&aggr.write, writeDuration.Nanoseconds())
+		atomic.AddInt64(&aggr.commit, commitDuration)
+		atomic.AddInt64(&aggr.totalWithRetries, time.Since(start).Nanoseconds())
+		atomic.AddInt64(&aggr.total, time.Since(startTransaction).Nanoseconds())
+
+	}
+}
+
+func randomMoney8020(db *sql.DB, aggr *measurement) {
+	//log.Printf("In movemoney")
+	useSystemAccount := *contention == "high"
+	for !transfersComplete() {
+		var readDuration, writeDuration time.Duration
+		fromBalance := initialBalance
+		toBalance := initialBalance
+
+		from := getAccount()
+		to := getAccount()
+		//from, to := rand.Intn(*numAccounts)+1, rand.Intn(*numAccounts)+1
+		//log.Printf("from %v to %v", from, to)
+		if from == to {
+			continue
+		}
+		if useSystemAccount {
+			// Use the first account number we generated as a coin flip to
+			// determine whether we're transferring money into or out of
+			// the system account.
+			if from > *numAccounts/2 {
+				from = systemAccountID
+			} else {
+				to = systemAccountID
+			}
+		}
+		//amount := rand.Intn(*maxTransfer)
+		start := time.Now()
+		startTransaction := time.Now()
+		attempts := 0
+		var commitDuration int64
+
+		if err, committimetaken := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
+			attempts++
+			skip := true
+			if attempts > 1 {
+				//log.Printf("retry attempt %d for tnx %v", attempts, tx)
+				atomic.AddInt32(&aggr.retries, 1)
+				startTransaction = time.Now()
+			}
+
+			dice := random(0, 100)
+			if dice > 50 {
+				skip = false
+			}
+			if !skip {
+				startRead := time.Now()
+				rows1, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, from)
+				if err != nil {
+					//log.Printf("read error %v , tnx %v", err, tx)
+					//atomic.AddInt32(&aggr.aborts, 1)
+					return err
+				}
+				readDuration = time.Since(startRead)
+				atomic.AddInt32(&readcount, 1)
+				for rows1.Next() {
+					var id, balance int
+					if err = rows1.Scan(&id, &balance); err != nil {
+						log.Printf("here is th error")
+						log.Fatal(err)
+					}
+					fromBalance = balance
+					toBalance = balance
+				}
+
+				return nil
+			}
+
+			startWrite := time.Now()
+			update := `UPDATE account SET balance = $1 WHERE id = $2;`
+			if _, err := tx.Exec(update, toBalance, to); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration = time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)
+			startWrite = time.Now()
+			if _, err := tx.Exec(update, fromBalance, from); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration += time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)
+			onemore := getAccount()
+			startWrite = time.Now()
+			if _, err := tx.Exec(update, fromBalance, onemore); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration += time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)
+			andonemore := getAccount()
+			startWrite = time.Now()
+			if _, err := tx.Exec(update, fromBalance, andonemore); err != nil {
+				//atomic.AddInt32(&aggr.aborts, 1)
+				//log.Printf("write error %v, tnx %v", err, tx)
+				return err
+			}
+			writeDuration += time.Since(startWrite)
+			atomic.AddInt32(&writecount, 1)
+			return nil
+		}); err != nil {
+			log.Printf("failed transaction: %v", err)
+			continue
+		} else {
+			atomic.AddInt64(&commitDuration, committimetaken)
+		}
+		atomic.AddInt32(&successCount, 1)
+
+		atomic.AddInt64(&aggr.read, readDuration.Nanoseconds())
+		atomic.AddInt64(&aggr.write, writeDuration.Nanoseconds())
+		atomic.AddInt64(&aggr.commit, commitDuration)
+		atomic.AddInt64(&aggr.totalWithRetries, time.Since(start).Nanoseconds())
+		atomic.AddInt64(&aggr.total, time.Since(startTransaction).Nanoseconds())
+
+	}
+}
+
+func randomMoney2080(db *sql.DB, aggr *measurement) {
+	//log.Printf("In movemoney")
+	useSystemAccount := *contention == "high"
+	for !transfersComplete() {
+		var readDuration, writeDuration time.Duration
+		var fromBalance, toBalance int
+
+		from := getAccount()
+		to := getAccount()
+		//from, to := rand.Intn(*numAccounts)+1, rand.Intn(*numAccounts)+1
+		//log.Printf("from %v to %v", from, to)
+		if from == to {
+			continue
+		}
+		if useSystemAccount {
+			// Use the first account number we generated as a coin flip to
+			// determine whether we're transferring money into or out of
+			// the system account.
+			if from > *numAccounts/2 {
+				from = systemAccountID
+			} else {
+				to = systemAccountID
+			}
+		}
+		//amount := rand.Intn(*maxTransfer)
+		start := time.Now()
+		startTransaction := time.Now()
+		attempts := 0
+		var commitDuration int64
+
+		if err, committimetaken := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
+			attempts++
+
+			if attempts > 1 {
+				//log.Printf("retry attempt %d for tnx %v", attempts, tx)
+				atomic.AddInt32(&aggr.retries, 1)
+				startTransaction = time.Now()
+			}
+
+			startRead := time.Now()
+			rows1, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, from)
+			if err != nil {
+				//log.Printf("read error %v , tnx %v", err, tx)
+				//atomic.AddInt32(&aggr.aborts, 1)
+				return err
+			}
+			readDuration = time.Since(startRead)
+			atomic.AddInt32(&readcount, 1)
+			for rows1.Next() {
+				var id, balance int
+				if err = rows1.Scan(&id, &balance); err != nil {
+					log.Printf("here is th error")
+					log.Fatal(err)
+				}
+				fromBalance = balance
+				toBalance = balance
+			}
+
+			startRead = time.Now()
+			rows2, err := tx.Query(`SELECT id, balance FROM account WHERE id IN ($1)`, to)
+			if err != nil {
+				//log.Printf("read error %v , tnx %v", err, tx)
+				//atomic.AddInt32(&aggr.aborts, 1)
+				return err
+			}
+			readDuration += time.Since(startRead)
+			atomic.AddInt32(&readcount, 1)
+			for rows2.Next() {
+				var id, balance int
+				if err = rows2.Scan(&id, &balance); err != nil {
+					log.Printf("here is th error")
+					log.Fatal(err)
+				}
+				fromBalance = balance
+				toBalance = balance
+			}
+
 			dice := random(0, 100)
 			if dice > 50 {
 				return nil
@@ -228,14 +593,7 @@ func randomMoney(db *sql.DB, aggr *measurement) {
 			}
 			writeDuration = time.Since(startWrite)
 			atomic.AddInt32(&writecount, 1)
-			/*startWrite = time.Now()
-			if _, err = tx.Exec(update, fromBalance, from); err != nil {
-				//atomic.AddInt32(&aggr.aborts, 1)
-				//log.Printf("write error %v, tnx %v", err, tx)
-				return err
-			}
-			writeDuration += time.Since(startWrite)
-			atomic.AddInt32(&writecount, 1)*/
+
 			return nil
 		}); err != nil {
 			log.Printf("failed transaction: %v", err)
@@ -373,8 +731,10 @@ func main() {
 	flag.Parse()
 
 	//dbURL := "postgresql://root@localhost:26257/bank2?sslmode=disable"
-	dbURL := "postgresql://root@ip-172-31-4-97:26257?sslmode=disable"
+	//dbURL := "postgresql://root@ip-172-31-4-97:26257?sslmode=disable"
 	//dbURL := "postgresql://root@ip-172-31-15-117:26257?sslmode=disable"
+	//dbURL := "postgresql://root@ip-172-31-0-159:26257?sslmode=disable"
+	dbURL := "postgresql://root@ip-172-31-11-1:26257?sslmode=disable"
 	//dbURL := "postgresql://root@gediz:26257/bank2?sslmode=disable"
 	//dbURL := "postgresql://root@pacific:26257?sslmode=disable"
 	if flag.NArg() == 1 {
@@ -492,7 +852,7 @@ CREATE TABLE IF NOT EXISTS account (
 	var aggr measurement
 	//var lastSuccesses int32
 	for i := 0; i < *concurrency; i++ {
-		go randomMoney(db, &aggr)
+		go randomMoney8020(db, &aggr)
 	}
 
 	start := time.Now()

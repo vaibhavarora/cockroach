@@ -52,7 +52,7 @@ func callbenchmark() {
 	numTransfers := 100000
 	numAccounts := 100000
 	contention := "low"
-	contentionratio := "50:50"
+	contentionratio := "90:10"
 	warm_up_tnxs := 25000
 
 	err := os.Chdir("../")
