@@ -1,0 +1,14 @@
+{
+    
+    "DBUrl":"postgresql://root@localhost:26257?sslmode=disable",
+    "DBname":"test",
+    "tableName":"test",
+    "numItems":100,
+    "numTransactions":10,
+    "concurrency":5,
+    "contention":"low",
+    "contentionratio":"50:50",
+    "reportConcurrency":false,
+    "clearentries":false,
+    "warmuptnxs":5
+}
