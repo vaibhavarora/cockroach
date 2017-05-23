@@ -22,17 +22,18 @@ import (
 
 ///////////////////// Variable declarations /////////////////////
 var CONFIG_FILE string = "../conf/conf.json"
+var RESULTS_DIR string = "./benchmark_results/"
+var MODE os.FileMode = 0777 
 const EMPTY = ""
 
 var txnCount int32
 var successCount int32
-var readcount int32
-var writecount int32
 var warmupcounts int32
 var readRatio, writeRatio int
 var readOnlyRatio, readWriteRatio int
 var contentionPercent, contentiousData int
 var start time.Time
+var readcount, writecount int
 var txnCompletionCheckInterval = flag.Duration("txn_completion", time.Second, "Interval to check if txns are complete.")
 
 type configuration struct {
@@ -53,7 +54,7 @@ type configuration struct {
 }
 
 type measurement struct {
-    read, write, total, totalWithRetries, commit int64
+    read, write, totalTime, totalTimeWoRetries, commit int64
     retries                                      int32
 }
 
@@ -71,7 +72,7 @@ var db *sql.DB
 ///////////////////// Misc functions /////////////////////
 
 func loadConfig() {
-    
+    fmt.Println(CONFIG_FILE)
     file, err := ioutil.ReadFile(CONFIG_FILE)
     errCheck(err)
     json.Unmarshal(file, &conf)
@@ -171,7 +172,7 @@ func addEntriesToTable() {
     selectSQL := constructSelectStatement(EMPTY, EMPTY)
     rows, _ := db.Query(selectSQL)
     defer rows.Close()
-    if rows != nil {
+    if (rows != nil && rows.Next()){
         log.Println("There are entries in table.")
         EntriesExists = true
     }
@@ -252,62 +253,19 @@ func performWarmUp() {
 
     if conf.Warmuptnxs > 0 {
         for atomic.LoadInt32(&warmupcounts) <= int32(conf.Warmuptnxs) {
-            /* aiting for warming up to finish */
-            time.Sleep(5 * time.Second)
+            /* Waiting for warming up to finish */
+            time.Sleep(time.Second)
         }
         log.Println("Done with warm up reads : ", atomic.LoadInt32(&warmupcounts))
     }
 }
 
 
-// func performReadOp(tx *sql.Tx) (readDuration time.Duration, err error) {
-//     startRead := time.Now()
-//     condition :=  "id=" + strconv.Itoa(random(1, conf.NumItems))
-//     selectSQL := constructSelectStatement("id, value ", condition)
-//     rows, err := tx.Query(selectSQL)
-//     if err != nil {
-//         fmt.Println(err)
-//         return readDuration, err
-//     }
-//     readDuration = time.Since(startRead)
-//     atomic.AddInt32(&readcount, 1)
-//     for rows.Next() {
-//         var id, value int
-//         if err := rows.Scan(&id, &value); err != nil {
-//             log.Printf("There is an error")
-//             log.Fatal(err)
-//         }
-//         //fmt.Println("Read " + strconv.Itoa(value) + " from id " + strconv.Itoa(id))
-//     }
-//     return readDuration, nil
-// }
-
-
-// func performWriteOp(tx *sql.Tx) (writeDuration time.Duration, err error) {
-
-//     startWrite := time.Now()
-//     id, value := random(1, conf.NumItems), random(1, conf.MaxWriteValue)
-
-//     dbValue := "value=" + strconv.Itoa(value)
-//     dbCondition := "id=" + strconv.Itoa(id)
-
-//     updateSQL := constructUpdateStatement(dbValue, dbCondition)
-    
-//     if _, err := tx.Exec(updateSQL); err != nil {
-//         return writeDuration, err
-//     }
-//     //fmt.Println("Updated to " + strconv.Itoa(value) + " for id " + strconv.Itoa(id))
-//     writeDuration = time.Since(startWrite)
-//     atomic.AddInt32(&writecount, 1)
-//     return writeDuration, nil
-// }
-
-
 func performTransactions(db *sql.DB, aggr *measurement) {
 
     for !txnsComplete() {
         var readDuration, writeDuration time.Duration
-        
+        start := time.Now()
         startTransaction := time.Now()
         attempts := 0
         var commitDuration int64
@@ -361,7 +319,6 @@ func performTransactions(db *sql.DB, aggr *measurement) {
                         return err
                     }
                     readTime += time.Since(startRead)
-                    atomic.AddInt32(&readcount, 1)
                     for rows.Next() {
                         var id, value int
                         if err := rows.Scan(&id, &value); err != nil {
@@ -369,6 +326,7 @@ func performTransactions(db *sql.DB, aggr *measurement) {
                             log.Fatal(err)
                         }
                     }
+                    readcount += 1
                     
                 } else {
                     startWrite := time.Now()
@@ -384,7 +342,7 @@ func performTransactions(db *sql.DB, aggr *measurement) {
                     }
                     //fmt.Println("Updated to " + strconv.Itoa(value) + " for id " + strconv.Itoa(id))
                     writeTime += time.Since(startWrite)
-                    atomic.AddInt32(&writecount, 1)
+                    writecount += 1
                     
                 }
                 readDuration, writeDuration = readTime, writeTime
@@ -401,12 +359,8 @@ func performTransactions(db *sql.DB, aggr *measurement) {
         atomic.AddInt64(&aggr.read, readDuration.Nanoseconds())
         atomic.AddInt64(&aggr.write, writeDuration.Nanoseconds())
         atomic.AddInt64(&aggr.commit, commitDuration)
-        atomic.AddInt64(&aggr.totalWithRetries, time.Since(start).Nanoseconds())
-        atomic.AddInt64(&aggr.total, time.Since(startTransaction).Nanoseconds())
-        // fmt.Println("Read count= ", strconv.Itoa(int(readcount)))
-        // fmt.Println("Write count= ", strconv.Itoa(int(writecount)))
-        //fmt.Println("Success count= ", strconv.Itoa(int(successCount)))
-
+        atomic.AddInt64(&aggr.totalTime, time.Since(start).Nanoseconds())
+        atomic.AddInt64(&aggr.totalTimeWoRetries, time.Since(startTransaction).Nanoseconds())
     }
 }
 
@@ -425,57 +379,100 @@ func runTest() {
     contentiousData, _ = strconv.Atoi(ratios[1])
 
     var aggr measurement
-    start = time.Now()
     
     for i := 0; i < conf.Concurrency; i++ {
         go performTransactions(db, &aggr)
     }
-
+    start := time.Now()
+    //lastTime := start
+   
+    totalTestTime := time.Duration(0)
     for range time.NewTicker(*txnCompletionCheckInterval).C {
         /* Wait till all trasactions complete */
         if txnsComplete(){
             break
         }
     }    
+    // now := time.Now()
+    // elapsed := now.Sub(lastTime)
+    totalTestTime = time.Since(start)
 
     successes := atomic.LoadInt32(&successCount)
     d := time.Duration(successes)
-    totalWithRetries := time.Duration(atomic.LoadInt64(&aggr.totalWithRetries))
-    total := time.Duration(atomic.LoadInt64(&aggr.total))
-    // rc := time.Duration(readcount)
-    // wc := time.Duration(writecount)
-    // stat := &stats.Data{conf.ContentionRatio, int(atomic.LoadInt32(&successCount)), 
-    //     int(atomic.LoadInt32(&aggr.retries)), *contentionratio, time.Duration(read / rc), 
-    //     time.Duration(write / wc), time.Duration(totalWithRetries / d), time.Duration(total / d), 
-    //     float64(atomic.LoadInt32(&successCount)) / totaltime.Seconds()}
+    totalTime := time.Duration(atomic.LoadInt64(&aggr.totalTime))
+    totalTimeWoRetries := time.Duration(atomic.LoadInt64(&aggr.totalTimeWoRetries))
 
+    txnRate := float64(successes)/totalTestTime.Seconds()
 
-    txnRate := float64(successes)/total.Seconds()
+    log.Println("totalTimeWithRetries = " + strconv.FormatFloat(totalTestTime.Seconds(), 'f', -1, 64))
+    log.Println("RC: " + strconv.Itoa(readcount) + "  WC: " + strconv.Itoa(writecount) )
 
-    log.Printf("Contention %s : Transaction rate %v, Total Success %v, Total Retries %v, Average time for transaction(without retires) %v, Average time for transaction ( with retries ) %v", 
-        conf.ContentionRatio, txnRate, 
-        atomic.LoadInt32(&successCount), atomic.LoadInt32(&aggr.retries), time.Duration(totalWithRetries / d), 
-        time.Duration(total / d))
+    logMsg := "\nContention=" + conf.ContentionRatio
+    logMsg += ":readOnlyRatio=" + conf.ReadOnlyRatio
+    logMsg += ":readWriteRatio=" + conf.ReadWriteRatio
+    logMsg += ":Concurrency=" + strconv.Itoa(conf.Concurrency)
+    logMsg += ":Transaction rate=" + strconv.FormatFloat(txnRate, 'f', -1, 64)
+    logMsg += ":Total Success=" + strconv.Itoa(int(successCount))
+    logMsg += ":Total Retries=" + strconv.Itoa(int(aggr.retries))
+    logMsg += ":Avg time(w/o retires)="+time.Duration( totalTimeWoRetries/ d).String()
+    logMsg += ":Avg time (w/ retries)=" + time.Duration(totalTime / d).String()
+
+    log.Println(logMsg)
+    /* Log the results of the test */
+    logResults(logMsg)
 }
 
 
+
+func logResults(logMsg string) {
+    parts := strings.Split(CONFIG_FILE, ".")
+    varyingFactor := parts[len(parts)-2]
+    
+    path := RESULTS_DIR + varyingFactor + "/"
+    if _, err := os.Stat(path); err != nil {
+        if os.IsNotExist(err) {
+            os.MkdirAll(path, os.ModePerm)
+        }
+    }
+
+    filePath := path + varyingFactor + ".log"
+    if _, err := os.Stat(filePath); err != nil {
+        if os.IsNotExist(err) {
+            _, err := os.Create(filePath)
+            errCheck(err)
+        }
+        
+    }
+
+    f, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY, 0600)
+    if err != nil {
+        panic(err)
+    }
+    defer f.Close()
+
+    if _, err = f.WriteString(logMsg); err != nil {
+        panic(err)
+    }
+    
+}
 ///////////////////// Main function /////////////////////
 
 func main() {
+
     if (len(os.Args[1]) > 1) {
         CONFIG_FILE = os.Args[1]
     }
 
     /* Load the configuration into struct variable conf */
     loadConfig()
-
+    log.Println(conf.DBUrl)
     /* Connect to DB and use it to perform all DB operations */
     db = createDBConnection()
-
+    
     /* Fill the DB with some entries */
     addEntriesToTable()
     
-    /* Perform some warm up reads to fill read cache */
+    /*Perform some warm up reads to fill read cache */
     performWarmUp()
 
     /* Run the benchmarking tests */
