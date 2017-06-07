@@ -975,10 +975,7 @@ func executelocalValidateCommitBefore(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :VCB In getting access to tnx Id %v", *txn.ID)
 	}
-	if !txncache.getAccess(key, true /*timed wait*/) {
-		return upperBound, roachpb.NewTransactionAbortedError()
-	}
-	defer txncache.releaseAccess(key)
+	
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : got access to tnx Id %v", *txn.ID)
 	}
@@ -988,6 +985,10 @@ func executelocalValidateCommitBefore(
 	); err != nil {
 		return hlc.MaxTimestamp, err
 	} else if ok {
+		if !txncache.getAccess(key, true /*timed wait*/) {
+			return upperBound, roachpb.NewTransactionAbortedError()
+		}
+		
 		// Update the Transaction record
 		switch txnRecord.Status {
 		case roachpb.ABORTED:
@@ -1000,7 +1001,7 @@ func executelocalValidateCommitBefore(
 		case roachpb.COMMITTED:
 			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
 		}
-
+		txncache.releaseAccess(key)
 		// Save the updated Transaction record
 		if err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
 			return upperBound, err
@@ -1090,10 +1091,6 @@ func executelocalValidateCommitAfter(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : VCA In getting access to tnx Id %v", *txn.ID)
 	}
-	if !txncache.getAccess(key, true /*timed wait*/) {
-		return lowerBound, roachpb.NewTransactionAbortedError()
-	}
-	defer txncache.releaseAccess(key)
 
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :VCA  got access to tnx Id %v", *txn.ID)
@@ -1108,9 +1105,14 @@ func executelocalValidateCommitAfter(
 		return hlc.ZeroTimestamp, roachpb.NewTransactionStatusError("does not exist")
 	}
 
+	if !txncache.getAccess(key, true /*timed wait*/) {
+		return lowerBound, roachpb.NewTransactionAbortedError()
+	}
+	
 	switch txnRecord.Status {
 	case roachpb.ABORTED:
 	case roachpb.PENDING:
+		
 		if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
 			txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
 		} else {
@@ -1119,6 +1121,7 @@ func executelocalValidateCommitAfter(
 	case roachpb.COMMITTED:
 		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 	}
+	txncache.releaseAccess(key)
 
 	// Save the updated Transaction record
 	err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)

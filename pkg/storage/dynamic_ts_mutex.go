@@ -9,7 +9,7 @@ import (
 const (
 	BUSY          = true
 	FREE          = false
-	Wait_Duration = 50 * time.Millisecond
+	Wait_Duration = 10 * time.Millisecond
 )
 
 type DyTSMutex struct {

@@ -244,11 +244,6 @@ func EvalDyTSValidateCommitAfter(
 
 	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
 
-	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
-		return EvalResult{}, roachpb.NewTransactionAbortedError()
-	}
-	defer cArgs.Repl.txnlockcache.releaseAccess(key)
-
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
@@ -264,6 +259,9 @@ func EvalDyTSValidateCommitAfter(
 		log.Infof(ctx, "EvalDyTSValidateCommitAfter : found transaction record in this range")
 	}
 	lowerBound := *args.LowerBound
+	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
+		return EvalResult{}, roachpb.NewTransactionAbortedError()
+	}
 	// Update the Transaction record
 	switch txnRecord.Status {
 	case roachpb.ABORTED:
@@ -276,7 +274,7 @@ func EvalDyTSValidateCommitAfter(
 	case roachpb.COMMITTED:
 		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 	}
-
+	cArgs.Repl.txnlockcache.releaseAccess(key)
 	// Save the updated Transaction record
 	if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
 		return EvalResult{}, err
@@ -302,11 +300,6 @@ func EvalDyTSValidateCommitBefore(
 
 	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
 
-	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
-		return EvalResult{}, roachpb.NewTransactionAbortedError()
-	}
-	defer cArgs.Repl.txnlockcache.releaseAccess(key)
-
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
@@ -323,6 +316,9 @@ func EvalDyTSValidateCommitBefore(
 	}
 	// Update the Transaction record
 	upperBound := *args.UpperBound
+	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
+		return EvalResult{}, roachpb.NewTransactionAbortedError()
+	}
 
 	switch txnRecord.Status {
 	case roachpb.ABORTED:
@@ -336,6 +332,7 @@ func EvalDyTSValidateCommitBefore(
 		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
 	}
 
+	cArgs.Repl.txnlockcache.releaseAccess(key)
 	reply := resp.(*roachpb.ValidateCommitBeforeResponse)
 	reply.UpperBound = &upperBound
 
