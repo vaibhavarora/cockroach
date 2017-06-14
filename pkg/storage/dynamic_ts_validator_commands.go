@@ -123,7 +123,13 @@ func EvalDyTSUpdateTransactionRecord(
 		log.Infof(ctx, "EvalDyTSUpdateTransactionRecord : found transaction record in this range")
 	}
 	// Update the Transaction record
-	txnRecord.DynamicTimestampLowerBound.Forward(args.LowerBound)
+	readVtnc := cArgs.Repl.visibleTNC.visibleReadTS
+
+	if args.LowerBound.Less(readVtnc.Add(0,1)) {
+		txnRecord.DynamicTimestampLowerBound.Forward(readVtnc.Add(0,1))
+	} else {
+		txnRecord.DynamicTimestampLowerBound.Forward(args.LowerBound)
+	}
 	txnRecord.DynamicTimestampUpperBound.Backward(args.UpperBound)
 	for _, txn := range args.CommitAfterThem {
 		txnRecord.CommitAfterThem = append(txnRecord.CommitAfterThem, txn)
@@ -183,8 +189,10 @@ func EvalDyTSValidatorEndTransaction(
 		txnRecord.DynamicTimestampUpperBound = *args.Deadline
 		txnRecord.OrigTimestamp = *args.Deadline
 		txnRecord.Status = roachpb.COMMITTED
+		cArgs.Repl.visibleTNC.updateTxnState(ctx, *(args.Tmeta.ID), "COMMITTED", hlc.ZeroTimestamp)
 	} else {
 		txnRecord.Status = roachpb.ABORTED
+		cArgs.Repl.visibleTNC.updateTxnState(ctx, *(args.Tmeta.ID), "ABORTED", hlc.ZeroTimestamp)
 	}
 	// Save the updated Transaction record
 	if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
@@ -259,6 +267,7 @@ func EvalDyTSValidateCommitAfter(
 		log.Infof(ctx, "EvalDyTSValidateCommitAfter : found transaction record in this range")
 	}
 	lowerBound := *args.LowerBound
+	readVtnc := cArgs.Repl.visibleTNC.visibleReadTS
 	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
 		return EvalResult{}, roachpb.NewTransactionAbortedError()
 	}
@@ -269,17 +278,25 @@ func EvalDyTSValidateCommitAfter(
 		if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
 			txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
 		} else {
-			lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+			if txnRecord.DynamicTimestampUpperBound.Less(readVtnc.Add(0,1)) {
+				lowerBound.Forward(readVtnc.Add(0,1))
+			} else {
+				lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+			}
 		}
 	case roachpb.COMMITTED:
-		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+		if txnRecord.DynamicTimestampUpperBound.Less(readVtnc.Add(0,1)) {
+				lowerBound.Forward(readVtnc.Add(0,1))
+			} else {
+				lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+			}
 	}
 	cArgs.Repl.txnlockcache.releaseAccess(key)
 	// Save the updated Transaction record
 	if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
 		return EvalResult{}, err
 	}
-
+	cArgs.Repl.visibleTNC.updateTxnState(ctx, *(args.Tmeta.ID), "VALIDATED", lowerBound)
 	reply := resp.(*roachpb.ValidateCommitAfterResponse)
 	reply.LowerBound = &lowerBound
 
@@ -316,6 +333,8 @@ func EvalDyTSValidateCommitBefore(
 	}
 	// Update the Transaction record
 	upperBound := *args.UpperBound
+	readVtnc := cArgs.Repl.visibleTNC.visibleReadTS
+
 	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
 		return EvalResult{}, roachpb.NewTransactionAbortedError()
 	}
@@ -326,7 +345,11 @@ func EvalDyTSValidateCommitBefore(
 		if upperBound.Equal(hlc.MaxTimestamp) {
 			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
 		} else {
-			txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+			if upperBound.Less(readVtnc.Add(0,1)) {
+				txnRecord.DynamicTimestampLowerBound.Forward(readVtnc.Add(0,1))
+			} else {
+				txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+			}
 		}
 	case roachpb.COMMITTED:
 		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)

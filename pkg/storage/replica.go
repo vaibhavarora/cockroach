@@ -354,6 +354,8 @@ type Replica struct {
 
 	txnlockcache *TransactionRecordLockCache
 
+	visibleTNC *VisibleTNC
+
 	cmdQMu struct {
 		// Protects all fields in the cmdQMu struct.
 		//
@@ -627,6 +629,7 @@ func newReplica(rangeID roachpb.RangeID, store *Store) *Replica {
 		abortCache:     NewAbortCache(rangeID),
 		slockcache:     engine.NewSoftLockCache(),
 		txnlockcache:   NewTransactionRecordLockCache(),
+		visibleTNC:     NewVisibleTNC(),
 	}
 	// Init rangeStr with the range ID.
 	r.rangeStr.store(0, &roachpb.RangeDescriptor{RangeID: rangeID})
@@ -4319,8 +4322,6 @@ func (r *Replica) executeBatch(
 	br := ba.CreateReply()
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : At execute batch fn arguments idkey : %v, ba : %v ", idKey, ba)
-	}
-	if log.V(2) {
 		log.Infof(ctx, "Ravi :At execute batch fn  ba.header %v ", ba.Header)
 	}
 	r.mu.Lock()

@@ -142,7 +142,7 @@ func EvalDyTSGet(
 			log.Infof(ctx, " No Write locks acqurired on Get ")
 		}
 	}
-	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place soft  locks in txn Record")
 	}
 
@@ -178,7 +178,7 @@ func EvalDyTSPut(
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
 	}
-	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
@@ -252,7 +252,7 @@ func EvalDyTSConditionalPut(
 			log.Infof(ctx, " No Write locks acqurired on EvalDyTSConditionalPut ")
 		}
 	}
-	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place soft  locks in txn Record")
 	}
 
@@ -273,7 +273,7 @@ func EvalDyTSConditionalPut(
 			log.Infof(ctx, " No Write or Read locks acqurired on EvalDyTSConditionalPut ")
 		}
 	}
-	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1); err != nil {
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
@@ -337,7 +337,7 @@ func EvalDyTSInitPut(
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
 	}
-	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
@@ -406,7 +406,7 @@ func EvalDyTSIncrement(
 			log.Infof(ctx, " No Write locks acqurired on Cput ")
 		}
 	}
-	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place soft  locks in txn Record")
 	}
 
@@ -427,7 +427,7 @@ func EvalDyTSIncrement(
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
 	}
-	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1); err != nil {
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks1, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
@@ -464,7 +464,7 @@ func EvalDyTSDelete(
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
 	}
-	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
@@ -500,7 +500,7 @@ func EvalDyTSDeleteRange(
 			log.Infof(ctx, " No Write or Read locks acqurired on Put ")
 		}
 	}
-	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks); err != nil {
+	if err := pushUpdatesOnWriteToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, rslocks, wslocks, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place locks in transaction record")
 	}
 	return EvalResult{}, nil
@@ -537,7 +537,7 @@ func EvalDyTSScan(
 			log.Infof(ctx, " No Write locks acqurired on Scan ")
 		}
 	}
-	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place soft  locks in txn Record")
 	}
 	return EvalResult{}, nil
@@ -573,7 +573,7 @@ func EvalDyTSReverseScan(
 			log.Infof(ctx, " No Write locks acqurired on Get ")
 		}
 	}
-	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks); err != nil {
+	if err := pushUpdatesOnReadToTxnRecord(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl, args.Span, wslocks, cArgs.Repl.visibleTNC); err != nil {
 		panic("failed to place soft  locks in txn Record")
 	}
 	return EvalResult{}, nil
@@ -593,8 +593,11 @@ func EvalDyTSEndTransaction(
 	args := cArgs.Args.(*roachpb.EndTransactionRequest)
 	reply := resp.(*roachpb.EndTransactionResponse)
 
+	if log.V(2) {
+		log.Infof(ctx, "In EvalDyTSEndTransaction for replica %v", cArgs.Repl)
+	}
 	if args.Commit {
-		if txnrcd, err = executeValidator(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header); err != nil {
+		if txnrcd, err = executeValidator(ctx, cArgs.Repl.store, batch, cArgs.Repl.txnlockcache, cArgs.Header, cArgs.Repl.visibleTNC); err != nil {
 			return EvalResult{}, err
 		}
 	} else {
@@ -664,6 +667,7 @@ func updateTransactionRecord(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	rArgs RpcArgs,
+	visibleTNC *VisibleTNC,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In updateTransactionrecord")
@@ -674,7 +678,7 @@ func updateTransactionRecord(
 		return sendUpdateTransactionRecordRPC(ctx, s, h, rArgs)
 	}
 
-	return updateLocalTransactionRecord(ctx, batch, txncache, h, rArgs)
+	return updateLocalTransactionRecord(ctx, batch, txncache, h, rArgs, visibleTNC)
 
 }
 
@@ -684,6 +688,7 @@ func updateLocalTransactionRecord(
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
 	rArgs RpcArgs,
+	visibleTNC *VisibleTNC,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In updateLocalTransactionRecord")
@@ -710,7 +715,19 @@ func updateLocalTransactionRecord(
 		if log.V(2) {
 			log.Infof(ctx, "Transaction record before updating %v with lb %v, ub %v", *txnRecord.ID, txnRecord.DynamicTimestampLowerBound, txnRecord.DynamicTimestampUpperBound)
 		}
-		txnRecord.DynamicTimestampLowerBound.Forward(rArgs.lowerbound)
+		readVtnc := visibleTNC.visibleReadTS
+
+		if rArgs.lowerbound.Less(readVtnc.Add(0,1)) {
+			txnRecord.DynamicTimestampLowerBound.Forward(readVtnc.Add(0,1))
+			if log.V(2) {
+				log.Infof(ctx, "Moving lb to readTNC + 1 %v", readVtnc.Add(0,1))
+			}
+		} else {
+			txnRecord.DynamicTimestampLowerBound.Forward(rArgs.lowerbound)
+			if log.V(2) {
+				log.Infof(ctx, "Moving lb to %v",rArgs.lowerbound)
+			}
+		}
 		txnRecord.DynamicTimestampUpperBound.Backward(rArgs.upperbound)
 
 		if log.V(2) {
@@ -791,6 +808,7 @@ func pushUpdatesOnReadToTxnRecord(
 	r *Replica,
 	span roachpb.Span,
 	wslocks []roachpb.WriteSoftLock,
+	visibleTNC *VisibleTNC,
 ) error {
 
 	if log.V(2) {
@@ -819,7 +837,7 @@ func pushUpdatesOnReadToTxnRecord(
 	}
 
 	// Update transaction
-	if err := updateTransactionRecord(ctx, s, batch, txncache, h, rARgs); err != nil {
+	if err := updateTransactionRecord(ctx, s, batch, txncache, h, rARgs, visibleTNC); err != nil {
 		panic("failed to update transaction")
 	}
 
@@ -836,6 +854,7 @@ func pushUpdatesOnWriteToTxnRecord(
 	span roachpb.Span,
 	rslocks []roachpb.ReadSoftLock,
 	wslocks []roachpb.WriteSoftLock,
+	visibleTNC *VisibleTNC,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :pushUpdatesOnWriteToTxnRecord ")
@@ -860,7 +879,7 @@ func pushUpdatesOnWriteToTxnRecord(
 		rARgs.commitAQ = append(rARgs.commitAQ, lock.TransactionMeta)
 	}
 	// Update transaction
-	if err := updateTransactionRecord(ctx, s, batch, txncache, h, rARgs); err != nil {
+	if err := updateTransactionRecord(ctx, s, batch, txncache, h, rARgs, visibleTNC); err != nil {
 		panic("failed to update transaction")
 	}
 	return nil
@@ -872,13 +891,14 @@ func manageCommitBeforeQueue(
 	batch engine.ReadWriter,
 	txncache *TransactionRecordLockCache,
 	mytxnRecord *roachpb.Transaction,
+	visibleTNC *VisibleTNC,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :manageCommitBeforeQueue ")
 	}
 
 	for _, txn := range mytxnRecord.CommitBeforeThem {
-		if err := validateCommitBefore(ctx, s, batch, txncache, mytxnRecord, txn); err != nil {
+		if err := validateCommitBefore(ctx, s, batch, txncache, mytxnRecord, txn, visibleTNC); err != nil {
 			return err
 		}
 	}
@@ -893,6 +913,7 @@ func validateCommitBefore(
 	txncache *TransactionRecordLockCache,
 	mytxnRecord *roachpb.Transaction,
 	othertxn enginepb.TxnMeta,
+	visibleTNC *VisibleTNC,
 ) error {
 
 	if log.V(2) {
@@ -907,7 +928,7 @@ func validateCommitBefore(
 		}
 	}
 
-	if upperBound, err = executelocalValidateCommitBefore(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampUpperBound, othertxn); err != nil {
+	if upperBound, err = executelocalValidateCommitBefore(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampUpperBound, othertxn, visibleTNC); err != nil {
 		return err
 	}
 
@@ -966,6 +987,7 @@ func executelocalValidateCommitBefore(
 	txncache *TransactionRecordLockCache,
 	upperBound hlc.Timestamp,
 	txn enginepb.TxnMeta,
+	visibleTNC *VisibleTNC,
 ) (hlc.Timestamp, error) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :VCB In executelocalValidateCommitBefore")
@@ -980,6 +1002,8 @@ func executelocalValidateCommitBefore(
 		log.Infof(ctx, "Ravi : got access to tnx Id %v", *txn.ID)
 	}
 	var txnRecord roachpb.Transaction
+	readVtnc := visibleTNC.visibleReadTS
+
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
 	); err != nil {
@@ -996,7 +1020,11 @@ func executelocalValidateCommitBefore(
 			if upperBound.Equal(hlc.MaxTimestamp) {
 				upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
 			} else {
-				txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+				if upperBound.Less(readVtnc.Add(0,1)) {
+					txnRecord.DynamicTimestampLowerBound.Forward(readVtnc.Add(0,1))
+				} else {
+					txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+				}
 			}
 		case roachpb.COMMITTED:
 			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
@@ -1017,6 +1045,7 @@ func validateCommitAfter(
 	txncache *TransactionRecordLockCache,
 	mytxnRecord *roachpb.Transaction,
 	othertxn enginepb.TxnMeta,
+	visibleTNC *VisibleTNC,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In validateCommitAfter")
@@ -1028,7 +1057,8 @@ func validateCommitAfter(
 		lowerBound, err = sendValidateCommitAfterRPC(ctx, s, mytxnRecord.DynamicTimestampLowerBound, othertxn)
 	}
 
-	lowerBound, err = executelocalValidateCommitAfter(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampLowerBound, othertxn)
+	lowerBound, err = executelocalValidateCommitAfter(ctx, s, batch, txncache, mytxnRecord.DynamicTimestampLowerBound, othertxn, 
+		*(mytxnRecord.TxnMeta.ID), visibleTNC)
 
 	mytxnRecord.DynamicTimestampLowerBound.Forward(lowerBound)
 
@@ -1083,18 +1113,14 @@ func executelocalValidateCommitAfter(
 	txncache *TransactionRecordLockCache,
 	lowerBound hlc.Timestamp,
 	txn enginepb.TxnMeta,
+	selfTxnId uuid.UUID,
+	visibleTNC *VisibleTNC,
 ) (hlc.Timestamp, error) {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : In executelocalValidateCommitAfter")
 	}
 	key := keys.TransactionKey(txn.Key, *txn.ID)
-	if log.V(2) {
-		log.Infof(ctx, "Ravi : VCA In getting access to tnx Id %v", *txn.ID)
-	}
 
-	if log.V(2) {
-		log.Infof(ctx, "Ravi :VCA  got access to tnx Id %v", *txn.ID)
-	}
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
@@ -1105,8 +1131,15 @@ func executelocalValidateCommitAfter(
 		return hlc.ZeroTimestamp, roachpb.NewTransactionStatusError("does not exist")
 	}
 
+	readVtnc := visibleTNC.visibleReadTS
+	if log.V(2) {
+		log.Infof(ctx, "Ravi : VCA In getting access to tnx Id %v", *txn.ID)
+	}
 	if !txncache.getAccess(key, true /*timed wait*/) {
 		return lowerBound, roachpb.NewTransactionAbortedError()
+	}
+	if log.V(2) {
+		log.Infof(ctx, "Ravi :VCA  got access to tnx Id %v", *txn.ID)
 	}
 	
 	switch txnRecord.Status {
@@ -1116,13 +1149,25 @@ func executelocalValidateCommitAfter(
 		if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
 			txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
 		} else {
-			lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+			if txnRecord.DynamicTimestampUpperBound.Less(readVtnc.Add(0,1)) {
+				lowerBound.Forward(readVtnc.Add(0,1))
+			} else {
+				lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+			}
 		}
 	case roachpb.COMMITTED:
-		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+		if txnRecord.DynamicTimestampUpperBound.Less(readVtnc) {
+				lowerBound.Forward(readVtnc)
+			} else {
+				lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+			}
 	}
 	txncache.releaseAccess(key)
 
+	if log.V(2) {
+		log.Infof(ctx, "Ravi: calling updateTxnState for txn %v", selfTxnId)
+	}
+	visibleTNC.updateTxnState(ctx, selfTxnId, "VALIDATED", lowerBound)
 	// Save the updated Transaction record
 	err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
 
@@ -1135,13 +1180,14 @@ func manageCommitAfterQueue(
 	batch engine.ReadWriter,
 	txncache *TransactionRecordLockCache,
 	mytxnRecord *roachpb.Transaction,
+	visibleTNC *VisibleTNC,
 ) error {
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :manageCommitAfterQueue ")
 	}
 
 	for _, txn := range mytxnRecord.CommitAfterThem {
-		if err := validateCommitAfter(ctx, s, batch, txncache, mytxnRecord, txn); err != nil {
+		if err := validateCommitAfter(ctx, s, batch, txncache, mytxnRecord, txn, visibleTNC); err != nil {
 			return err
 		}
 
@@ -1222,6 +1268,7 @@ func executeLocalValidator(
 	batch engine.ReadWriter,
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
+	visibleTNC *VisibleTNC,
 ) (roachpb.Transaction, error) {
 
 	if log.V(2) {
@@ -1250,13 +1297,13 @@ func executeLocalValidator(
 	); err != nil {
 		return txnRecord, err
 	} else if ok {
-		if err := manageCommitBeforeQueue(ctx, s, batch, txncache, &txnRecord); err != nil {
+		if err := manageCommitBeforeQueue(ctx, s, batch, txncache, &txnRecord, visibleTNC); err != nil {
 			if err = markAsAbort(ctx, batch, key, &txnRecord); err != nil {
 				return txnRecord, err
 			}
 			return txnRecord, nil
 		}
-		if err := manageCommitAfterQueue(ctx, s, batch, txncache, &txnRecord); err != nil {
+		if err := manageCommitAfterQueue(ctx, s, batch, txncache, &txnRecord, visibleTNC); err != nil {
 			if err = markAsAbort(ctx, batch, key, &txnRecord); err != nil {
 				return txnRecord, err
 			}
@@ -1291,6 +1338,7 @@ func executeValidator(
 	batch engine.ReadWriter,
 	txncache *TransactionRecordLockCache,
 	h roachpb.Header,
+	visibleTNC *VisibleTNC,
 ) (roachpb.Transaction, error) {
 
 	if log.V(2) {
@@ -1302,5 +1350,5 @@ func executeValidator(
 		return sendexecuteValidatorRPC(ctx, s, h)
 	}
 
-	return executeLocalValidator(ctx, s, batch, txncache, h)
+	return executeLocalValidator(ctx, s, batch, txncache, h, visibleTNC)
 }

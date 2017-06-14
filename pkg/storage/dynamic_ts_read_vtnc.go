@@ -1,4 +1,4 @@
-package main
+package storage
 
 import (
     
@@ -6,10 +6,9 @@ import (
     "github.com/cockroachdb/cockroach/pkg/util/syncutil"
     "github.com/cockroachdb/cockroach/pkg/util/hlc"
     "github.com/cockroachdb/cockroach/pkg/util/uuid"
-    //"github.com/cockroachdb/cockroach/pkg/util/log"
-    //"golang.org/x/net/context"
+    "github.com/cockroachdb/cockroach/pkg/util/log"
+    "golang.org/x/net/context"
     "container/heap"
-    "fmt"
 )
 
 const VALIDATED = "VALIDATED"
@@ -50,22 +49,8 @@ func (h *vtncHeap) Pop() interface{} {
     return value
 }
 
-func makeTS(nanos int64, logical int32) hlc.Timestamp {
-    return hlc.Timestamp{
-        WallTime: nanos,
-        Logical:  logical,
-    }
-}
 
-func makeVtncHeap(nanos int64, logical int32) vtnc {
-    return vtnc{
-        uuid.MakeV4(),
-        makeTS(nanos, logical),
-    }
-}
-
-
-func (v *VisibleTNC) updateVtnc() {
+func (v *VisibleTNC) updateVtnc(ctx context.Context) {
     update := true
     
     h := &v.h
@@ -78,9 +63,9 @@ func (v *VisibleTNC) updateVtnc() {
             case v.TxnStateMap[txnId] == COMMITTED:
                 // If the top of heap is committed, move the visible read tnc to this value
                 top := heap.Pop(h)
-                
-                fmt.Println("Moving readtnc to ", top.(vtnc).lowerBoundTS)
-                
+                if log.V(2) {
+                    log.Infof(ctx, "Moving readtnc to %v", top.(vtnc).lowerBoundTS)
+                }
                 v.visibleReadTS.Forward(top.(vtnc).lowerBoundTS)
                 delete(v.TxnStateMap, txnId)
             case v.TxnStateMap[txnId] == ABORTED:
@@ -96,12 +81,14 @@ func (v *VisibleTNC) updateVtnc() {
             update = false
         }
     }
-    //fmt.Println( "Updated read tnc to %v", v.visibleReadTS)
-    
+    if log.V(2) {
+        log.Infof(ctx, "Updated read tnc to %v", v.visibleReadTS)
+        log.Infof(ctx, "Updated heap to %v", v.h)
+    }
 }
 
 
-func (v *VisibleTNC) updateTxnState(txnId uuid.UUID, state string, lowerBound hlc.Timestamp) {
+func (v *VisibleTNC) updateTxnState(ctx context.Context, txnId uuid.UUID, state string, lowerBound hlc.Timestamp) {
     v.Lock()
     defer v.Unlock()
 
@@ -112,22 +99,25 @@ func (v *VisibleTNC) updateTxnState(txnId uuid.UUID, state string, lowerBound hl
 
     v.TxnStateMap[txnId] = state
 
-    
-    fmt.Println("Updated state of txn ", txnId, " to ", state)
-    
+    if log.V(2) {
+        log.Infof(ctx, "Updated state of txn %v to %s", txnId, state)
+    }
     if state != VALIDATED {
-        v.updateVtnc()
+        v.updateVtnc(ctx)
     } else {
         if !txnExists {
             heap.Push(&(v.h), vtnc{
                 txnId,
                 lowerBound,
                 })
-            fmt.Println( "Added to txn ", txnId, " to heap.")
         }
 
+        if log.V(2) {
+            log.Infof(ctx, "Added to heap txn %v; heap is %v", txnId, v.h)
+        }
     }
 }
+
 
 
 func NewVisibleTNC() *VisibleTNC {
@@ -140,39 +130,28 @@ func NewVisibleTNC() *VisibleTNC {
 }
 
 
-// This example inserts several ints into an vtncHeap, checks the minimum,
-// and removes them in order of priority.
-func main() {
-    v := NewVisibleTNC()
-    //visTNC.visibleReadTnc = makeTS(0, 0)
-    ts := []vtnc{makeVtncHeap(0, 1), makeVtncHeap(0, 5), makeVtncHeap(0, 2), makeVtncHeap(0, 4), makeVtncHeap(0, 3)}
-    for _, t := range ts {
-        v.TxnStateMap[t.txnId] = "VALIDATED"
-        fmt.Println("Adding to heap: txn=", t.txnId, " Timestamp=" ,  t.lowerBoundTS)
-        heap.Push(&(v.h), t)
-    }
-    //fmt.Println("Mapping is ", v.TxnStateMap)
-    //v.h = &vtncHeap{ts[0], ts[1], ts[2]}
-    ///heap.Init(v.h)
+
+// // This example inserts several ints into an vtncHeap, checks the minimum,
+// // and removes them in order of priority.
+// func main() {
+//     TxnStateMap = make(map[uuid.UUID]string)
+//     visibleReadTS = makeTS(0, 0)
+//     ts := []vtnc{makeVtncHeap(0, 1), makeVtncHeap(0, 2), makeVtncHeap(0, 5), makeVtncHeap(0, 4)}
+//     for _, t := range ts {
+//         TxnStateMap[t.txnId] = VALIDATED
+//     }
+//     fmt.Println("Mapping is %v", TxnStateMap)
+//     h := &vtncHeap{ts[0], ts[1], ts[2]}
+//     heap.Init(h)
+//     heap.Push(h, ts[3])
     
-    fmt.Println("\nInitial ReadVTNC is ", v.visibleReadTS)
-    fmt.Println("Current top of minHeap is ", v.h[0].lowerBoundTS , "\n")
-    v.updateTxnState(ts[2].txnId, "COMMITTED", hlc.ZeroTimestamp)
-    v.updateVtnc()
-    fmt.Println("ReadVTNC is ", v.visibleReadTS , "\n")
-    v.updateTxnState(ts[0].txnId, "COMMITTED", hlc.ZeroTimestamp)
-    v.updateVtnc()
-
-    fmt.Println()
-    v.updateTxnState(ts[4].txnId, "COMMITTED", hlc.ZeroTimestamp)
-    v.updateVtnc()
-
-    fmt.Println("\nCurrent top of minHeap is ", v.h[0].lowerBoundTS)
-
-    v.updateTxnState(ts[3].txnId, "ABORTED", hlc.ZeroTimestamp)
-    fmt.Println("\nCurrent top of minHeap is ", v.h[0].lowerBoundTS)
-    fmt.Println("\nFinal ReadVTNC is ", v.visibleReadTS)
-    //fmt.Println(roachpb.PENDING == "PENDING")
-    fmt.Println()
-}
+//     updateTxnState(ts[1].txnId, COMMITTED)
+//     h.updateVtnc()
+//     fmt.Println("VTNC is ", visibleReadTS)
+//     updateTxnState(ts[0].txnId, COMMITTED)
+//     h.updateVtnc()
+//     fmt.Println("VTNC is ", visibleReadTS)
+//     //fmt.Println(roachpb.PENDING == "PENDING")
+//     fmt.Println()
+// }
 
