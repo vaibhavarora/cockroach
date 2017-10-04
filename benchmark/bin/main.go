@@ -7,7 +7,6 @@ import (
     "encoding/json" 
     "io/ioutil"
     "math/rand"
-    //"net/rpc"
     "net/url"
     "os"
     "flag"
@@ -227,7 +226,6 @@ func doWarmUpTxns(db *sql.DB) {
                     log.Println("Error: ")
                     log.Fatal(err)
                 }
-                //fmt.Printf("ID: " + strconv.Itoa(id) + " Value: " + strconv.Itoa(value))
             }
             return nil
         }); err != nil {
@@ -340,7 +338,6 @@ func performTransactions(db *sql.DB, aggr *measurement) {
                     if _, err := tx.Exec(updateSQL); err != nil {
                         return err
                     }
-                    //fmt.Println("Updated to " + strconv.Itoa(value) + " for id " + strconv.Itoa(id))
                     writeTime += time.Since(startWrite)
                     writecount += 1
                     
@@ -384,17 +381,14 @@ func runTest() {
         go performTransactions(db, &aggr)
     }
     start := time.Now()
-    //lastTime := start
-   
+    
     totalTestTime := time.Duration(0)
     for range time.NewTicker(*txnCompletionCheckInterval).C {
         /* Wait till all trasactions complete */
         if txnsComplete(){
             break
         }
-    }    
-    // now := time.Now()
-    // elapsed := now.Sub(lastTime)
+    }
     totalTestTime = time.Since(start)
 
     successes := atomic.LoadInt32(&successCount)
@@ -465,7 +459,6 @@ func main() {
 
     /* Load the configuration into struct variable conf */
     loadConfig()
-    log.Println(conf.DBUrl)
     /* Connect to DB and use it to perform all DB operations */
     db = createDBConnection()
     

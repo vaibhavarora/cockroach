@@ -55,9 +55,6 @@ def start_crdb_on_all_hosts():
 def run_local_task(cmd, time_to_sleep):
   p = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
                         shell=True, preexec_fn=os.setsid) 
-  # time.sleep(time_to_sleep)
-  # os.killpg(pro.pid, signal.SIGTERM)  # Send the signal to all the process groups
-  #subprocess.call([cmd])
   p.communicate()
 
 
@@ -78,10 +75,4 @@ def run_experiment():
         time.sleep(2)      
         run_local_task(cmd, time_to_sleep)
         
-
-
-#clean_all_hosts()
-#start_crdb_on_all_hosts()
-#time.sleep(5)
-#stop_crdb_on_all_hosts()
 run_experiment()
