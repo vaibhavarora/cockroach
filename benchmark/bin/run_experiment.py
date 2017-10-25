@@ -4,8 +4,8 @@ import os
 import signal
 import time
 
-FIRST="128.111.44.237"
-SECOND="128.111.44.163"
+FIRST="128.111.44.163"
+SECOND="128.111.44.241"
 THIRD="128.111.44.167"
 
 #only  at start
@@ -52,7 +52,7 @@ def start_crdb_on_all_hosts():
   print "Started db on all servers"
 
 
-def run_local_task(cmd, time_to_sleep):
+def run_local_task(cmd):
   p = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
                         shell=True, preexec_fn=os.setsid) 
   p.communicate()
@@ -60,19 +60,19 @@ def run_local_task(cmd, time_to_sleep):
 
 def run_experiment():
   
-  subdirs = [x[0] for x in os.walk(confpath)]
-  for eachDir in subdirs:
-    path = eachDir 
-    confFiles = [f for f in os.listdir(path) if 'conf.json.' in f]
+  # subdirs = [x[0] for x in os.walk(confpath)]
+  # for eachDir in subdirs:
+    path = "../conf" 
+    confFiles = ["contentionRatio/conf.json.contentionRatio.50", "contentionRatio/conf.json.contentionRatio.60", "contentionRatio/conf.json.contentionRatio.70",\
+                "contentionRatio/conf.json.contentionRatio.80", "contentionRatio/conf.json.contentionRatio.90"]
     for confFile in confFiles:
       cmd = run_exp_cmd + path + "/" + confFile
       print cmd
-      time_to_sleep = 1800
       for each in range(0,3):
         stop_crdb_on_all_hosts()
         time.sleep(3)
         start_crdb_on_all_hosts()
         time.sleep(2)      
-        run_local_task(cmd, time_to_sleep)
+        run_local_task(cmd)
         
 run_experiment()

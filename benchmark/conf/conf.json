@@ -1,0 +1,17 @@
+{
+    
+    "DBUrl":"postgresql://root@localhost:26257?sslmode=disable",
+    "DBname":"test",
+    "tableName":"test",
+    "numItems":100000,
+    "numTransactions":100000,
+    "concurrency":50,
+    "contentionRatio":"50:50",
+    "reportConcurrency":false,
+    "clearentries":false,
+    "warmuptnxs":10000,
+    "readWriteRatio":"50:50",
+    "readOnlyRatio":"80:20",
+    "maxWriteValue":10000,
+    "operationsPerTxn":5
+}
