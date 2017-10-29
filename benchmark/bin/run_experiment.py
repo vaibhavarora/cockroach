@@ -46,9 +46,18 @@ def stop_crdb_on_all_hosts():
 
 
 def start_crdb_on_all_hosts():
+  os.system(stop_crdb_cmd_main)
+  time.sleep(2)
   os.system(start_crdb_main+FIRST)
+  time.sleep(3)
+  execute_cmd_in_remote(SECOND, stop_crdb_cmd+SECOND)
+  time.sleep(2)
   execute_cmd_in_remote(SECOND, start_crdb_others+SECOND)
+  time.sleep(3)
+  execute_cmd_in_remote(THIRD, stop_crdb_cmd+THIRD)
+  time.sleep(2)
   execute_cmd_in_remote(THIRD, start_crdb_others+THIRD)
+  time.sleep(3)
   print "Started db on all servers"
 
 
@@ -62,17 +71,15 @@ def run_experiment():
   
   # subdirs = [x[0] for x in os.walk(confpath)]
   # for eachDir in subdirs:
-    path = "../conf" 
-    confFiles = ["contentionRatio/conf.json.contentionRatio.50", "contentionRatio/conf.json.contentionRatio.60", "contentionRatio/conf.json.contentionRatio.70",\
-                "contentionRatio/conf.json.contentionRatio.80", "contentionRatio/conf.json.contentionRatio.90"]
+    path = "../conf/readOnlyRatio" 
+    confFiles = ["conf.json.readOnlyRatio.10", "conf.json.readOnlyRatio.20", "conf.json.readOnlyRatio.30", "conf.json.readOnlyRatio.40", "conf.json.readOnlyRatio.50",\
+              "conf.json.readOnlyRatio.60", "conf.json.readOnlyRatio.70", "conf.json.readOnlyRatio.80", "conf.json.readOnlyRatio.90"]
     for confFile in confFiles:
       cmd = run_exp_cmd + path + "/" + confFile
       print cmd
       for each in range(0,3):
-        stop_crdb_on_all_hosts()
-        time.sleep(3)
         start_crdb_on_all_hosts()
-        time.sleep(2)      
+        time.sleep(5)      
         run_local_task(cmd)
         
 run_experiment()
