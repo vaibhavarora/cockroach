@@ -967,21 +967,21 @@ func executelocalValidateCommitBefore(
 	upperBound hlc.Timestamp,
 	txn enginepb.TxnMeta,
 ) (hlc.Timestamp, error) {
-	if log.V(2) {
-		log.Infof(ctx, "Ravi :VCB In executelocalValidateCommitBefore")
-	}
+	// if log.V(2) {
+	// 	log.Infof(ctx, "Ravi :VCB In executelocalValidateCommitBefore")
+	// }
 	key := keys.TransactionKey(txn.Key, *txn.ID)
 
-	if log.V(2) {
-		log.Infof(ctx, "Ravi :VCB In getting access to tnx Id %v", *txn.ID)
-	}
-	if !txncache.getAccess(key, true /*timed wait*/) {
-		return upperBound, roachpb.NewTransactionAbortedError()
-	}
-	defer txncache.releaseAccess(key)
-	if log.V(2) {
-		log.Infof(ctx, "Ravi : got access to tnx Id %v", *txn.ID)
-	}
+	// if log.V(2) {
+	// 	log.Infof(ctx, "Ravi :VCB In getting access to tnx Id %v", *txn.ID)
+	// }
+	// if !txncache.getAccess(key, true /*timed wait*/) {
+	// 	return upperBound, roachpb.NewTransactionAbortedError()
+	// }
+	// defer txncache.releaseAccess(key)
+	// if log.V(2) {
+	// 	log.Infof(ctx, "Ravi : got access to tnx Id %v", *txn.ID)
+	// }
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
@@ -994,9 +994,13 @@ func executelocalValidateCommitBefore(
 		case roachpb.PENDING:
 			if upperBound.Equal(hlc.MaxTimestamp) {
 				upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
-			} else {
-				txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
 			}
+		// case roachpb.PENDING:
+		// 	if upperBound.Equal(hlc.MaxTimestamp) {
+		// 		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+		// 	} else {
+		// 		txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+		// 	}
 		case roachpb.COMMITTED:
 			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
 		}
@@ -1087,17 +1091,17 @@ func executelocalValidateCommitAfter(
 		log.Infof(ctx, "Ravi : In executelocalValidateCommitAfter")
 	}
 	key := keys.TransactionKey(txn.Key, *txn.ID)
-	if log.V(2) {
-		log.Infof(ctx, "Ravi : VCA In getting access to tnx Id %v", *txn.ID)
-	}
-	if !txncache.getAccess(key, true /*timed wait*/) {
-		return lowerBound, roachpb.NewTransactionAbortedError()
-	}
-	defer txncache.releaseAccess(key)
+	// if log.V(2) {
+	// 	log.Infof(ctx, "Ravi : VCA In getting access to tnx Id %v", *txn.ID)
+	// }
+	// if !txncache.getAccess(key, true /*timed wait*/) {
+	// 	return lowerBound, roachpb.NewTransactionAbortedError()
+	// }
+	// defer txncache.releaseAccess(key)
 
-	if log.V(2) {
-		log.Infof(ctx, "Ravi :VCA  got access to tnx Id %v", *txn.ID)
-	}
+	// if log.V(2) {
+	// 	log.Infof(ctx, "Ravi :VCA  got access to tnx Id %v", *txn.ID)
+	// }
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
 		ctx, batch, key, hlc.ZeroTimestamp, true, nil, &txnRecord,
@@ -1111,11 +1115,15 @@ func executelocalValidateCommitAfter(
 	switch txnRecord.Status {
 	case roachpb.ABORTED:
 	case roachpb.PENDING:
-		if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
-			txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
-		} else {
+		if !txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
 			lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 		}
+	// case roachpb.PENDING:
+	// 	if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
+	// 		txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
+	// 	} else {
+	// 		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+	// 	}
 	case roachpb.COMMITTED:
 		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 	}
