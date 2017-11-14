@@ -268,19 +268,23 @@ func EvalDyTSValidateCommitAfter(
 	switch txnRecord.Status {
 	case roachpb.ABORTED:
 	case roachpb.PENDING:
-		if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
-			txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
-		} else {
+		if !txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
 			lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 		}
+	// case roachpb.PENDING:
+	// 	if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
+	// 		txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
+	// 	} else {
+	// 		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
+	// 	}
 	case roachpb.COMMITTED:
 		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 	}
 
 	// Save the updated Transaction record
-	if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
-		return EvalResult{}, err
-	}
+	// if err := engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
+	// 	return EvalResult{}, err
+	// }
 
 	reply := resp.(*roachpb.ValidateCommitAfterResponse)
 	reply.LowerBound = &lowerBound
@@ -329,9 +333,13 @@ func EvalDyTSValidateCommitBefore(
 	case roachpb.PENDING:
 		if upperBound.Equal(hlc.MaxTimestamp) {
 			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
-		} else {
-			txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
 		}
+	// case roachpb.PENDING:
+	// 	if upperBound.Equal(hlc.MaxTimestamp) {
+	// 		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
+	// 	} else {
+	// 		txnRecord.DynamicTimestampLowerBound.Forward(upperBound)
+	// 	}
 	case roachpb.COMMITTED:
 		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
 	}
@@ -340,8 +348,8 @@ func EvalDyTSValidateCommitBefore(
 	reply.UpperBound = &upperBound
 
 	// Save the updated Transaction record
-	return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
-
+	//return EvalResult{}, engine.MVCCPutProto(ctx, batch, cArgs.Stats, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+	return EvalResult{}, nil
 }
 
 func EvalDyTSGcWriteSoftLock(
