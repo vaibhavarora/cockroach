@@ -1006,9 +1006,9 @@ func executelocalValidateCommitBefore(
 		}
 
 		// Save the updated Transaction record
-		if err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
-			return upperBound, err
-		}
+		// if err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord); err != nil {
+		// 	return upperBound, err
+		// }
 	}
 	return upperBound, nil
 }
@@ -1129,9 +1129,9 @@ func executelocalValidateCommitAfter(
 	}
 
 	// Save the updated Transaction record
-	err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
+	//err := engine.MVCCPutProto(ctx, batch, nil, key, hlc.ZeroTimestamp, nil /* txn */, &txnRecord)
 
-	return lowerBound, err
+	return lowerBound, nil
 }
 
 func manageCommitAfterQueue(
