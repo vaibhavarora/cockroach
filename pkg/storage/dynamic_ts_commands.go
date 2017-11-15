@@ -975,10 +975,10 @@ func executelocalValidateCommitBefore(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :VCB In getting access to tnx Id %v", *txn.ID)
 	}
-	if !txncache.getAccess(key, true /*timed wait*/) {
-		return upperBound, roachpb.NewTransactionAbortedError()
-	}
-	defer txncache.releaseAccess(key)
+	// if !txncache.getAccess(key, true /*timed wait*/) {
+	// 	return upperBound, roachpb.NewTransactionAbortedError()
+	// }
+	// defer txncache.releaseAccess(key)
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : got access to tnx Id %v", *txn.ID)
 	}
@@ -993,9 +993,7 @@ func executelocalValidateCommitBefore(
 		switch txnRecord.Status {
 		case roachpb.ABORTED:
 		case roachpb.PENDING:
-			if upperBound.Equal(hlc.MaxTimestamp) {
-				upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
-			}
+			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
 			if log.V(2) {
 				log.Infof(ctx, "Ravi :Other txn lowerbound is %v", txnRecord.DynamicTimestampLowerBound)
 			}
@@ -1098,10 +1096,10 @@ func executelocalValidateCommitAfter(
 	if log.V(2) {
 		log.Infof(ctx, "Ravi : VCA In getting access to tnx Id %v", *txn.ID)
 	}
-	if !txncache.getAccess(key, true /*timed wait*/) {
-		return lowerBound, roachpb.NewTransactionAbortedError()
-	}
-	defer txncache.releaseAccess(key)
+	// if !txncache.getAccess(key, true /*timed wait*/) {
+	// 	return lowerBound, roachpb.NewTransactionAbortedError()
+	// }
+	// defer txncache.releaseAccess(key)
 
 	if log.V(2) {
 		log.Infof(ctx, "Ravi :VCA  got access to tnx Id %v", *txn.ID)
@@ -1119,9 +1117,8 @@ func executelocalValidateCommitAfter(
 	switch txnRecord.Status {
 	case roachpb.ABORTED:
 	case roachpb.PENDING:
-		if !txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
-			lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
-		}
+		//if !txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
+		lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
 		if log.V(2) {
 			log.Infof(ctx, "Ravi :Other txn upperbound is %v", txnRecord.DynamicTimestampUpperBound)
 		}

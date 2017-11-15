@@ -244,10 +244,10 @@ func EvalDyTSValidateCommitAfter(
 
 	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
 
-	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
-		return EvalResult{}, roachpb.NewTransactionAbortedError()
-	}
-	defer cArgs.Repl.txnlockcache.releaseAccess(key)
+	// if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
+	// 	return EvalResult{}, roachpb.NewTransactionAbortedError()
+	// }
+	// defer cArgs.Repl.txnlockcache.releaseAccess(key)
 
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
@@ -268,9 +268,9 @@ func EvalDyTSValidateCommitAfter(
 	switch txnRecord.Status {
 	case roachpb.ABORTED:
 	case roachpb.PENDING:
-		if !txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
+		//if !txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
 			lowerBound.Forward(txnRecord.DynamicTimestampUpperBound)
-		}
+		//}
 	// case roachpb.PENDING:
 	// 	if txnRecord.DynamicTimestampUpperBound.Equal(hlc.MaxTimestamp) {
 	// 		txnRecord.DynamicTimestampUpperBound.Backward(lowerBound)
@@ -306,10 +306,10 @@ func EvalDyTSValidateCommitBefore(
 
 	key := keys.TransactionKey(args.Tmeta.Key, *args.Tmeta.ID)
 
-	if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
-		return EvalResult{}, roachpb.NewTransactionAbortedError()
-	}
-	defer cArgs.Repl.txnlockcache.releaseAccess(key)
+	// if !cArgs.Repl.txnlockcache.getAccess(key, true /*timed wait*/) {
+	// 	return EvalResult{}, roachpb.NewTransactionAbortedError()
+	// }
+	// defer cArgs.Repl.txnlockcache.releaseAccess(key)
 
 	var txnRecord roachpb.Transaction
 	if ok, err := engine.MVCCGetProto(
@@ -331,9 +331,9 @@ func EvalDyTSValidateCommitBefore(
 	switch txnRecord.Status {
 	case roachpb.ABORTED:
 	case roachpb.PENDING:
-		if upperBound.Equal(hlc.MaxTimestamp) {
+		//if upperBound.Equal(hlc.MaxTimestamp) {
 			upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
-		}
+		//}
 	// case roachpb.PENDING:
 	// 	if upperBound.Equal(hlc.MaxTimestamp) {
 	// 		upperBound.Backward(txnRecord.DynamicTimestampLowerBound)
