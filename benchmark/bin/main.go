@@ -276,6 +276,8 @@ func performTransactions(db *sql.DB, aggr *measurement) {
         readOnly := false
         if random(1, 100) <= readOnlyRatio {
             readOnly = true
+            atomic.AddInt32(&successCount, 1)
+            continue
         } 
 
         if err := crdb.ExecuteTx(db, func(tx *sql.Tx) error {

@@ -71,14 +71,14 @@ def run_experiment():
   
   # subdirs = [x[0] for x in os.walk(confpath)]
   # for eachDir in subdirs:
-    path = "../conf/readOnlyRatio" 
-    confFiles = ["conf.json.readOnlyRatio.10", "conf.json.readOnlyRatio.20", "conf.json.readOnlyRatio.30", "conf.json.readOnlyRatio.40", "conf.json.readOnlyRatio.50",\
-              "conf.json.readOnlyRatio.60", "conf.json.readOnlyRatio.70", "conf.json.readOnlyRatio.80", "conf.json.readOnlyRatio.90"]
+    path = "../conf/contentionRatio" 
+    confFiles = [ "conf.json.contentionRatio.50",\
+              "conf.json.contentionRatio.60", "conf.json.contentionRatio.70", "conf.json.contentionRatio.80", "conf.json.contentionRatio.90"]
     for confFile in confFiles:
       cmd = run_exp_cmd + path + "/" + confFile
       print cmd
       for each in range(0,3):
-        start_crdb_on_all_hosts()
+        #start_crdb_on_all_hosts()
         time.sleep(5)      
         run_local_task(cmd)
         
