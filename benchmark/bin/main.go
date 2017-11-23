@@ -276,6 +276,8 @@ func performTransactions(db *sql.DB, aggr *measurement) {
         readOnly := false
         if random(1, 100) <= readOnlyRatio {
             readOnly = true
+            atomic.AddInt32(&successCount, 1)
+            continue
         } 
 
         if err := crdb.ExecuteTx(db, func(tx *sql.Tx) error {
@@ -289,12 +291,12 @@ func performTransactions(db *sql.DB, aggr *measurement) {
 
             for i := 0; i < totalOps; i++ {
                 /* Based on random choice, decide if the operation should be read or write */
-                readOp := false
+                // readOp := false
 
-                randNum := random(1, 100)
-                if randNum <= readRatio {
-                    readOp = true
-                }
+                // randNum := random(1, 100)
+                // if randNum <= readRatio {
+                //     readOp = true
+                // }
 
                 /* Based on the contention ratio, choose what key to use for this operation.
                 If contention ratio is 90:10 ==> 90% of ops work on 10% of data. */
@@ -307,7 +309,7 @@ func performTransactions(db *sql.DB, aggr *measurement) {
                     id = random(dataItems+1, conf.NumItems)
                 }
 
-                if (readOnly || readOp) {
+                if (readOnly || i < 3) {
                     startRead := time.Now()
                     condition :=  "id=" + strconv.Itoa(id)
                     selectSQL := constructSelectStatement("id, value ", condition)
