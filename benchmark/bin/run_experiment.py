@@ -71,9 +71,9 @@ def run_experiment():
   
   # subdirs = [x[0] for x in os.walk(confpath)]
   # for eachDir in subdirs:
-    path = "../conf/contentionRatio" 
-    confFiles = [ "conf.json.contentionRatio.50",\
-              "conf.json.contentionRatio.60", "conf.json.contentionRatio.70", "conf.json.contentionRatio.80", "conf.json.contentionRatio.90"]
+    path = "../conf/concurrency" 
+    confFiles = [ "conf.json.concurrency.5",\
+              "conf.json.concurrency.20", "conf.json.concurrency.40", "conf.json.concurrency.60", "conf.json.concurrency.80", "conf.json.concurrency.100"]
     for confFile in confFiles:
       cmd = run_exp_cmd + path + "/" + confFile
       print cmd
