@@ -6,7 +6,7 @@
     "numItems":100000,
     "numTransactions":100000,
     "concurrency":50,
-    "contentionRatio":"50:50",
+    "contentionRatio":"99:01",
     "reportConcurrency":false,
     "clearentries":false,
     "warmuptnxs":10000,

@@ -4,7 +4,8 @@ import os
 import signal
 import time
 
-FIRST="128.111.44.163"
+#FIRST="128.111.44.163"
+FIRST="128.111.44.238"
 SECOND="128.111.44.241"
 THIRD="128.111.44.167"
 
@@ -71,9 +72,12 @@ def run_experiment():
   
   # subdirs = [x[0] for x in os.walk(confpath)]
   # for eachDir in subdirs:
-    path = "../conf/concurrency" 
-    confFiles = [ "conf.json.concurrency.5",\
-              "conf.json.concurrency.20", "conf.json.concurrency.40", "conf.json.concurrency.60", "conf.json.concurrency.80", "conf.json.concurrency.100"]
+    # path = "../conf/concurrency" 
+    # confFiles = [ "conf.json.concurrency.5",\
+    #           "conf.json.concurrency.20", "conf.json.concurrency.40", "conf.json.concurrency.60", "conf.json.concurrency.80", "conf.json.concurrency.100"]
+    path = "../conf/readOnlyRatio" 
+    confFiles = [ 
+              "conf.json.readOnlyRatio.20", "conf.json.readOnlyRatio.40", "conf.json.readOnlyRatio.60", "conf.json.readOnlyRatio.80", "conf.json.readOnlyRatio.100"]
     for confFile in confFiles:
       cmd = run_exp_cmd + path + "/" + confFile
       print cmd
